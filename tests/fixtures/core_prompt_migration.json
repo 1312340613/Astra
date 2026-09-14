@@ -1,0 +1,10 @@
+{
+  "source_commit": "ab72bfd4d1df1baabcc70897d11318215d369bd4",
+  "core_sha256": "22b2568b504d7fcce848155913f90c59b89ad86fcd1984859accaefff14060bd",
+  "profile_sha256": {
+    "lyra": "43952b940dbd63b05d8f57cc7090f4dc97a3df710ccae4e0338766ad5c2de455"
+  },
+  "learning_contract_update": "2026-09-13: direct skill saving and manual review; persona text unchanged",
+  "history_retrieval_update": "2026-09-13: model-initiated local history lookup; persona text unchanged",
+  "persona_update": "2026-09-14: public Lyra definition; retired preset bodies are no longer bundled"
+}

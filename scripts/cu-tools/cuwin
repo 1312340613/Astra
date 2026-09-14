@@ -1,0 +1,17 @@
+#!/bin/bash
+# cuwin — 查询 app 窗口的逻辑坐标 bounds (替代手动截图算偏移)
+# 用法: cuwin <app名或进程名>   如: cuwin 微信 / cuwin Finder
+# 输出: "name<TAB>x,y,w,h" (逻辑坐标, 与 cuclick/cushot 一比一)
+set -euo pipefail
+
+app=$1
+osascript -e "
+tell application \"System Events\"
+  set frontmost of process \"$app\" to true
+  delay 0.3
+  set p to first process whose name is \"$app\"
+  set {x, y} to position of front window of p
+  set {w, h} to size of front window of p
+  return \"$app\" & tab & (x as text) & \",\" & (y as text) & \",\" & (w as text) & \",\" & (h as text)
+end tell
+" 2>&1

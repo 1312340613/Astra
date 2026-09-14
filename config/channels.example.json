@@ -1,0 +1,22 @@
+{
+  "qq": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 2280,
+    "access_token_env": "ASTRA_QQ_ACCESS_TOKEN",
+    "private_enabled": true,
+    "group_enabled": true,
+    "group_require_mention": true,
+    "wake_prefixes": ["/"],
+    "allow_users": [],
+    "allow_groups": [],
+    "max_input_chars": 8000,
+    "max_output_chars": 1800,
+    "max_images": 4,
+    "max_image_bytes": 10485760,
+    "send_files_enabled": false,
+    "file_allow_users": [],
+    "send_file_roots": ["outputs"],
+    "max_send_file_bytes": 52428800
+  }
+}

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Astra frame fill acceptance</title>
+<style>body{font:16px system-ui;max-width:1000px;margin:30px auto}pre{white-space:pre-wrap}section{margin:16px 0}#tools{height:60px;overflow:auto}iframe{height:110px;width:90%}</style>
+<h1>Astra frame fill acceptance</h1>
+<p>This local fixture uses four TinyMCE iframe editors. Start, then leave this tab and keep Edge in the background. It waits for hidden + unfocused before testing.</p>
+<button id="start" disabled>Run background acceptance</button>
+<div id="tools"></div><div id="editors"></div>
+<p id="save-state">Not saved</p><pre id="result">Loading TinyMCE…</pre>
+<script src="/vendor/tinymce/tinymce.min.js"></script>
+<script src="/browser-control-extension/page.js"></script>
+<script>
+const tools=document.querySelector('#tools'), container=document.querySelector('#editors');
+for(let i=0;i<180;i++){const b=document.createElement('button');b.textContent='Toolbar '+i;tools.append(b);}
+for(let i=0;i<4;i++){const section=document.createElement('section');section.innerHTML='<h2>Question '+(i+1)+'</h2><textarea id="answer'+i+'"></textarea>';container.append(section);}
+const saved={}, errors=[], observations=[], rounds=20;
+function save(editor){
+  // Application-side behavior, independent of the automation helper: model ->
+  // hidden textarea -> save-state confirmation, as in a rich form's autosave.
+  editor.save();
+  const text=editor.getContent({format:'text'}).replace(/\r\n?/g,'\n');
+  saved[editor.id]=text;
+  document.querySelector('#save-state').textContent='Saved '+JSON.stringify(saved);
+}
+let editors=[];
+(async()=>{
+ editors=await tinymce.init({selector:'#editors textarea',height:190,menubar:false,promotion:false,branding:false,
+   setup:editor=>editor.on('input change blur',()=>save(editor))});
+ for(const e of editors){e.getBody().setAttribute('aria-label','Answer');save(e);}
+ document.querySelector('#result').textContent='Ready: 4 TinyMCE '+tinymce.majorVersion+'.'+tinymce.minorVersion+' editors. Waiting for Run.';
+ document.querySelector('#start').disabled=false;
+})();
+document.querySelector('#start').onclick=async()=>{
+ document.querySelector('#start').disabled=true;
+ document.querySelector('#result').textContent='Waiting until this tab is hidden and unfocused…';
+ while(document.visibilityState!=='hidden' || document.hasFocus()) {
+  document.querySelector('#result').textContent='Waiting: visibility='+document.visibilityState+', focused='+document.hasFocus();
+  fetch('/progress',{method:'POST',body:JSON.stringify({phase:'waiting',visibility:document.visibilityState,focus:document.hasFocus()})});
+  await new Promise(r=>setTimeout(r,1000));
+ }
+ document.querySelector('#result').textContent='Running in background…';
+ const page=globalThis.__astraBrowserPage, expected=Array(4).fill('');
+ fetch('/progress',{method:'POST',body:JSON.stringify({phase:'running'})});
+ try {
+  for(let round=0;round<rounds;round++) for(let i=0;i<4;i++) {
+   const s=await page('snapshot',{scope:'editable'});
+   const f=s.frames.find(f=>f.id==='answer'+i+'_ifr');
+   const el=s.elements.find(e=>e.frameRef===f?.frameRef && e.editable);
+   if(!el)throw Error('Missing editor '+i);
+   expected[i]='第 '+round+' 轮 / Question '+(i+1)+'\nUnique answer '+i;
+   const r=await page('fill',{ref:el.ref,text:expected[i]});
+   if(!r.verified)throw Error('Fill '+i+': '+JSON.stringify(r));
+   const refreshed=r.after.elements.find(e=>e.frameRef===f.frameRef && e.editable);
+   const read=await page('read',{ref:refreshed.ref});
+   if(read.value!==expected[i])throw Error('Readback mismatch '+i);
+   for(let j=0;j<4;j++) {
+    const actual=editors[j].getContent({format:'text'}).replace(/\r\n?/g,'\n');
+    if(actual!==expected[j] || saved['answer'+j]!==expected[j])throw Error('Model/save mismatch or cross-field overwrite '+j+': '+JSON.stringify({actual,saved:saved['answer'+j],expected:expected[j]}));
+    if(editors[j].getElement().value!==editors[j].getContent())throw Error('Hidden textarea not synchronized '+j);
+   }
+   const visibility={round,field:i,hidden:document.visibilityState==='hidden',unfocused:!document.hasFocus()};
+   observations.push(visibility);
+   document.querySelector('#result').textContent='Verified '+observations.length+' / 80 background fills';
+   fetch('/progress',{method:'POST',body:JSON.stringify({phase:'filling',count:observations.length,...visibility})});
+   if(!visibility.hidden || !visibility.unfocused)throw Error('Tab acquired foreground focus');
+  }
+ } catch(e){errors.push(e.message);}
+ const report={pass:!errors.length,rounds,verifiedFills:observations.length,engine:'TinyMCE '+tinymce.majorVersion+'.'+tinymce.minorVersion,
+   evidence:'real renderer shared-helper test; installed native messaging is a separate acceptance',errors,observations,saved};
+ document.querySelector('#result').textContent=JSON.stringify(report,null,2);
+ document.title=(report.pass?'PASS':'FAIL')+' — Astra frame fill';
+ fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)});
+};
+</script></html>

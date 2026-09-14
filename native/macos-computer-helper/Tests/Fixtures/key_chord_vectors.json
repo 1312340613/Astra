@@ -1,0 +1,19 @@
+{
+  "valid": [
+    "return",
+    "command+a",
+    "command+shift+s",
+    "control+option+delete"
+  ],
+  "invalid": [
+    "",
+    "Command+a",
+    "shift+command+s",
+    "command+command+a",
+    "command",
+    "command+unknown",
+    "command+v",
+    "+a",
+    "command+"
+  ]
+}

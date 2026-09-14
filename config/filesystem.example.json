@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "roots": [
+    {
+      "path": "shared-files",
+      "mode": "ro"
+    }
+  ]
+}

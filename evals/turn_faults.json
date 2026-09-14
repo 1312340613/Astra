@@ -1,0 +1,465 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "ordered-write-read",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "a",
+                  "name": "fixture_read",
+                  "arguments": "{}"
+                },
+                {
+                  "index": 1,
+                  "id": "b",
+                  "name": "fixture_write",
+                  "arguments": "{\"value\": \"after\"}"
+                },
+                {
+                  "index": 2,
+                  "id": "c",
+                  "name": "fixture_read",
+                  "arguments": "{}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "content": "REPLAY VERIFIED",
+              "finish": "stop"
+            }
+          ],
+          "expect_tool_text": "after"
+        }
+      ],
+      "expected": {
+        "requests": 2,
+        "writes": [
+          "after"
+        ],
+        "reads": [
+          "before",
+          "after"
+        ]
+      }
+    },
+    {
+      "id": "stream-eof-no-dispatch",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "a",
+                  "name": "fixture_write",
+                  "arguments": "{\"value\": \"bad\"}"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "requests": 1,
+        "errors": [
+          "stream_closed"
+        ]
+      }
+    },
+    {
+      "id": "reasoning-only-recovery",
+      "responses": [
+        {
+          "frames": [
+            {
+              "reasoning": "draft only",
+              "finish": "stop"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "a",
+                  "name": "fixture_write",
+                  "arguments": "{\"value\": \"once\"}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "content": "REPLAY VERIFIED",
+              "finish": "stop"
+            }
+          ],
+          "expect_tool_text": "once"
+        }
+      ],
+      "expected": {
+        "requests": 3,
+        "writes": [
+          "once"
+        ],
+        "recoverable_errors": [
+          "reasoning_only_response"
+        ]
+      }
+    },
+    {
+      "id": "invalid-json-no-dispatch",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "a",
+                  "name": "fixture_write",
+                  "arguments": "{\"value\":"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "content": "Malformed call was not executed.",
+              "finish": "stop"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "requests": 2,
+        "recoverable_errors": [
+          "invalid_arguments"
+        ]
+      }
+    },
+    {
+      "id": "truncated-tool-recovery",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "bad",
+                  "name": "fixture_write",
+                  "arguments": "{\"value\":"
+                }
+              ],
+              "finish": "length"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "fixed",
+                  "name": "fixture_write",
+                  "arguments": "{\"value\":\"once\"}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "content": "REPLAY VERIFIED",
+              "finish": "stop"
+            }
+          ],
+          "expect_tool_text": "once"
+        }
+      ],
+      "expected": {
+        "requests": 3,
+        "writes": [
+          "once"
+        ],
+        "recoverable_errors": [
+          "tool_call_truncated"
+        ]
+      }
+    },
+    {
+      "id": "idle-after-progress",
+      "responses": [
+        {
+          "frames": [
+            {
+              "reasoning": "progress before stall"
+            },
+            {
+              "kind": "stall"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "requests": 1,
+        "errors": [
+          "idle_timeout"
+        ]
+      }
+    },
+    {
+      "id": "budget-after-write",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "a",
+                  "name": "fixture_write",
+                  "arguments": "{\"value\": \"kept\"}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "reasoning": "progress before stall"
+            },
+            {
+              "kind": "stall"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "requests": 2,
+        "writes": [
+          "kept"
+        ],
+        "errors": [
+          "turn_budget_exhausted"
+        ],
+        "resume_kind": "time_budget"
+      },
+      "budget_seconds": 0.1
+    },
+    {
+      "id": "budget-during-tool",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "a",
+                  "name": "fixture_wait",
+                  "arguments": "{\"value\": \"uncertain\"}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "requests": 1,
+        "writes": [
+          "uncertain"
+        ],
+        "unknown_tools": 1,
+        "errors": [
+          "turn_budget_exhausted"
+        ],
+        "resume_kind": "time_budget"
+      },
+      "budget_seconds": 0.1
+    },
+    {
+      "id": "cancel-during-tool",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "a",
+                  "name": "fixture_wait",
+                  "arguments": "{\"value\": \"uncertain\"}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "requests": 1,
+        "writes": [
+          "uncertain"
+        ],
+        "unknown_tools": 1,
+        "errors": [
+          "cancelled"
+        ]
+      },
+      "cancel_on_tool": true
+    },
+    {
+      "id": "browser-stale-and-repeat",
+      "responses": [
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "open",
+                  "name": "browser_open",
+                  "arguments": "{\"url\": \"${FORM_URL}\", \"extract\": false}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "snapshot",
+                  "name": "browser_snapshot",
+                  "arguments": "{\"refresh\": true, \"scope\": \"editable\"}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "stale",
+                  "name": "browser_check",
+                  "arguments": "{\"selector\": \"ref:stale:e1\", \"checked\": true}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "fresh",
+                  "name": "browser_snapshot",
+                  "arguments": "{\"refresh\": true, \"scope\": \"editable\"}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ],
+          "expect_tool_text": "stale_snapshot"
+        },
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "set",
+                  "name": "browser_check",
+                  "arguments": "{\"checks\": [{\"selector\": \"#q1true\", \"checked\": true}, {\"selector\": \"#q2true\", \"checked\": true}, {\"selector\": \"#q3true\", \"checked\": true}, {\"selector\": \"#q4true\", \"checked\": true}, {\"selector\": \"#q5true\", \"checked\": true}, {\"selector\": \"#q6true\", \"checked\": true}, {\"selector\": \"#q7true\", \"checked\": true}, {\"selector\": \"#q8true\", \"checked\": true}, {\"selector\": \"#q9true\", \"checked\": true}, {\"selector\": \"#q10true\", \"checked\": true}]}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "calls": [
+                {
+                  "index": 0,
+                  "id": "repeat",
+                  "name": "browser_check",
+                  "arguments": "{\"checks\": [{\"selector\": \"#q1true\", \"checked\": true}, {\"selector\": \"#q2true\", \"checked\": true}, {\"selector\": \"#q3true\", \"checked\": true}, {\"selector\": \"#q4true\", \"checked\": true}, {\"selector\": \"#q5true\", \"checked\": true}, {\"selector\": \"#q6true\", \"checked\": true}, {\"selector\": \"#q7true\", \"checked\": true}, {\"selector\": \"#q8true\", \"checked\": true}, {\"selector\": \"#q9true\", \"checked\": true}, {\"selector\": \"#q10true\", \"checked\": true}]}"
+                }
+              ],
+              "finish": "tool_calls"
+            }
+          ]
+        },
+        {
+          "frames": [
+            {
+              "content": "REPLAY VERIFIED",
+              "finish": "stop"
+            }
+          ],
+          "expect_tool_text": "\"clickCount\": 0"
+        }
+      ],
+      "expected": {
+        "requests": 7,
+        "selected": [
+          "q1true",
+          "q2true",
+          "q3true",
+          "q4true",
+          "q5true",
+          "q6true",
+          "q7true",
+          "q8true",
+          "q9true",
+          "q10true"
+        ],
+        "selected_clicks": 10,
+        "submits": 0,
+        "tool_errors": {
+          "stale": "browser_stale_snapshot"
+        }
+      },
+      "browser": true
+    }
+  ]
+}

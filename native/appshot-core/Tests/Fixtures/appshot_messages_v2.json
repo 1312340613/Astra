@@ -1,0 +1,131 @@
+[
+  {
+    "type": "hello",
+    "version": 2,
+    "platform": "windows",
+    "session_id": "session",
+    "pid": 4321,
+    "process_start": "134330000000000000",
+    "user_sid": "S-1-5-21-100-200-300-1001",
+    "client_nonce": "nonce"
+  },
+  {
+    "type": "hello_ack",
+    "version": 2,
+    "platform": "windows",
+    "instance_id": "broker",
+    "broker_nonce": "nonce",
+    "session_id": "session"
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "client_state",
+    "activity_ns": "1000000000",
+    "appshot_count": 0,
+    "can_accept": true
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "attach_offer",
+    "manifest_path": "C:/Users/Test/AppData/Local/Astra/Appshot/appshot-1234567890abcdef1234567890abcdef.json"
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "attach_ack",
+    "accepted": true,
+    "reason": ""
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "attach_commit",
+    "manifest_path": "C:/Users/Test/AppData/Local/Astra/Appshot/appshot-1234567890abcdef1234567890abcdef.json"
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "attach_revoke",
+    "reason": "cancelled"
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "release"
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "release_ack",
+    "released": true
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "command",
+    "name": "enable",
+    "argument": ""
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "command_result",
+    "ok": true,
+    "code": "enabled",
+    "message": ""
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "client_state_ack",
+    "appshot_count": 1,
+    "can_accept": true
+  },
+  {
+    "version": 2,
+    "platform": "windows",
+    "request_id": "request",
+    "broker_id": "broker",
+    "session_id": "session",
+    "type": "status",
+    "enabled": true,
+    "chord": "Ctrl+Shift+Z",
+    "registration": "registered",
+    "connected_tuis": 1,
+    "permission": "ready",
+    "appshot_count": 1,
+    "can_accept": true
+  }
+]

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Astra browser control acceptance</title>
+<style>body{font:18px system-ui;max-width:850px;margin:50px auto}button,input{font:inherit;margin:8px}pre{white-space:pre-wrap;padding:20px;background:#eee}</style>
+<h1>Astra browser control acceptance</h1>
+<p>This fixture checks the shared page helper in a real Chromium renderer.</p>
+<label>Display name <input id="name" placeholder="Name"></label>
+<input type="password" value="fixture-password-must-stay-private">
+<button id="save">Save</button><button id="disabled" disabled>Disabled</button>
+<p id="message">Not saved</p><pre id="results">Running…</pre>
+<script src="../../browser-control-extension/page.js"></script>
+<script>
+document.querySelector('#save').addEventListener('click',()=>{document.querySelector('#message').textContent='Saved '+document.querySelector('#name').value;});
+(async()=>{
+ const rows=[]; const check=(ok,name)=>{rows.push((ok?'PASS ':'FAIL ')+name);if(!ok)throw Error(name);};
+ const page=globalThis.__astraBrowserPage;
+ try {
+  let s=await page('snapshot',{});
+  check(!JSON.stringify(s).includes('fixture-password'),'Password value omitted');
+  const textbox=s.elements.find(e=>e.role==='textbox'&&e.name==='Display name');
+  check(!!textbox,'Semantic textbox label');
+  let r=await page('type',{ref:textbox.ref,text:'Lyra'});
+  check(r.status==='observed'&&document.querySelector('#name').value==='Lyra','Input setter and observed result');
+  const save=r.after.elements.find(e=>e.name==='Save');
+  r=await page('click',{ref:save.ref});
+  check(r.status==='observed'&&r.after.text.includes('Saved Lyra'),'Click and page postcondition');
+  check((await page('click',{ref:save.ref})).status==='stale_snapshot','Old reference rejected');
+  check((await page('click',{selector:'#disabled'})).status==='error','Disabled target rejected');
+  check((await page('probe',{text:'Saved Lyra'})).matched===true,'Wait predicate matches');
+  check((await page('probe',{text:'Never appears'})).matched===false,'Missing wait predicate rejected');
+  check((await page('click',{selector:'#save',expectedOrigin:'https://unrelated.example'})).status==='error','Origin mismatch rejected');
+ }catch(e){rows.push('ERROR '+e.message);}
+ document.querySelector('#results').textContent=rows.join('\n');
+ document.title=rows.some(r=>r.startsWith('FAIL')||r.startsWith('ERROR'))?'FAIL — Astra browser control':'PASS — Astra browser control';
+})();
+</script></html>

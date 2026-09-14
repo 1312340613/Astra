@@ -1,0 +1,58 @@
+#!/bin/bash
+# cuwait — 轮询 OCR 等待文本出现/消失 (可脚本断言的验证原语, v2 新增)
+# 用途: 自动化链路里替代"截图+人眼读图"验证, 用 exit code 暴露成败。
+# 用法: cuwait <text> [-x X] [-y Y] [-w W] [-h H] [--absent] [--timeout N] [--interval I]
+#   默认: 等待 <text> 出现  -> exit 0; 超时 -> exit 1
+#   --absent: 等待 <text> 消失 -> exit 0; 超时 -> exit 1
+#   匹配: 忽略空格/换行 (OCR 会把中文拆词, 如"文件传输助手"被拆成"文件 传输 助手")
+# 依赖: cuocr (同目录)
+set -euo pipefail
+
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CUOCR="${CUOCR:-$BIN/cuocr}"
+
+text=""
+x=0; y=0; w=1512; h=982
+absent=0; timeout=15; interval=0.5
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -x) x=$2; shift 2 ;;
+    -y) y=$2; shift 2 ;;
+    -w) w=$2; shift 2 ;;
+    -h) h=$2; shift 2 ;;
+    --absent) absent=1; shift ;;
+    --timeout) timeout=$2; shift 2 ;;
+    --interval) interval=$2; shift 2 ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) text="$text $1"; shift ;;
+  esac
+done
+text="${text# }"
+[ -z "$text" ] && { echo "usage: cuwait <text> [-x ..] [-y ..] [-w ..] [-h ..] [--absent] [--timeout N]" >&2; exit 2; }
+
+# 忽略空格: 文本与 OCR 输出均去空格后子串匹配
+needle="$(printf '%s' "$text" | tr -d '[:space:]')"
+
+t0=$(date +%s)
+while true; do
+  out="$("$CUOCR" "$x" "$y" "$w" "$h" 2>/dev/null | awk -F'\t' '{printf "%s", $1}')"
+  out="$(printf '%s' "$out" | tr -d '[:space:]')"
+  if [ $absent -eq 1 ]; then
+    if [[ "$out" != *"$needle"* ]]; then
+      echo "ok absent: '$text'"
+      exit 0
+    fi
+  else
+    if [[ "$out" == *"$needle"* ]]; then
+      echo "ok found: '$text'"
+      exit 0
+    fi
+  fi
+  now=$(date +%s)
+  if [ $((now - t0)) -ge "$timeout" ]; then
+    echo "timed out after ${timeout}s: '$text' (absent=$absent)" >&2
+    exit 1
+  fi
+  sleep "$interval"
+done

@@ -1,0 +1,29 @@
+{
+  "name": "agent-system-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.tsx --bundle --platform=node --format=esm --outfile=dist/tui.mjs",
+    "prebuild": "tsc --noEmit",
+    "start": "tsx src/index.tsx",
+    "dev": "tsx src/index.tsx",
+    "preview:layout": "tsx src/layout-preview.tsx",
+    "preview:lyra": "tsx src/lyra-preview.tsx"
+  },
+  "dependencies": {
+    "ink": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.0",
+    "react-devtools-core": "^4.28.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "@types/react": "^18.3.0",
+    "esbuild": "^0.25.0",
+    "string-width": "^7.2.0",
+    "strip-ansi": "^7.2.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}

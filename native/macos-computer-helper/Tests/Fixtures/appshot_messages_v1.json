@@ -1,0 +1,117 @@
+[
+  {
+    "type": "hello",
+    "version": 1,
+    "session_id": "session-fixture",
+    "pid": 4100,
+    "process_start": "9001",
+    "client_nonce": "nonce-fixture"
+  },
+  {
+    "type": "hello_ack",
+    "version": 1,
+    "instance_id": "broker-fixture",
+    "broker_nonce": "nonce-fixture",
+    "session_id": "session-fixture"
+  },
+  {
+    "type": "client_state",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "activity_ns": "0",
+    "appshot_count": 0,
+    "can_accept": true
+  },
+  {
+    "type": "attach_offer",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "manifest_path": "/tmp/appshot-fixture/manifest.json"
+  },
+  {
+    "type": "attach_ack",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "accepted": true,
+    "reason": ""
+  },
+  {
+    "type": "attach_commit",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "manifest_path": "/tmp/appshot-fixture/manifest.json"
+  },
+  {
+    "type": "attach_revoke",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "reason": "ack_timeout"
+  },
+  {
+    "type": "release",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture"
+  },
+  {
+    "type": "release_ack",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "released": true
+  },
+  {
+    "type": "command",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "name": "status",
+    "argument": ""
+  },
+  {
+    "type": "command_result",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "ok": true,
+    "code": "ok",
+    "message": ""
+  },
+  {
+    "type": "client_state_ack",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "appshot_count": 0,
+    "can_accept": true
+  },
+  {
+    "type": "status",
+    "version": 1,
+    "request_id": "request-fixture",
+    "broker_id": "broker-fixture",
+    "session_id": "session-fixture",
+    "appshot_count": 0,
+    "can_accept": true,
+    "enabled": true,
+    "chord": "ctrl+shift+s",
+    "registration": "registered",
+    "connected_tuis": 1,
+    "permission": "ready"
+  }
+]

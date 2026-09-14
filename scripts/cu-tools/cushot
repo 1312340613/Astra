@@ -1,0 +1,12 @@
+#!/bin/bash
+# cushot — 按逻辑区域截图 (根治"全屏截图→sips裁剪→裁错"问题)
+# 用法: cushot <x> <y> <w> <h> [out.png]
+#   x,y,w,h 为逻辑像素坐标(与 1512 宽截图一比一); screencapture -R 原生接受逻辑坐标, 输出自动 Retina 2x
+#   默认输出 /tmp/cushot.png; 传第 5 参可指定路径
+set -euo pipefail
+
+x=$1; y=$2; w=$3; h=$4
+out=${5:-/tmp/cushot.png}
+
+screencapture -x -R"${x},${y},${w},${h}" "$out"
+echo "captured ${w}x${h}@(${x},${y}) -> $out"

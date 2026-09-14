@@ -1,0 +1,36 @@
+{
+  "valid": [
+    {"name": "click_coordinate_boundary", "action": {"type": "click", "x": 1000000, "y": -1000000, "target_element_ref": "snapshot-1:canvas"}},
+    {"name": "double_click_ref", "action": {"type": "double_click", "element_ref": "ax-button"}},
+    {"name": "unicode_type", "action": {"type": "type", "text": "中文 🧑🏽‍💻"}},
+    {"name": "keypress_ref_modifiers", "action": {"type": "keypress", "key": "return", "element_ref": "ax-text", "modifiers": ["command", "shift"]}},
+    {"name": "scroll", "action": {"type": "scroll", "delta_x": 4, "delta_y": -8, "x": 10, "y": 20, "target_element_ref": "snapshot-1:canvas"}},
+    {"name": "drag_duration_boundary", "action": {"type": "drag", "x": 1, "y": 2, "end_x": 3, "end_y": 4, "duration_ms": 10000, "target_element_ref": "snapshot-1:canvas"}},
+    {"name": "wait_duration_boundary", "action": {"type": "wait", "duration_ms": 10000}},
+    {"name": "text_scalar_boundary", "action": {"type": "type"}, "repeat": {"field": "text", "scalar": "x", "count": 20000}},
+    {"name": "arrow_left_alias", "action": {"type": "keypress", "key": "ArrowLeft"}},
+    {"name": "arrow_right_alias", "action": {"type": "keypress", "key": "ArrowRight"}},
+    {"name": "arrow_up_alias", "action": {"type": "keypress", "key": "ArrowUp"}},
+    {"name": "arrow_down_alias", "action": {"type": "keypress", "key": "ArrowDown"}},
+    {"name": "escape_alias", "action": {"type": "keypress", "key": "Esc"}},
+    {"name": "ref_scalar_boundary", "action": {"type": "click"}, "repeat": {"field": "element_ref", "scalar": "r", "count": 256}},
+    {"name": "target_ref_scalar_boundary", "action": {"type": "click", "x": 1, "y": 2}, "repeat": {"field": "target_element_ref", "scalar": "r", "count": 256}}
+  ],
+  "invalid": [
+    {"name": "unknown_key_at_scalar_boundary", "action": {"type": "keypress"}, "repeat": {"field": "key", "scalar": "a", "count": 64}},
+    {"name": "unknown_key_name", "action": {"type": "keypress", "key": "ArrowDiagonal"}},
+    {"name": "coordinate_over_boundary", "action": {"type": "click", "x": 1000000.1, "y": 0}},
+    {"name": "wait_over_boundary", "action": {"type": "wait", "duration_ms": 10001}},
+    {"name": "drag_over_boundary", "action": {"type": "drag", "x": 1, "y": 2, "end_x": 3, "end_y": 4, "duration_ms": 10001}},
+    {"name": "duplicate_modifier", "action": {"type": "keypress", "key": "a", "modifiers": ["command", "command"]}},
+    {"name": "unknown_modifier", "action": {"type": "keypress", "key": "a", "modifiers": ["hyper"]}},
+    {"name": "clipboard_paste", "action": {"type": "keypress", "key": "V", "modifiers": ["command", "shift"]}},
+    {"name": "text_over_boundary", "action": {"type": "type"}, "repeat": {"field": "text", "scalar": "x", "count": 20001}},
+    {"name": "key_over_boundary", "action": {"type": "keypress"}, "repeat": {"field": "key", "scalar": "a", "count": 65}},
+    {"name": "ref_over_boundary", "action": {"type": "click"}, "repeat": {"field": "element_ref", "scalar": "r", "count": 257}},
+    {"name": "target_ref_over_boundary", "action": {"type": "click", "x": 1, "y": 2}, "repeat": {"field": "target_element_ref", "scalar": "r", "count": 257}},
+    {"name": "coordinate_semantic_ref", "action": {"type": "click", "x": 1, "y": 2, "element_ref": "ax-button"}},
+    {"name": "mixed_pointer_refs", "action": {"type": "click", "x": 1, "y": 2, "element_ref": "ax-button", "target_element_ref": "canvas"}},
+    {"name": "reference_less_scroll", "action": {"type": "scroll", "delta_y": 1}}
+  ]
+}

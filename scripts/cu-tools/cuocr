@@ -1,0 +1,43 @@
+#!/bin/bash
+# cuocr — 截图区域 OCR (封装 tesseract, 输出带坐标的文本块)
+# 用法: cuocr <x> <y> <w> <h> [--raw]   截区域并 OCR
+#       cuocr <img.png>                  对已有图片 OCR (输出物理像素)
+# 输出: 每行 "word<TAB>conf<TAB>x,y,w,h"
+#   默认: x,y,w,h = 全局逻辑坐标(与 cuclick/cushot 一比一) = 区域原点 + 物理像素/2
+#   --raw: 物理像素坐标(相对截取区域原点)
+# v2 变更(2026-09-02): 默认输出从"物理像素(相对区域)"改为"全局逻辑坐标";
+#   早期版本注释误写"逻辑坐标"实为物理像素, 换算是坑。
+set -euo pipefail
+
+raw=0
+if [ "$#" -ge 1 ] && [ "${!#}" = "--raw" ]; then
+  raw=1
+  set -- "${@:1:$#-1}"
+fi
+
+x0=0; y0=0
+if [ "$#" -eq 1 ] && [ -f "$1" ]; then
+  img=$1
+  raw=1   # 对已有图片无区域信息, 只输出物理像素
+elif [ "$#" -eq 4 ]; then
+  x0=$1; y0=$2; w=$3; h=$4
+  # 用 mktemp 生成真实路径 (/tmp 是符号链接, tesseract/Leptonica 读 /tmp/... 会失败)
+  img=$(mktemp -t cuocr.XXXXXX.png)
+  trap 'rm -f "$img"' EXIT
+  screencapture -x -R"${x0},${y0},${w},${h}" "$img"
+else
+  echo "usage: cuocr <x> <y> <w> <h> [--raw] | cuocr <img.png>"; exit 1
+fi
+
+tesseract "$img" - -l chi_sim+eng tsv 2>/dev/null | awk -F'\t' -v x0="$x0" -v y0="$y0" -v raw="$raw" '
+  NR > 1 && $12 != "" && $11 > 40 {
+    # 列: 1=level 2=page 3=block 4=par 5=line 6=word 7=left 8=top 9=width 10=height 11=conf 12=text
+    if ($6 != "") {
+      x=$7; y=$8; w=$9; h=$10; conf=$11; text=$12
+      gsub(/^ +| +$/, "", text)
+      if (text != "") {
+        if (raw == 0) { x=int(x/2)+x0; y=int(y/2)+y0; w=int(w/2); h=int(h/2) }
+        printf "%s\t%s\t%s,%s,%s,%s\n", text, conf, x, y, w, h
+      }
+    }
+  }' | head -60

@@ -1,0 +1,131 @@
+version: 1
+# Optional capability `assistant_prefill` enables truncated tool-JSON
+# continuation by ending the next request with an assistant prefix. Keep it
+# absent unless the specific provider/model is verified to support that form.
+models:
+  # Stable GA name; the old V4 Flash presets migrate to this model on the
+  # official endpoint.
+  # https://api-docs.deepseek.com/zh-cn/updates/
+  deepseek-flash:
+    provider: openai-compatible
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    catalog_provider: deepseek
+    provider_label: DeepSeek API
+    context_limit: 1000000
+    capabilities: [tools, reasoning, vision, streaming]
+    vision_detail: original
+    vision_preprocess:
+      strategy: tiled
+      tile_width: 768
+      tile_height: 768
+      overlap: 64
+      max_images_per_request: 32
+      max_inline_body_bytes: 41943040
+      overflow_strategy: model_select
+    generation:
+      # Shared allowance for reasoning, visible output and tool-call JSON.
+      max_tokens: 384000
+
+  # DeepSeek V4 Pro — DeepSeek continues serving this model after 2026-09-14
+  # (September 2026 updates); text-only profile, no vision.
+  deepseek-v4-pro:
+    provider: openai-compatible
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    catalog_provider: deepseek
+    provider_label: DeepSeek API
+    context_limit: 1000000
+    capabilities: [tools, reasoning, streaming]
+    generation:
+      # Shared allowance for reasoning, visible output and tool-call JSON.
+      max_tokens: 384000
+
+  Qwen3.6-35B-A3B:
+    provider: openai-compatible
+    base_url: http://localhost:8081/v1
+    base_url_env: QWEN_BASE_URL
+    api_key_env: ""
+    context_limit: 196608
+    capabilities: [tools, reasoning, vision, streaming]
+    repetition_penalty_parameter: repeat_penalty
+    generation:
+      temperature: 1.0
+      max_tokens: 32768
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
+
+  gemma-4-12B-it:
+    provider: openai-compatible
+    base_url: http://localhost:8083/v1
+    base_url_env: GEMMA_BASE_URL
+    api_key_env: ""
+    context_limit: 32768
+    capabilities: [tools, vision, streaming]
+    generation:
+      temperature: 1.0
+      max_tokens: 4096
+      top_p: 0.95
+      top_k: 64
+
+  qwen3.8-max:
+    provider: openai-compatible
+    base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    base_url_env: QWEN38_BASE_URL
+    api_key_env: QWEN38_API_KEY
+    catalog_provider: qwen38
+    provider_label: Qwen 3.8 API
+    context_limit: 1000000
+    capabilities: [tools, reasoning, thinking-required, vision, streaming]
+    generation:
+      temperature: 0.6
+      # https://help.aliyun.com/zh/model-studio/qwen3-8-max
+      max_tokens: 131072
+      top_p: 0.95
+
+  qwen3.8-flash:
+    provider: openai-compatible
+    base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    base_url_env: QWEN38_BASE_URL
+    api_key_env: QWEN38_API_KEY
+    catalog_provider: qwen38
+    provider_label: Qwen 3.8 API
+    context_limit: 1000000
+    capabilities: [tools, reasoning, thinking-required, vision, streaming]
+    generation:
+      temperature: 0.6
+      # https://help.aliyun.com/zh/model-studio/qwen3-8-flash
+      max_tokens: 131072
+      top_p: 0.95
+
+  glm-5.3-flash:
+    provider: openai-compatible
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key_env: ZHIPU_API_KEY
+    catalog_provider: zhipu
+    provider_label: Zhipu GLM API
+    context_limit: 1000000
+    capabilities: [tools, reasoning, thinking-required, vision, streaming]
+    generation:
+      temperature: 1.0
+      # https://help.aliyun.com/zh/model-studio/glm-5-3-flash-by-zhipu
+      max_tokens: 131072
+      top_p: 0.95
+
+  hy4-preview:
+    provider: openai-compatible
+    base_url: https://tokenhub.tencentmaas.com/v1
+    base_url_env: HUNYUAN_BASE_URL
+    api_key_env: HUNYUAN_API_KEY
+    catalog_provider: hunyuan
+    provider_label: Tencent Hunyuan API
+    context_limit: 1048576
+    capabilities: [tools, reasoning, streaming]
+    generation:
+      temperature: 0.9
+      # HY4 Preview: 64K output; https://www.tencentcloud.com/document/product/1300/78934
+      max_tokens: 65536
+      top_p: 0.95

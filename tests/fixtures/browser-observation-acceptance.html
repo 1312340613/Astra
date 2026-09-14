@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Astra observation acceptance</title>
+<style>body{font:16px system-ui;max-width:960px;margin:24px auto}pre{white-space:pre-wrap}#instructions{max-height:100px;overflow:auto}section{margin:16px 0}</style>
+<h1>Astra observation acceptance</h1>
+<p>Local shared-helper test: two real TinyMCE editors, selection state and compact observations. No external submission.</p>
+<button id="start" disabled>Run observation acceptance</button>
+<p id="instructions"></p>
+<section><h2>Question 1</h2><textarea id="answer0"></textarea></section>
+<section><h2>Question 2</h2><textarea id="answer1"></textarea></section>
+<section><h2>Choices</h2>
+  <label><input id="check" type="checkbox" value="1">Native checkbox</label>
+  <label><input id="radio1" type="radio" name="group" value="1" checked>First radio</label>
+  <label><input id="radio2" type="radio" name="group" value="1">Second radio</label>
+  <div id="aria" role="checkbox" aria-checked="mixed" tabindex="0">ARIA checkbox</div>
+  <div id="missing" role="checkbox" tabindex="0">Unspecified ARIA checkbox</div>
+</section>
+<p id="save-state">Not saved</p><pre id="result">Loading TinyMCE…</pre>
+<script src="/vendor/tinymce/tinymce.min.js"></script>
+<script src="/browser-control-extension/page.js"></script>
+<script>
+document.querySelector('#instructions').textContent='Observation instructions: read each question and choose the required options. '.repeat(90);
+document.querySelector('#check').indeterminate=true;
+document.querySelector('#aria').onclick=e=>e.currentTarget.setAttribute('aria-checked','true');
+const saved={};let editors=[];
+function save(editor){
+  editor.save();saved[editor.id]=editor.getContent({format:'text'}).replace(/\r\n?/g,'\n');
+  document.querySelector('#save-state').textContent='Application saved '+JSON.stringify(saved);
+}
+function assert(condition,message){if(!condition)throw Error(message);}
+const bytes=value=>new TextEncoder().encode(JSON.stringify(value)).length;
+(async()=>{
+  editors=await tinymce.init({selector:'textarea',height:150,menubar:false,toolbar:false,statusbar:false,promotion:false,branding:false,
+    setup:editor=>editor.on('input change blur',()=>save(editor))});
+  for(const editor of editors){editor.getBody().setAttribute('aria-label','Answer');save(editor);}
+  document.querySelector('#start').disabled=false;
+  document.querySelector('#result').textContent='Ready: TinyMCE '+tinymce.majorVersion+'.'+tinymce.minorVersion;
+})();
+document.querySelector('#start').onclick=async()=>{
+  document.querySelector('#start').disabled=true;
+  const page=globalThis.__astraBrowserPage;
+  const report={pass:false,engine:'TinyMCE '+tinymce.majorVersion+'.'+tinymce.minorVersion,verifiedFills:0,selectionChecks:0,errors:[],
+    evidence:'real renderer shared-helper test; installed extension/native messaging is a separate gate'};
+  try {
+    const full=await page('snapshot',{scope:'editable'});
+    let s=await page('snapshot',{scope:'editable',include_text:false});
+    assert(full.textIncluded && full.text.length>6000 && s.textIncluded===false && s.text==='','text projection');
+    const fullBytes=bytes(full),compactBytes=bytes(s);
+    report.payload={fullBytes,compactBytes,reductionPercent:100*(1-compactBytes/fullBytes)};
+    assert(compactBytes<=0.6*fullBytes,'representative payload reduction below 40%');
+    assert((await page('fill',{ref:full.elements[0].ref,text:'must not write'})).status==='stale_snapshot','stale ref accepted');
+    const expected=['First answer\n第一题','Second answer\n第二题'];
+    for(let i=0;i<2;i++) {
+      const frame=s.frames.find(f=>f.id==='answer'+i+'_ifr');
+      const target=s.elements.find(e=>e.frameRef===frame?.frameRef && e.editable);
+      assert(target,'missing editor '+i);
+      const r=await page('fill',{ref:target.ref,text:expected[i]});
+      assert(r.verified && r.value===expected[i],'fill/readback '+i);s=r.after;
+      assert(s.textIncluded===false && s.text==='','after lost compact option');
+      for(let j=0;j<2;j++) {
+        const wanted=j<=i?expected[j]:'';
+        assert(editors[j].getContent({format:'text'})===wanted && saved['answer'+j]===wanted,'editor model/save mismatch '+j);
+        assert(editors[j].getElement().value===editors[j].getContent(),'hidden textarea mismatch '+j);
+      }
+      report.verifiedFills++;
+    }
+    s=await page('snapshot',{include_text:false});
+    const find=id=>s.elements.find(e=>e.id===id);
+    assert(find('check').checked===false && find('check').indeterminate===true,'initial checkbox state');
+    assert(find('radio1').checked===true && find('radio2').checked===false,'initial radio state');
+    assert(find('aria').checked==='mixed' && find('missing').checked===null,'ARIA mixed/unknown state');
+    const read=await page('read',{ref:find('check').ref});
+    assert(read.value==='1' && read.target.checked===false,'value confused with checked');
+    for(const desired of [true,false]) {
+      const r=await page('click',{ref:find('check').ref});s=r.after;
+      assert(r.status==='observed' && find('check').checked===desired && find('check').indeterminate===false,'checkbox toggle state');
+      report.selectionChecks++;
+    }
+    let r=await page('click',{ref:find('radio2').ref});s=r.after;
+    assert(r.status==='observed' && !find('radio1').checked && find('radio2').checked,'radio group state');report.selectionChecks++;
+    r=await page('click',{ref:find('aria').ref});s=r.after;
+    assert(r.status==='observed' && find('aria').checked===true,'ARIA attribute-only change');report.selectionChecks++;
+    assert(s.textIncluded===false && s.text==='','click after lost compact option');
+    s=await page('snapshot',{include_text:true,scope:'editable'});
+    assert(s.textIncluded===true && s.text.includes('Observation instructions'),'text restoration');
+    assert(s.elements.some(e=>e.value===expected[0]) && s.elements.some(e=>e.value===expected[1]),'editor values lost');
+    report.saved=saved;report.pass=true;
+  } catch(error){report.errors.push(error.message);}
+  document.title=(report.pass?'PASS':'FAIL')+' — Astra observation';
+  document.querySelector('#result').textContent=JSON.stringify(report,null,2);
+  await fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)});
+};
+</script></html>

@@ -1,0 +1,29 @@
+# Base runtime dependencies from pyproject.toml.
+beautifulsoup4>=4.12
+httpx>=0.27
+markdownify>=0.13
+openai>=1.50
+Pillow>=11.0
+python-dotenv>=1.0
+PyYAML>=6.0
+requests>=2.31
+tzdata; sys_platform == 'win32'
+websockets>=14,<16
+
+# Optional groups needed by the complete Python development environment.
+mcp>=1.27,<2
+starlette>=0.27
+uvicorn>=0.29
+opentelemetry-api>=1.28
+opentelemetry-sdk>=1.28
+opentelemetry-exporter-otlp-proto-http>=1.28
+
+# Development tools used by Minimal run_code and repository checks.
+pytest==9.1.1
+ruff==0.16.4
+pypdf>=5
+# The nodejs extra is a private, import-only runtime for offline Pyright use;
+# node, npm, and related CLIs are not installed on PATH.
+pyright[nodejs]==1.1.411
+numpy>=1.26
+pydantic>=2,<3

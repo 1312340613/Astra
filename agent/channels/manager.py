@@ -1,0 +1,94 @@
+"""Own channel adapter startup and shutdown as one backend lifecycle."""
+
+from __future__ import annotations
+
+import logging
+
+from .base import ChannelAdapter, ChannelMessage, MessageHandler
+from .config import ChannelsConfig
+from .onebot import OneBotAdapter
+
+
+logger = logging.getLogger(__name__)
+
+
+def is_address_in_use(exc: OSError) -> bool:
+    # Windows asyncio often drops ``winerror`` and only surfaces the Winsock
+    # errno (10048 = WSAEADDRINUSE); Unix uses 48/98.
+    return getattr(exc, "winerror", None) == 10048 or getattr(exc, "errno", None) in {
+        48,
+        98,
+        10048,
+    }
+
+
+class ChannelManager:
+    def __init__(
+        self,
+        config: ChannelsConfig,
+        handler: MessageHandler,
+        *,
+        adapters: list[ChannelAdapter] | None = None,
+    ):
+        self.config = config
+        self.handler = handler
+        self.adapters = adapters if adapters is not None else self._build_adapters()
+        self._started: list[ChannelAdapter] = []
+
+    def _build_adapters(self) -> list[ChannelAdapter]:
+        adapters: list[ChannelAdapter] = []
+        if self.config.onebot.enabled:
+            adapters.append(OneBotAdapter(self.config.onebot, self.handler))
+        return adapters
+
+    async def start(self) -> None:
+        for adapter in self.adapters:
+            # Track before starting so a partially initialized adapter is still
+            # included in rollback. Adapter.stop() is required to be idempotent.
+            self._started.append(adapter)
+            try:
+                await adapter.start()
+            except OSError as exc:
+                if is_address_in_use(exc):
+                    logger.warning(
+                        "channel port already in use; skipping optional channel name=%s",
+                        adapter.name,
+                    )
+                else:
+                    logger.exception("channel failed to start name=%s", adapter.name)
+                await self.stop()
+                raise
+            except Exception:
+                logger.exception("channel failed to start name=%s", adapter.name)
+                await self.stop()
+                raise
+            logger.info("channel started name=%s", adapter.name)
+
+    async def stop(self) -> None:
+        while self._started:
+            adapter = self._started.pop()
+            try:
+                await adapter.stop()
+            except Exception:
+                logger.exception("channel failed to stop cleanly name=%s", adapter.name)
+
+    def statuses(self) -> list[dict[str, object]]:
+        return [
+            {"name": adapter.name, "running": adapter.running}
+            for adapter in self.adapters
+        ]
+
+    async def send_file(
+        self,
+        message: ChannelMessage,
+        path: str,
+        name: str,
+    ) -> dict[str, object]:
+        adapter = next(
+            (item for item in self.adapters if item.name == message.channel),
+            None,
+        )
+        sender = getattr(adapter, "send_file", None)
+        if sender is None:
+            raise RuntimeError(f"channel does not support file sending: {message.channel}")
+        return await sender(message, path, name)

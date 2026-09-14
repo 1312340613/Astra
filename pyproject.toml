@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling==1.29.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-lab-local"
+version = "0.2.0"
+description = "Local-first productivity agent with pluggable model providers and tools"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "httpx>=0.27",
+  "markdownify>=0.13",
+  "openai>=1.50",
+  "Pillow>=11.0",
+  "python-dotenv>=1.0",
+  "PyYAML>=6.0",
+  "requests>=2.31",
+  "tzdata; sys_platform == 'win32'",
+  "websockets>=14,<16",
+]
+
+[project.optional-dependencies]
+notebook = ["nbclient>=0.10,<1", "nbformat>=5.10,<6", "ipykernel>=6,<8"]
+hindsight = ["hindsight-client==0.6.1"]
+mcp = ["mcp>=1.27,<2"]
+server = ["starlette>=0.27", "uvicorn>=0.29"]
+tracing = [
+  "opentelemetry-api>=1.28",
+  "opentelemetry-sdk>=1.28",
+  "opentelemetry-exporter-otlp-proto-http>=1.28",
+]
+legacy-tui = ["rich>=13", "textual>=0.80"]
+embedding = ["mlx-embeddings>=0.1,<0.2; sys_platform == 'darwin'", "numpy>=1.26"]
+dev = ["pytest==9.1.1", "ruff==0.16.4", "pyright==1.1.411", "pypdf>=5", "numpy>=1.26", "pydantic>=2,<3"]
+
+[project.scripts]
+agent-lab = "agent.cli.main:main"
+agent-lab-backend = "agent.launcher.cli:backend"
+agent-lab-eval = "agent.evals.replay:main"
+astra = "agent.launcher.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config/models.yaml" = "agent/_data/models.yaml"
+"session_recall.py" = "session_recall.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "context_index_performance: production-sized Context Index latency acceptance fixture",
+  "allow_real_session_recall_db: explicitly opt out of temporary Session Recall storage",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# A deliberate correctness baseline, independent of new default/style rules.
+select = ["E9", "F", "B006", "B008", "B012", "B018", "B023", "B032"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"
+include = ["agent"]
+exclude = ["agent/cli/tui_app.py"]

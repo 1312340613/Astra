@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Astra Browser Control",
+  "version": "0.3.3",
+  "description": "Explicit, per-tab browser control for Astra. Separate from Activity URLs.",
+  "permissions": [
+    "nativeMessaging",
+    "scripting",
+    "activeTab",
+    "storage",
+    "alarms"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "worker.mjs",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Astra Browser Control"
+  },
+  "incognito": "not_allowed",
+  "minimum_chrome_version": "120"
+}

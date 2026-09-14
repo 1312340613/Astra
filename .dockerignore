@@ -1,0 +1,7 @@
+# The sandbox image build uses the repository root as its context. Deny
+# everything, then expose only the two inputs consumed by its Dockerfile.
+**
+!docker/
+!docker/sandbox/
+!docker/sandbox/Dockerfile
+!docker/sandbox/requirements.txt

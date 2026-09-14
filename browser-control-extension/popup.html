@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Astra Browser Control</title>
+<style>body{font:14px system-ui;width:320px;margin:18px;line-height:1.5}button{display:block;margin:12px 0;padding:8px;width:100%}#status{white-space:pre-wrap}</style></head>
+<body><h2>Astra Browser Control</h2><p>Connect Astra, then allow the current tab. Cross-origin navigation needs a new grant.</p>
+<label><input type="checkbox" id="autoConnect"> Automatically connect to Astra on this computer</label>
+<button id="connect">Connect to Astra</button>
+<button id="grant">Allow current tab</button>
+<button id="websites">Allow HTTP(S) sites for new agent tabs</button>
+<p>Website permission alone never grants control of other existing tabs.</p>
+<button id="stop">Stop and revoke all tabs</button><p id="status" role="status"></p>
+<script type="module" src="popup.mjs"></script></body></html>

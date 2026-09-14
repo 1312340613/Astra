@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Computer Use helper: Swift changes must compile in release mode before commit.
+#
+# This hook deliberately does NOT assemble or install the .app bundle. Installing it
+# (scripts/build_macos_computer_helper.sh) replaces .astra/bin/AstraMacComputerHelper.app,
+# and because that bundle is ad-hoc signed its cdhash changes on every build — which
+# silently revokes the live helper's macOS Screen Recording grant and forces the operator
+# to re-authorize by hand. A commit must never carry that side effect.
+#
+# Install a helper on purpose instead:  bash scripts/build_macos_computer_helper.sh --install
+# (then re-grant Screen Recording once for the new cdhash.)
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+if ! git -C "$repo_root" diff --cached --name-only --diff-filter=ACM \
+  | grep -q '^native/macos-computer-helper/'; then
+  exit 0
+fi
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' '[pre-commit] skipping helper compile check: not macOS.' >&2
+  exit 0
+fi
+
+printf '%s\n' '[pre-commit] compile-checking macOS Computer Use helper (release, no install)...'
+if ! swift build -c release --package-path "$repo_root/native/macos-computer-helper" \
+  >/tmp/astra-precommit-build.log 2>&1; then
+  printf '%s\n' '[pre-commit] BLOCKED: helper failed to compile. See /tmp/astra-precommit-build.log:' >&2
+  tail -20 /tmp/astra-precommit-build.log >&2
+  exit 1
+fi
+printf '%s\n' '[pre-commit] helper compiles. (Bundle not rebuilt; live helper and its TCC grant untouched.)'
+exit 0

@@ -1,0 +1,107 @@
+{
+  "plain_names": [
+    {"label": "ordinary-ascii", "name": "capture.png", "valid": true},
+    {"label": "ascii-128-byte-boundary", "repeat": "a", "count": 124, "suffix": ".png", "valid": true},
+    {"label": "ascii-129-bytes", "repeat": "a", "count": 125, "suffix": ".png", "valid": false},
+    {"label": "empty", "name": "", "valid": false},
+    {"label": "dot", "name": ".", "valid": false},
+    {"label": "dot-dot", "name": "..", "valid": false},
+    {"label": "slash", "name": "sub/capture.png", "valid": false},
+    {"label": "backslash", "name": "sub\\capture.png", "valid": false},
+    {"label": "nul", "json_string": "\"capture\\u0000.png\"", "valid": false},
+    {"label": "space", "name": "capture name.png", "valid": false},
+    {"label": "decomposed-combining", "json_string": "\"e\\u0301.png\"", "valid": false},
+    {"label": "precomposed-nonascii", "json_string": "\"\\u00e9.png\"", "valid": false},
+    {"label": "unpaired-high-surrogate", "json_string": "\"\\ud800.png\"", "valid": false}
+  ],
+  "detail_pairs": [
+    {
+      "label": "lowercase-32-hex-same-stem",
+      "image": "snapshot-0123456789abcdef0123456789abcdef.png",
+      "detail": "snapshot-0123456789abcdef0123456789abcdef.ax.json",
+      "valid": true
+    },
+    {
+      "label": "uppercase-token",
+      "image": "snapshot-0123456789ABCDEF0123456789ABCDEF.png",
+      "detail": "snapshot-0123456789ABCDEF0123456789ABCDEF.ax.json",
+      "valid": false
+    },
+    {
+      "label": "nonhex-token",
+      "image": "snapshot-0123456789abcdef0123456789abcdeg.png",
+      "detail": "snapshot-0123456789abcdef0123456789abcdeg.ax.json",
+      "valid": false
+    },
+    {
+      "label": "short-token",
+      "image": "snapshot-0123456789abcdef0123456789abcde.png",
+      "detail": "snapshot-0123456789abcdef0123456789abcde.ax.json",
+      "valid": false
+    },
+    {
+      "label": "long-token",
+      "image": "snapshot-0123456789abcdef0123456789abcdef0.png",
+      "detail": "snapshot-0123456789abcdef0123456789abcdef0.ax.json",
+      "valid": false
+    },
+    {
+      "label": "mismatched-stem",
+      "image": "snapshot-0123456789abcdef0123456789abcdef.png",
+      "detail": "snapshot-fedcba9876543210fedcba9876543210.ax.json",
+      "valid": false
+    }
+  ],
+  "truncation_reason_vectors": [
+    {
+      "label": "empty-when-not-truncated",
+      "truncated": false,
+      "reasons": [],
+      "valid": true
+    },
+    {
+      "label": "canonical-sparse-subsequence",
+      "truncated": true,
+      "reasons": ["depth_limit", "value_limit", "wall_clock_limit"],
+      "valid": true
+    },
+    {
+      "label": "canonical-full-sequence",
+      "truncated": true,
+      "reasons": [
+        "depth_limit",
+        "node_limit",
+        "structural_string_limit",
+        "value_limit",
+        "aggregate_text_limit",
+        "wall_clock_limit",
+        "final_byte_limit"
+      ],
+      "valid": true
+    },
+    {
+      "label": "reverse-order",
+      "truncated": true,
+      "reasons": ["wall_clock_limit", "depth_limit"],
+      "valid": false
+    },
+    {
+      "label": "duplicate",
+      "truncated": true,
+      "reasons": ["depth_limit", "depth_limit"],
+      "valid": false
+    },
+    {
+      "label": "unknown",
+      "truncated": true,
+      "reasons": ["unknown_limit"],
+      "valid": false
+    },
+    {
+      "label": "empty-when-truncated",
+      "truncated": true,
+      "reasons": [],
+      "valid": false
+    }
+  ]
+}

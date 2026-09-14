@@ -1,0 +1,46 @@
+{
+  "servers": {
+    "qwen-mm-plugins": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "qwen-mm-plugins[core] @ git+https://github.com/QwenLM/Qwen-MM-Plugins.git@83decb6ab2d051ea9eef05760db2d7e9fed8afaf",
+        "qwen-mm-plugins-core"
+      ],
+      "env": {
+        "DASHSCOPE_BASE_URL": "${DASHSCOPE_BASE_URL}"
+      },
+      "risk": "network",
+      "tool_risks": {
+        "crop": "write",
+        "draw_bbox": "write",
+        "save_view": "write"
+      },
+      "include_tools": [
+        "read_image",
+        "visualize",
+        "grounding",
+        "ocr",
+        "vision_chat",
+        "crop",
+        "draw_bbox",
+        "save_view"
+      ],
+      "startup_timeout": 120,
+      "timeout": 300
+    },
+    "remote-service": {
+      "enabled": false,
+      "transport": "streamable-http",
+      "url": "${MCP_REMOTE_URL}",
+      "headers": {
+        "Authorization": "Bearer ${MCP_REMOTE_TOKEN}"
+      },
+      "risk": "network",
+      "startup_timeout": 15,
+      "timeout": 60
+    }
+  }
+}
