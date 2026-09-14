@@ -69,7 +69,7 @@ def freeze_replay_dbs(dest_dir: Path) -> dict[str, str]:
     必须冻结。返回 factory 识别的环境变量覆盖映射（缺失的源记为空串）。
     """
 
-    import session_recall
+    from agent.runtime import session_recall
     from agent.runtime import activity_store
 
     dest = Path(dest_dir)

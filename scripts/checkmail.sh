@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="$SCRIPT_DIR"
-cd -- "$SCRIPT_DIR"
+ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+cd -- "$ROOT"
 
 if [[ -n "${PYTHON:-}" ]]; then
     PYTHON_BIN="$PYTHON"

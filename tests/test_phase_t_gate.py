@@ -182,14 +182,17 @@ def test_wheel_smoke_cannot_load_missing_module_from_editable_pth(tmp_path):
     checkout = tmp_path / "source"
     for directory in (installed, dependencies, checkout):
         directory.mkdir()
-    (checkout / "session_recall.py").write_text("", encoding="utf-8")
+    for relative in ("agent/__init__.py", "agent/runtime/__init__.py", "agent/runtime/session_recall.py"):
+        module = checkout / relative
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text("", encoding="utf-8")
     (dependencies / "editable.pth").write_text(str(checkout), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, "-I", "-S", "-c", wheel_smoke.SMOKE_CODE, str(installed), str(dependencies)],
         cwd=tmp_path, capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
-    assert "No module named 'session_recall'" in result.stderr
+    assert "No module named 'agent'" in result.stderr
 
 
 def test_wheel_smoke_rejects_a_module_supplied_only_by_dependency_site_packages(tmp_path):
@@ -197,10 +200,13 @@ def test_wheel_smoke_rejects_a_module_supplied_only_by_dependency_site_packages(
     dependencies = tmp_path / "dependencies"
     installed.mkdir()
     dependencies.mkdir()
-    (dependencies / "session_recall.py").write_text("", encoding="utf-8")
+    for relative in ("agent/__init__.py", "agent/runtime/__init__.py", "agent/runtime/session_recall.py"):
+        module = dependencies / relative
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text("", encoding="utf-8")
     result = subprocess.run(
         [sys.executable, "-I", "-S", "-c", wheel_smoke.SMOKE_CODE, str(installed), str(dependencies)],
         cwd=tmp_path, capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
-    assert "AssertionError: session_recall" in result.stderr
+    assert "AssertionError: agent.runtime.session_recall" in result.stderr

@@ -6,25 +6,37 @@ on:
     paths:
       - 'agent/launcher/**'
       - 'agent/runtime/paths.py'
+      - 'agent/runtime/session_recall.py'
       - 'agent/runtime/context_index/embedding_worker.py'
       - 'agent/cli/environment.py'
       - 'astra*'
-      - 'start-ink*'
       - 'tests/test_launcher*.py'
       - 'tests/test_embedding_runtime.py'
       - 'tests/test_posix_scripts.py'
+      - 'tests/test_auxiliary_scripts.py'
+      - 'tests/test_session_recall*.py'
+      - 'scripts/astra-migrate.*'
+      - 'scripts/checkmail.*'
+      - 'scripts/activity-control.bat'
+      - 'scripts/embedding-control.bat'
       - '.github/workflows/launcher.yml'
   pull_request:
     paths:
       - 'agent/launcher/**'
       - 'agent/runtime/paths.py'
+      - 'agent/runtime/session_recall.py'
       - 'agent/runtime/context_index/embedding_worker.py'
       - 'agent/cli/environment.py'
       - 'astra*'
-      - 'start-ink*'
       - 'tests/test_launcher*.py'
       - 'tests/test_embedding_runtime.py'
       - 'tests/test_posix_scripts.py'
+      - 'tests/test_auxiliary_scripts.py'
+      - 'tests/test_session_recall*.py'
+      - 'scripts/astra-migrate.*'
+      - 'scripts/checkmail.*'
+      - 'scripts/activity-control.bat'
+      - 'scripts/embedding-control.bat'
       - '.github/workflows/launcher.yml'
 
 permissions:
@@ -66,5 +78,6 @@ jobs:
           tests/test_launcher.py tests/test_launcher_windows_bootstrap.py
           tests/test_launcher_services.py tests/test_launcher_service_launchd.py
           tests/test_launcher_service_windows.py tests/test_launcher_service_embedding.py
-          tests/test_embedding_runtime.py tests/test_posix_scripts.py tests/test_instance_lock.py
+          tests/test_embedding_runtime.py tests/test_posix_scripts.py tests/test_auxiliary_scripts.py
+          tests/test_session_recall.py tests/test_session_recall_selftest.py tests/test_instance_lock.py
           tests/test_backend_handshake.py tests/test_cross_platform_examples.py tests/test_production_foundations.py

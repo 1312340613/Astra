@@ -62,7 +62,7 @@ from agent.runtime.tools.context_index import register_context_index_tools
 
 if TYPE_CHECKING:
     from agent.runtime.react import ReActAgent
-    from session_recall import SessionRecall
+    from agent.runtime.session_recall import SessionRecall
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 logger = logging.getLogger("astra.api")
@@ -136,7 +136,7 @@ def _api_session_recall():
     """Return the lazy Session Recall writer shared by API turns."""
     global _session_recall
     if _session_recall is None:
-        from session_recall import SessionRecall
+        from agent.runtime.session_recall import SessionRecall
 
         recall = SessionRecall()
         recall.init_db()

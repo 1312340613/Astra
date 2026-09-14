@@ -30,7 +30,7 @@ def deny_network(event, arguments):
         raise RuntimeError("Network access is forbidden during wheel smoke")
 
 sys.addaudithook(deny_network)
-for name in ("session_recall", "agent.cli.main", "agent.cli.backend",
+for name in ("agent.runtime.session_recall", "agent.cli.main", "agent.cli.backend",
              "agent.runtime.context_index.embedding_runtime",
              "agent.runtime.context_index.embedding_worker",
              "agent.evals.context_index_benchmark.resources"):

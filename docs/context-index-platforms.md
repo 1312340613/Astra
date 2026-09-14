@@ -47,12 +47,12 @@ after updating: an already running old backend still owns its original model.
 ## Windows
 
 For native foreground activity collection, see [Windows activity recorder](windows-activity.md)
-and use the separate `activity-control.bat` menu. The embedding menu below only
+and use the separate `.\scripts\activity-control.bat` menu. The embedding menu below only
 controls the model service; it does not toggle recording.
 
-Double-click `embedding-control.bat` in the repository root for a Start / Stop /
+Double-click `.\scripts\embedding-control.bat` for a Start / Stop /
 Status / Exit menu. Exiting the menu leaves the background service running.
-From a terminal, `embedding-control.bat start`, `stop`, or `status` performs one
+From a terminal, `.\scripts\embedding-control.bat start`, `stop`, or `status` performs one
 action without pausing. This is an optional Windows-only helper; nothing in the
 macOS startup path calls it.
 

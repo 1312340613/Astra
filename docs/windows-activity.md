@@ -1,6 +1,6 @@
 # Windows computer activity (opt-in)
 
-Double-click `activity-control.bat` at the repository root. Start runs a hidden
+Double-click `.\scripts\activity-control.bat`. Start runs a hidden
 recorder; Pause suspends new sampling and stops the current summary subprocess
 within the polling interval; Resume clears the pause; Stop shuts it down.
 Closing the menu does not stop recording. No login task is installed.
@@ -30,7 +30,7 @@ DeepSeek for summaries; dedicated `ASTRA_ACTIVITY_SUMMARY_MODEL`,
 apply. Defaults are `deepseek-flash` (V4.1 Flash) with thinking disabled and `DEEPSEEK_API_KEY`;
 interactive `LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY` do not affect summaries.
 This configuration is shared by macOS and Windows. Windows GGUF embeddings
-remain local. Start `embedding-control.bat` for semantic indexing. Missing
+remain local. Start `.\scripts\embedding-control.bat` for semantic indexing. Missing
 embedding service defers indexing without losing recorded activity.
 
 The initial summary is not immediate: a window must finish, have at least three
@@ -65,7 +65,7 @@ Swift recorder and LaunchAgents remain unchanged.
 2. Enable Developer mode, choose Load unpacked, and select this repository's
    `browser-extension` directory. No store publishing or browser policy changes
    are required. Install only in the profile you want to record.
-3. In `activity-control.bat`, choose **8** to copy the local pairing code.
+3. In `.\scripts\activity-control.bat`, choose **8** to copy the local pairing code.
 4. Open the extension's Options, paste the code, check Enable, and Save.
 5. Visit a normal HTTP(S) page. Options should show Connected. Use recorder
    Status to confirm `browser_bridge: listening`.

@@ -497,7 +497,7 @@ def test_session_recall_initialization_failure_is_retried(api_runtime, monkeypat
     monkeypatch.setattr(api_server, "_session_recall", None)
     monkeypatch.setitem(
         sys.modules,
-        "session_recall",
+        "agent.runtime.session_recall",
         SimpleNamespace(SessionRecall=FlakyRecall),
     )
 

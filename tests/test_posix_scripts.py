@@ -12,9 +12,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 POSIX_SCRIPTS = (
     PROJECT_ROOT / "astra.sh",
-    PROJECT_ROOT / "start-ink.sh",
-    PROJECT_ROOT / "astra-migrate.sh",
-    PROJECT_ROOT / "checkmail.sh",
+    PROJECT_ROOT / "scripts" / "astra-migrate.sh",
+    PROJECT_ROOT / "scripts" / "checkmail.sh",
     PROJECT_ROOT / "scripts" / "phase_t_gate.sh",
     PROJECT_ROOT / "scripts" / "build-sandbox-image.sh",
 )
@@ -56,8 +55,8 @@ def test_posix_entry_points_are_valid_bash() -> None:
 
 
 def test_posix_entry_points_resolve_paths_from_their_own_location() -> None:
-    root_wrappers = POSIX_SCRIPTS[:4]
-    maintenance_wrappers = POSIX_SCRIPTS[4:]
+    root_wrappers = POSIX_SCRIPTS[:1]
+    maintenance_wrappers = POSIX_SCRIPTS[1:]
     for script in root_wrappers:
         content = script.read_text(encoding="utf-8")
         assert "BASH_SOURCE[0]" in content
@@ -95,7 +94,7 @@ def test_astra_rejects_python_older_than_311(tmp_path: Path) -> None:
     assert str(fake_python) in completed.stderr
 
 
-@pytest.mark.parametrize("entry_point", ["astra.sh", "start-ink.sh"])
+@pytest.mark.parametrize("entry_point", ["astra.sh"])
 @pytest.mark.parametrize("tui_args", [(), ("alpha", "two words")])
 @requires_posix_shell
 def test_tui_entry_points_handoff_to_shared_router_with_exact_arguments(
@@ -104,7 +103,7 @@ def test_tui_entry_points_handoff_to_shared_router_with_exact_arguments(
     import json
     root = tmp_path / "Astra 中文 checkout"
     root.mkdir()
-    for name in ("astra.sh", "start-ink.sh"):
+    for name in ("astra.sh",):
         shutil.copy2(PROJECT_ROOT / name, root / name)
     (root / "astra.py").write_text(
         'import json,os,sys\nprint(json.dumps({"args":sys.argv[1:],"cwd":os.getcwd()}))\nsys.exit(17)\n',
@@ -119,12 +118,12 @@ def test_tui_entry_points_handoff_to_shared_router_with_exact_arguments(
 
 
 def test_wrappers_target_repository_owned_programs() -> None:
-    windows_wrapper = (PROJECT_ROOT / "checkmail.bat").read_text(encoding="utf-8")
-    assert '"%~dp0scripts\\check_163.py" %*' in windows_wrapper
+    windows_wrapper = (PROJECT_ROOT / "scripts" / "checkmail.bat").read_text(encoding="utf-8")
+    assert '"%~dp0check_163.py" %*' in windows_wrapper
     assert ".astra" not in windows_wrapper
-    assert 'scripts/check_163.py" "$@"' in (PROJECT_ROOT / "checkmail.sh").read_text(encoding="utf-8")
+    assert 'scripts/check_163.py" "$@"' in (PROJECT_ROOT / "scripts" / "checkmail.sh").read_text(encoding="utf-8")
     assert 'scripts/migrate_legacy_astra_state.py" "$@"' in (
-        PROJECT_ROOT / "astra-migrate.sh"
+        PROJECT_ROOT / "scripts" / "astra-migrate.sh"
     ).read_text(encoding="utf-8")
     assert 'scripts/phase_t_gate.py" "$@"' in (
         PROJECT_ROOT / "scripts" / "phase_t_gate.sh"
@@ -145,7 +144,7 @@ def test_shell_line_endings_are_declared() -> None:
 
 
 def test_windows_wrappers_delegate_without_changing_workspace_or_pausing() -> None:
-    for name in ("astra.bat", "start-ink.bat", "astra-path.bat"):
+    for name in ("astra.bat",):
         content = (PROJECT_ROOT / name).read_text(encoding="utf-8").lower()
         assert "cd /d" not in content
         assert "pause" not in content

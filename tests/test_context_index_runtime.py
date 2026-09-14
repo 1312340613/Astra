@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import session_recall
+from agent.runtime import session_recall
 from agent.cli.context_index_preferences import ContextIndexPreferences
 from agent.core.msg import ContentBlock, Msg
 from agent.runtime import activity_store
@@ -17,7 +17,7 @@ from agent.runtime.context_index.models import ContextIndexPack, SourceResult
 from agent.runtime.context_index.session_source import SessionRecommendationSource
 from agent.runtime.react import ReActAgent
 from agent.runtime.tools.registry import ToolDef, ToolRegistry
-from session_recall import SessionRecall
+from agent.runtime.session_recall import SessionRecall
 
 
 def run(coro):

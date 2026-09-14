@@ -16,7 +16,7 @@ _SR = None
 def _get_sr():
     global _SR
     if _SR is None:
-        from session_recall import SessionRecall
+        from agent.runtime.session_recall import SessionRecall
         _SR = SessionRecall()
         _SR.init_db()
     return _SR

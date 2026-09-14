@@ -7,7 +7,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Protocol
 
-import session_recall
+from agent.runtime import session_recall
 from agent.runtime import activity_store
 
 from .activity_source import ActivityRecommendationReader

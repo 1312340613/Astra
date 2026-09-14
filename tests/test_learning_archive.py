@@ -12,7 +12,7 @@ import pytest
 from agent.runtime.learning_archive import CONTENT_CHARS, EVIDENCE_CHARS, EXCERPT_CHARS, LearningArchive
 from agent.runtime.tools import session_recall as tool
 from agent.runtime.tools.registry import ToolRegistry
-from session_recall import SessionRecall
+from agent.runtime.session_recall import SessionRecall
 
 
 @pytest.fixture

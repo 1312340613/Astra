@@ -3,7 +3,7 @@
 Session Recall — Long-term conversation search for the local agent.
 
 Usage (from agent tools):
-    from session_recall import SessionRecall
+    from agent.runtime.session_recall import SessionRecall
     sr = SessionRecall()
     sr.init_db()
     sr.log_message(session_id, "user", "hello")
@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sqlite3
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -675,17 +676,21 @@ class SessionRecall:
         ]
 
 
-def _test():
-    sr = SessionRecall()
-    sr.init_db()
-    sid = sr.create_session(title="self-test")
-    sr.log_message(sid, "user", "Hello, this is a test message about NUS and Singapore.")
-    sr.log_message(sid, "assistant", "Hi there! Let me help you with that.")
-    sr.close_session(sid)
-    print("Session created:", sid)
-    print("Browse:", json.dumps(sr.browse(), indent=2, ensure_ascii=False))
-    print("Search 'NUS':", json.dumps(sr.search("NUS"), indent=2, ensure_ascii=False))
-    sr.close()
+def _test() -> None:
+    """Exercise the archive without reading or changing an installation's data."""
+    with tempfile.TemporaryDirectory(prefix="astra-session-recall-test-") as temporary:
+        sr = SessionRecall(Path(temporary) / "sessions.db")
+        try:
+            sr.init_db()
+            sid = sr.create_session(title="self-test")
+            sr.log_message(sid, "user", "A synthetic message about archive search.")
+            sr.log_message(sid, "assistant", "This temporary archive is only a demonstration.")
+            sr.close_session(sid)
+            print("Session created:", sid)
+            print("Browse:", json.dumps(sr.browse(), indent=2, ensure_ascii=False))
+            print("Search 'synthetic':", json.dumps(sr.search("synthetic"), indent=2, ensure_ascii=False))
+        finally:
+            sr.close()
 
 
 if __name__ == "__main__":

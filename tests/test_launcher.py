@@ -923,13 +923,13 @@ def test_snapshot_updater_runs_without_optional_packages_or_model_keys(source, t
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows CMD acceptance")
-@pytest.mark.parametrize("wrapper", ["astra.bat", "start-ink.bat"])
+@pytest.mark.parametrize("wrapper", ["astra.bat"])
 @pytest.mark.parametrize("shell", ["cmd", "powershell"])
 @pytest.mark.parametrize("rewrite_launcher", [False, True])
 def test_native_windows_argument_cwd_and_exit_forwarding(tmp_path, wrapper, shell, rewrite_launcher):
     root = tmp_path / "Astra 中文 & spaces"
     root.mkdir()
-    for name in ("astra.bat", "start-ink.bat"):
+    for name in ("astra.bat",):
         shutil.copy2(ROOT / name, root / name)
     rewrite = (
         'from pathlib import Path;'

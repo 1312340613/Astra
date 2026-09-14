@@ -91,7 +91,7 @@ from agent.runtime.tools.context_index import register_context_index_tools
 from agent.runtime.tools.conclave import register_conclave_tools
 from agent.runtime.tools.delegate import register_delegate_tools
 from agent.runtime.context_index.workspace import resolve_workspace
-from session_recall import SessionRecall as _SessionRecall
+from agent.runtime.session_recall import SessionRecall as _SessionRecall
 from agent.runtime.learning import (
     LearningProviderError, LearningReviewer, LearningReviewResultError, LearningStore,
 )

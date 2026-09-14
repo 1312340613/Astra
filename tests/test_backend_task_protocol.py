@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
 
-import session_recall
+from agent.runtime import session_recall
 from agent.runtime.approval_inbox import ApprovalInbox
 from agent.runtime.session_store import SessionStore
 from agent.runtime.task_store import TaskStore

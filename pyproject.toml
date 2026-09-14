@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-lab-local"
 version = "0.2.0"
-description = "Local-first productivity agent with pluggable model providers and tools"
+description = "A personal AI agent for everyday tasks, powered by model APIs, with computer use, memory, and a terminal interface"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -46,7 +46,6 @@ packages = ["agent"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "config/models.yaml" = "agent/_data/models.yaml"
-"session_recall.py" = "session_recall.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

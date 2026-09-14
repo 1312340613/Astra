@@ -23,15 +23,15 @@ if errorlevel 1 goto start
 goto end
 
 :start
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-embedding-windows.ps1" -Action start
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-embedding-windows.ps1" -Action start
 goto done
 
 :stop
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-embedding-windows.ps1" -Action stop
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-embedding-windows.ps1" -Action stop
 goto done
 
 :status
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-embedding-windows.ps1" -Action status
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-embedding-windows.ps1" -Action status
 goto done
 
 :done

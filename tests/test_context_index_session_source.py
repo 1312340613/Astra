@@ -13,7 +13,7 @@ from agent.runtime.context_index.session_source import (
 )
 from agent.runtime.context_index.sqlite_reader import open_readonly, set_read_window
 from agent.runtime.context_index.workspace import WorkspaceIdentity
-from session_recall import SessionRecall
+from agent.runtime.session_recall import SessionRecall
 
 NOW = 1_800_000_000.0
 WORKSPACE = WorkspaceIdentity(

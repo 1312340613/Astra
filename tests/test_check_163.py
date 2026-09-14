@@ -751,8 +751,8 @@ def test_readme_documents_complete_read_only_163_mail_workflow() -> None:
         "ASTRA_163_EMAIL",
         "ASTRA_163_AUTH_CODE",
         "authorization code",
-        "checkmail.bat",
-        "./checkmail.sh",
+        "scripts\\checkmail.bat",
+        "./scripts/checkmail.sh",
         "sync --json",
         "search",
         "read",
@@ -767,5 +767,5 @@ def test_readme_documents_complete_read_only_163_mail_workflow() -> None:
     assert "does not mark messages read, move, delete, reply to, or send mail" in section
     assert "does not download attachment payloads during synchronization" in section
     assert "Explicit attachment download currently fails closed on Windows" in section
-    assert ".\\checkmail.bat attachment" not in section
+    assert ".\\scripts\\checkmail.bat attachment" not in section
     assert "no subcommand" in section

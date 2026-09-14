@@ -49,7 +49,7 @@ goto run
 :browser
 set "action=browser"
 :run
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\windows-activity.ps1" -Action %action%
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0windows-activity.ps1" -Action %action%
 if not "%~1"=="" exit /b %errorlevel%
 pause
 goto menu

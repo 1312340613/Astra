@@ -1,8 +1,9 @@
 # Astra ✦
 
-Local-first productivity agent with an Ink TUI, OpenAI-compatible local/API
-models, sandboxed tools, multimodal input, resumable sessions, Conclave
-multi-expert research, and optional MCP and OpenTelemetry integrations.
+A personal AI agent for everyday tasks, powered primarily by model APIs.
+Astra combines computer use, memory, multimodal input, and an Ink terminal
+interface, with sandboxed tools, resumable sessions, and optional local models,
+MCP, and OpenTelemetry integrations.
 
 > **Astra** (拉丁语"星辰") — Lyra 是天琴座，Astra 是整个系统。
 
@@ -183,10 +184,10 @@ Before registration, substitute `.\astra.bat` on Windows or `./astra.sh` on POSI
 for `astra` when running from the source directory.
 
 The source wrappers also accept a `PYTHON` executable override; for example,
-`PYTHON=python3.11 ./astra.sh setup` on macOS/Linux. Existing `start-ink` wrappers,
-`--setup-only`, and Windows `astra-path.bat` remain compatibility entry points.
-The latter registers only the command. The agent connects to configured model
-endpoints but does not manage their server processes.
+`PYTHON=python3.11 ./astra.sh setup` on macOS/Linux. `--setup-only` remains
+an alias for setup. Use `astra setup --command-only` to register only the command.
+The agent connects to configured model endpoints but does not manage their server
+processes.
 
 ### Troubleshooting and recovery
 
@@ -344,7 +345,7 @@ conversations and other user state. Open a new terminal after registration.
 Before starting on the new host, inspect `.astra/settings.json`,
 `.astra/filesystem.json`, and `.astra/models.yaml` and replace any absolute path
 that belongs to the old platform. Legacy `.agent_system` data can be merged with
-`astra-migrate.bat` on Windows or `./astra-migrate.sh` on macOS/Linux.
+`.\scripts\astra-migrate.bat` on Windows or `./scripts/astra-migrate.sh` on macOS/Linux.
 
 ## Optional OpenAI-compatible API
 
@@ -1443,11 +1444,11 @@ clearly labelled cached results when available; offline access to a missing
 cache fails without creating a database.
 
 ```powershell
-.\checkmail.bat
-.\checkmail.bat sync --json
-.\checkmail.bat search "NUS" --from nus.edu.sg --window 200 --json
-.\checkmail.bat read 352 --folder INBOX --json
-.\checkmail.bat recent --offline --recent 10 --json
+.\scripts\checkmail.bat
+.\scripts\checkmail.bat sync --json
+.\scripts\checkmail.bat search "invoice" --from billing@example.com --window 200 --json
+.\scripts\checkmail.bat read 352 --folder INBOX --json
+.\scripts\checkmail.bat recent --offline --recent 10 --json
 ```
 
 Explicit attachment download currently fails closed on Windows because secure
@@ -1458,12 +1459,12 @@ supported. A direct Windows attachment request returns the stable
 mail server for attachment data.
 
 ```bash
-./checkmail.sh
-./checkmail.sh sync --json
-./checkmail.sh search "NUS" --from nus.edu.sg --window 200 --json
-./checkmail.sh read 352 --folder INBOX --json
-./checkmail.sh recent --offline --recent 10 --json
-./checkmail.sh attachment --folder INBOX --uidvalidity 77 --uid 352 --part 2 --json
+./scripts/checkmail.sh
+./scripts/checkmail.sh sync --json
+./scripts/checkmail.sh search "invoice" --from billing@example.com --window 200 --json
+./scripts/checkmail.sh read 352 --folder INBOX --json
+./scripts/checkmail.sh recent --offline --recent 10 --json
+./scripts/checkmail.sh attachment --folder INBOX --uidvalidity 77 --uid 352 --part 2 --json
 ```
 
 Synchronization stores headers and decoded text in `.astra/mail/163.sqlite3`.
@@ -1478,8 +1479,8 @@ Windows wrappers remain supported alongside their POSIX counterparts:
 
 | Operation | Windows | macOS/Linux |
 | --- | --- | --- |
-| Start Astra | `astra.bat` / `start-ink.bat` | `./astra.sh` / `./start-ink.sh` |
-| Migrate legacy state | `astra-migrate.bat` | `./astra-migrate.sh` |
+| Start Astra | `astra.bat` | `./astra.sh` |
+| Migrate legacy state | `.\scripts\astra-migrate.bat` | `./scripts/astra-migrate.sh` |
 | Run release gate | `scripts\phase_t_gate.cmd` | `./scripts/phase_t_gate.sh` |
 | Build sandbox image | `scripts\build-sandbox-image.ps1` | `./scripts/build-sandbox-image.sh` |
 

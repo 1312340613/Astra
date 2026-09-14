@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-import session_recall as recall_module
+from agent.runtime import session_recall as recall_module
 from agent.runtime.tools import session_recall as session_recall_tool
 from agent.runtime.tools.registry import ToolRegistry
-from session_recall import SessionRecall
+from agent.runtime.session_recall import SessionRecall
 
 
 def test_default_path_reads_environment_when_instance_is_constructed(

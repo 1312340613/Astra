@@ -120,10 +120,10 @@ def test_readme_documents_supported_install_and_start_paths() -> None:
         if heading == "Upgrade an older checkout":
             assert "git pull --ff-only" in windows and "git pull --ff-only" in posix
     assert "`--setup-only`" in readme  # Still documented as a compatibility entry point.
-    assert "astra-migrate.bat" in readme
-    assert "./astra-migrate.sh" in readme
-    assert "checkmail.bat" in readme
-    assert "./checkmail.sh" in readme
+    assert "scripts\\astra-migrate.bat" in readme
+    assert "./scripts/astra-migrate.sh" in readme
+    assert "scripts\\checkmail.bat" in readme
+    assert "./scripts/checkmail.sh" in readme
     assert "phase_t_gate.cmd" in readme
     assert "./scripts/phase_t_gate.sh" in readme
 

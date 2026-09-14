@@ -16,7 +16,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 
-from session_recall import SessionRecall
+from agent.runtime.session_recall import SessionRecall
 from agent.runtime.activity_store import _redact_text
 from agent.runtime.context_index import embedder
 from agent.runtime.context_index.activity_source import ActivityRecommendationReader

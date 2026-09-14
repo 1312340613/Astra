@@ -19,7 +19,7 @@ from scripts.maintenance.cleanup_session_recall_test_leak import (
     main,
     run_checkpoint,
 )
-from session_recall import SessionRecall
+from agent.runtime.session_recall import SessionRecall
 
 SMALL_EXPECTATION = SnapshotExpectation(
     target_session_count=2,
