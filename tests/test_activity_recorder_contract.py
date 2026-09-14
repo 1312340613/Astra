@@ -1,6 +1,6 @@
 """M1: recorder contract tests (golden synthetic fixtures, never real events).
 
-阶段 3（README.md#activity-summary-catch-up-and-health）：Astra 原生
+阶段 3（docs/activity-history.md#activity-summary-catch-up-and-health）：Astra 原生
 记录器必须逐字节兼容 CUAService 的桶格式，让现有 sync/store/FTS/向量全链路零改动。
 本测试固化的形状来自 2026-09-05 对实桶的解剖（dissect_cua.py），文本内容全为合成。
 """

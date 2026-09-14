@@ -7,7 +7,7 @@ task does not need it). Summaries are upserted into activity_summaries with
 synthetic ``astra://`` source paths, so the vector indexer incremental picks
 them up exactly like imported Skysight files.
 
-Design: README.md#activity-summary-catch-up-and-health
+Design: docs/activity-history.md#activity-summary-catch-up-and-health
 """
 from __future__ import annotations
 

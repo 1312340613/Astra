@@ -1,45 +1,79 @@
 # Astra installation, startup and updates
 
+[Home](../README.md) · [Documentation](README.md)
+
+[Install](#first-installation) · [Upgrade](#upgrade-an-older-checkout) · [Update](#update-from-a-source-checkout) · [Recover](#recovery-and-repair) · [Data](#data-and-installed-distributions) · [Commands](#command-reference) · [Troubleshoot](#troubleshooting)
+
 This is the pre-release source workflow. It also establishes package-installation
 ownership and private data paths, without claiming that a public release bundle
 or automatic stable-release download is available.
 
-## First setup
+## First installation
 
-For an existing checkout with older launchers, follow the README's
-[one-time migration steps](../README.md#upgrade-an-older-checkout) first.
+Install Python 3.11+, Node.js 18+ (including npm), and Git. Setup uses the
+committed Python and Node dependency locks. If uv is missing, setup installs a
+private copy; it does not install Python packages globally. On Windows, the
+launcher runs in CMD or PowerShell; the agent's [Bash tool](execution.md#minimal-bash-environment)
+uses WSL separately.
 
-Install Python 3.11 or newer, Git and Node.js 18 or newer. A supported Node LTS is
-recommended; the maintenance workflow tests its pinned Python/Node versions.
+**Windows — CMD or PowerShell:**
 
-From the cloned source directory:
+```powershell
+git clone https://github.com/1312340613/Astra.git
+cd Astra
+.\astra.bat setup --install-command
+```
 
-| Platform | Prepare dependencies and install the command |
-| --- | --- |
-| Windows CMD or PowerShell | `.\astra.bat setup --install-command` |
-| macOS or Linux | `./astra.sh setup --install-command` |
+**macOS or Linux:**
 
-Setup uses `uv.lock` and `ui-tui/package-lock.json`, validates installed Python
-dependencies, builds the interface, and records the selected optional extras.
-An existing `.env` is preserved. A missing `.env` is created from the example;
-configure the intended model provider there. Management commands do not require
-an API key or a model connection.
+```bash
+git clone https://github.com/1312340613/Astra.git
+cd Astra
+./astra.sh setup --install-command
+```
 
-If uv is unavailable, setup installs the maintenance workflow's pinned uv into
-a private bootstrap environment. Python packages are never installed globally.
-Node remains an explicit prerequisite for source development.
+Setup prepares `.venv`, installs and builds the interface, and registers the
+`astra` command in your user PATH. It preserves an existing `.env`; otherwise,
+it creates one from `.env.example`. Configure your model connection in that file
+or use the [model connection commands](usage.md#model-connections) after starting Astra.
+Installation checks do not require a model connection or API key.
 
-The command shim lives in `%LOCALAPPDATA%\Astra\bin` on Windows and
-`~/.local/bin` on POSIX. PATH changes affect subsequent terminals. POSIX setup
-adds one identifiable PATH line to the current shell's profile. Windows setup
-prepends the dedicated bin directory to the user's PATH without replacing other
-entries. Restart the terminal after setup. If an old command still wins, use
-`where.exe astra` in CMD/PowerShell or `command -v astra` on POSIX, and inspect
-`astra doctor`.
+Open a **new terminal** so PATH is refreshed, change to the project you want to
+work on, and run:
 
-`setup --command-only` registers the command without changing dependencies.
-`--bin-dir PATH --no-path` is available for CI or a manually managed PATH.
-An existing command owned by another installer is never overwritten.
+```text
+astra doctor
+astra
+```
+
+The current directory becomes the workspace unless `SANDBOX_WORKDIR` explicitly
+selects another one. The launcher finds its own installation independently of
+your working project. Normal startup checks the environment; it does not fetch
+code or install dependencies.
+
+## Upgrade an older checkout
+
+An older installation needs **one manual pull** to obtain the new launcher.
+Close Astra sessions and services using that installation first, then run these
+commands from its existing source directory.
+
+**Windows — CMD or PowerShell:**
+
+```powershell
+git pull --ff-only
+.\astra.bat setup --install-command
+```
+
+**macOS or Linux:**
+
+```bash
+git pull --ff-only
+./astra.sh setup --install-command
+```
+
+If the pull fails, resolve the reported Git issue before continuing. Existing
+configuration, conversations and memory are retained. Open a new terminal and
+run `astra doctor`; subsequent updates use `astra update`.
 
 ## Daily use
 
@@ -175,6 +209,39 @@ imports and syntax, verifies the interface, and writes a receipt. A successful
 `applied` result means that the installation is ready for the **next launch**.
 It does not claim that an existing process is already running the new code.
 
+<details>
+<summary>One-time service migration for an older updater</summary>
+
+An older installed updater may still report the browser recorder as a blocker.
+Closing the TUI does not stop that background service. For that one-time upgrade,
+temporarily unload the installed browser service before updating:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.astra.activity-browser-bridge"
+```
+
+After maintenance or recovery completes, restore the same saved configuration:
+
+```bash
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.astra.activity-browser-bridge.plist"
+```
+
+These steps apply only to an already installed browser recorder. They preserve
+its configuration and pairing data; other services use their own stop/start
+procedures.
+
+</details>
+
+## Reading update results
+
+| Output | Meaning |
+| --- | --- |
+| `outcome: available` | An upstream change is available; the check has not applied it. |
+| `outcome: applied` | The update completed; launch Astra again to use it. |
+| `outcome: current` | The checkout already matches the checked upstream. |
+| `outcome: cancelled` | The working files were left unchanged. |
+| `local_changes: True` or `dirty: True` | Local differences remain; this can coexist with a successful keep-local update. |
+
 ## Recovery and repair
 
 ```text
@@ -253,6 +320,11 @@ Windows, `~/Library/Application Support/Astra` on macOS, and
 `$XDG_DATA_HOME/astra` (normally `~/.local/share/astra`) on Linux. Each installation
 has a separate control identity, even when a shared data profile is selected.
 
+The registered source command lives in `%LOCALAPPDATA%\Astra\bin` on Windows
+or `~/.local/bin` on POSIX. Setup updates only the user's PATH configuration;
+open a new terminal for the change to take effect. A command owned by another
+installer is not overwritten.
+
 `astra version` and `astra doctor` distinguish source and package ownership.
 Package-owned installations are not modified with Git, uv project sync, or npm.
 Upgrade them through their original installer. The current Python wheel lacks
@@ -263,6 +335,85 @@ A future formal release can supply bundled resources and a versioned runtime
 activation adapter without changing command names or private data ownership.
 This work does not publish that release, create a stable-release feed, silently
 upgrade external model/MCP servers, or implement in-chat restart scheduling.
+
+## Command reference
+
+Run these commands in your terminal. They are separate from slash commands
+inside a conversation; for example, `astra doctor` checks installation health,
+while `/doctor` checks the running application's connections.
+
+| Command | Use it to |
+| --- | --- |
+| `astra` | Start the Ink interface in your working project. |
+| `astra version --json` | Inspect the installation, commit, paths and tracked running-instance versions. |
+| `astra doctor` | Check local installation health without a model key or network connection. |
+| `astra setup` | Prepare or verify the current source dependencies. |
+| `astra setup --install-command` | Prepare dependencies and register the user command. |
+| `astra setup --command-only` | Register only the command and PATH, leaving dependencies alone. |
+| `astra setup --extra notebook` | Enable and remember an optional dependency group; repeat `--extra` for more groups. |
+| `astra update --check` | Fetch and compare the configured upstream without applying changes. |
+| `astra update` | Apply a source update and verify the installation. |
+| `astra update --keep-local` | Keep locally changed files exactly and update other files. |
+| `astra update --overwrite-local` | Back up locally changed files, then use incoming versions. |
+| `astra setup --repair` | Rebuild dependencies for the current source, including intentional metadata edits. |
+| `astra update --repair` | Repair the current clean commit without fetching a newer one. |
+| `astra update --recover` | Recover an interrupted setup or update. |
+| `astra --cli` | Start the legacy text CLI explicitly. |
+
+`setup`, `update`, `version` and `doctor` accept `--json` for structured results.
+For setup without PATH changes, use `astra setup`; to register a command in a
+directory you manage, use `astra setup --command-only --bin-dir PATH --no-path`.
+Before registration, substitute `.\astra.bat` on Windows or `./astra.sh` on POSIX
+for `astra` when running from the source directory.
+
+The source wrappers also accept a `PYTHON` executable override; for example,
+`PYTHON=python3.11 ./astra.sh setup` on macOS/Linux. `--setup-only` remains
+an alias for setup. Use `astra setup --command-only` to register only the command.
+The agent connects to configured model endpoints but does not manage their server
+processes.
+
+## Troubleshooting
+
+| What you see | What to do |
+| --- | --- |
+| `astra` is missing or starts an old copy | Open a new terminal. Run `where.exe astra` in CMD/PowerShell or `command -v astra` on POSIX. Register the intended checkout with its source wrapper and `setup --command-only`. Another installer's command is not overwritten. |
+| Dependencies are unverified or missing | Close instances using the installation, then run `astra setup`; use `astra setup --repair` if the environment is damaged. |
+| Processes are still using the installation | Close the listed interactive Astra sessions. Recognized companion services are paused and restored automatically; an unknown process still needs to be stopped through its owner. |
+| Code updated, but a service did not restart | Run `astra update --recover`. This retries the recorded service restoration without reverting the successfully installed code. |
+| Local files need a choice | Run `astra update` in a terminal and select Keep, Overwrite or Cancel; scripts can use `--keep-local` or `--overwrite-local`. |
+| A diverged branch blocks an update | Inspect `git status --short` and `git branch -vv` in the source directory and resolve the Git history. Overwrite applies to local files, not local commits. |
+| No tracking upstream or no Git history | Configure the intended branch's Git upstream. A downloaded source ZIP needs a Git clone to use `astra update`. |
+| Windows reports the updating Python environment is in use | Invoke `.\astra.bat update` from the source directory so maintenance runs outside the environment it replaces. |
+| Setup/update was interrupted | Close remaining holders and run `astra update --recover`, then `astra doctor`. Retain `.astra/launcher/pending.json` and its transaction snapshots until recovery completes. |
+| A copied or moved checkout reports stale environments | Recreate its generated dependencies and register the command at the new path; see [moving a checkout](#moving-a-checkout-between-platforms). |
+
+
+## Moving a checkout between platforms
+
+A Windows virtual environment and native Node modules cannot be reused on
+macOS (or vice versa). A checkout moved to another absolute path also needs its
+environments recreated. Close sessions and services using the checkout, remove
+only the generated dependency directories, then rebuild them and register the
+command at the new source location:
+
+```powershell
+# Moving to Windows
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue .venv, ui-tui\node_modules
+.\astra.bat setup --install-command
+```
+
+```bash
+# Moving to macOS/Linux
+rm -rf .venv ui-tui/node_modules
+./astra.sh setup --install-command
+```
+
+Keep `.env`, `.astra` and `.sessions`: they contain configuration, tasks, memory,
+conversations and other user state. Open a new terminal after registration.
+Before starting on the new host, inspect `.astra/settings.json`,
+`.astra/filesystem.json`, and `.astra/models.yaml` and replace any absolute path
+that belongs to the old platform. Legacy `.agent_system` data can be merged with
+`.\scripts\astra-migrate.bat` on Windows or `./scripts/astra-migrate.sh` on macOS/Linux.
 
 ## Acceptance boundary
 

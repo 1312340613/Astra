@@ -6,6 +6,13 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README = PROJECT_ROOT / "README.md"
+README_ZH = PROJECT_ROOT / "README.zh-CN.md"
+LAUNCHER_GUIDE = PROJECT_ROOT / "docs" / "launcher-update.md"
+USAGE_GUIDE = PROJECT_ROOT / "docs" / "usage.md"
+INTEGRATIONS_GUIDE = PROJECT_ROOT / "docs" / "integrations.md"
+EXECUTION_GUIDE = PROJECT_ROOT / "docs" / "execution.md"
+MEMORY_GUIDE = PROJECT_ROOT / "docs" / "memory.md"
+DEVELOPMENT_GUIDE = PROJECT_ROOT / "docs" / "development.md"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 FILESYSTEM_EXAMPLE = PROJECT_ROOT / "config" / "filesystem.example.json"
 CHANNELS_EXAMPLE = PROJECT_ROOT / "config" / "channels.example.json"
@@ -85,11 +92,14 @@ def test_state_defaults_use_astra_directory() -> None:
 def test_committed_examples_have_no_developer_specific_paths() -> None:
     example_text = "\n".join(
         _read(path)
-        for path in (README, ENV_EXAMPLE, FILESYSTEM_EXAMPLE, CHANNELS_EXAMPLE)
+        for path in (README, README_ZH, LAUNCHER_GUIDE, USAGE_GUIDE, INTEGRATIONS_GUIDE,
+                     EXECUTION_GUIDE, MEMORY_GUIDE, DEVELOPMENT_GUIDE,
+                     ENV_EXAMPLE, FILESYSTEM_EXAMPLE, CHANNELS_EXAMPLE)
     )
 
     assert not re.search(r"/(?:Users|home)/(?!your-(?:user|name)(?:/|\b)|example(?:/|\b)|user(?:/|\b))[^/\s]+/", example_text)
-    assert "桌面" not in example_text
+    # A localized Desktop path is machine-specific; Chinese prose is valid.
+    assert not re.search(r"[/\\]桌面\b", example_text)
     assert not re.search(r"(?i)[a-z]:\\[^\n]*(?:agent[_-]lab|astra-master)", example_text)
 
 
@@ -102,8 +112,8 @@ def test_json_examples_are_valid_and_use_portable_placeholders() -> None:
     assert channels["qq"]["send_file_roots"] == ["outputs"]
 
 
-def test_readme_documents_supported_install_and_start_paths() -> None:
-    readme = _read(README)
+def test_launcher_guide_documents_supported_install_and_start_paths() -> None:
+    readme = _read(LAUNCHER_GUIDE)
     installation = _markdown_section(readme, "First installation")
     assert "Python 3.11" in installation
     assert "Node.js 18" in installation
@@ -122,14 +132,14 @@ def test_readme_documents_supported_install_and_start_paths() -> None:
     assert "`--setup-only`" in readme  # Still documented as a compatibility entry point.
     assert "scripts\\astra-migrate.bat" in readme
     assert "./scripts/astra-migrate.sh" in readme
-    assert "scripts\\checkmail.bat" in readme
-    assert "./scripts/checkmail.sh" in readme
-    assert "phase_t_gate.cmd" in readme
-    assert "./scripts/phase_t_gate.sh" in readme
+    assert "scripts\\checkmail.bat" in _read(INTEGRATIONS_GUIDE)
+    assert "./scripts/checkmail.sh" in _read(INTEGRATIONS_GUIDE)
+    assert "phase_t_gate.cmd" in _read(DEVELOPMENT_GUIDE)
+    assert "./scripts/phase_t_gate.sh" in _read(DEVELOPMENT_GUIDE)
 
 
-def test_readme_documents_safe_cross_platform_checkout_cleanup() -> None:
-    readme = _read(README)
+def test_launcher_guide_documents_safe_cross_platform_checkout_cleanup() -> None:
+    readme = _read(LAUNCHER_GUIDE)
     section = _markdown_section(readme, "Moving a checkout between platforms")
     blocks = _fenced_blocks(section)
     powershell = next(block for language, block in blocks if language == "powershell")
@@ -154,7 +164,7 @@ def test_readme_documents_safe_cross_platform_checkout_cleanup() -> None:
 
 
 def test_minimal_bash_timeout_documentation_is_adjacent_and_platform_specific() -> None:
-    readme_section = _markdown_section(_read(README), "Minimal Bash environment")
+    readme_section = _markdown_section(_read(EXECUTION_GUIDE), "Minimal Bash environment")
     env_block = _env_block_containing(
         "ASTRA_PERSISTENT_BASH_TIMEOUT",
         "ASTRA_WSL_PERSISTENT_TIMEOUT",
@@ -173,7 +183,7 @@ def test_minimal_bash_timeout_documentation_is_adjacent_and_platform_specific() 
 
 
 def test_browser_extractor_migration_warning_is_adjacent_to_variables() -> None:
-    readme_section = _markdown_section(_read(README), "Web search")
+    readme_section = _markdown_section(_read(INTEGRATIONS_GUIDE), "Web search")
     env_block = _env_block_containing("BROWSER_EXTRACT_ARGV", "WSL_EXTRACT_CMD")
 
     for documentation in (readme_section, env_block):
@@ -187,8 +197,8 @@ def test_browser_extractor_migration_warning_is_adjacent_to_variables() -> None:
         assert re.search(r"(?is)WSL_EXTRACT_CMD.{0,180}every platform", documentation)
 
 
-def test_readme_documents_platform_specific_integrations() -> None:
-    readme = _read(README)
+def test_guides_document_platform_specific_integrations() -> None:
+    readme = _read(INTEGRATIONS_GUIDE) + _read(EXECUTION_GUIDE)
 
     assert "BROWSER_EXTRACT_CMD" in readme
     assert "WSL_EXTRACT_CMD" in readme
@@ -199,8 +209,8 @@ def test_readme_documents_platform_specific_integrations() -> None:
     assert "build-sandbox-image.sh" in readme
 
 
-def test_readme_has_separate_windows_and_macos_path_examples() -> None:
-    readme = _read(README)
+def test_execution_guide_has_separate_windows_and_macos_path_examples() -> None:
+    readme = _read(EXECUTION_GUIDE)
 
     assert '"D:\\\\shared"' in readme
     assert '"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\user"' in readme
@@ -209,8 +219,8 @@ def test_readme_has_separate_windows_and_macos_path_examples() -> None:
     assert "/Users/your-name/allowed/outputs" in readme
 
 
-def test_readme_documents_explicit_hermes_paths() -> None:
-    readme = _read(README)
+def test_memory_guide_documents_explicit_hermes_paths() -> None:
+    readme = _read(MEMORY_GUIDE)
 
     assert "scripts/import_hermes_history.py" in readme
     assert "--source-db" in readme

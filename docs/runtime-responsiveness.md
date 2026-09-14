@@ -14,6 +14,16 @@ python scripts/benchmark_runtime_responsiveness.py --samples 20 --lock-ms 150
 python scripts/benchmark_runtime_responsiveness.py --samples 50 --lock-ms 0
 ```
 
+## Profile files
+
+`ASTRA_PROFILE_QUERY=1` writes `.astra/query-profile.jsonl` for model-request
+stages and `.astra/runtime-profile.jsonl` for tool, storage and frontend stages.
+With `ASTRA_HOME` set, both files live there. Runtime records use a bounded queue
+and a 5 MiB file with two rotated backups. Dropped records, write errors and
+unacknowledged samples appear in the final summary; an incomplete run reports
+`complete: false`. Use `--generation ID` to inspect an older backend lifetime.
+Profiling is off by default and does not change model or reasoning settings.
+
 ## Reading the results
 
 | Stage | What it helps explain |

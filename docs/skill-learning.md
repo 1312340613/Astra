@@ -5,6 +5,20 @@ require a candidate, an experiment and an activation decision for every lesson.
 The model chooses when a lesson is worth saving; it is not required to create
 one after every conversation.
 
+## Use the library
+
+```text
+/skills
+/skills show <name> [file]
+/skills create <name> <description>
+```
+
+Skills contain `SKILL.md` and optional `references/`, `templates/`, `scripts/`
+or `assets/`. The model saves its own summaries with `skill_manage(origin="auto")`
+and uses `origin="user"` for content added at the user's request. Only the catalog
+is injected; full instructions are read on demand. Packaged core rules have
+their own [loading contract](runtime/core-rules.md).
+
 ## Skill ownership
 
 | Source | Meaning | Included in `/learn review` |
@@ -46,15 +60,22 @@ again to inspect the remaining skills, even in another session; after a complete
 pass, later reviews can revisit the library. Oversized entries are reported as
 not checked rather than silently counted as reviewed.
 
-Only fully included automatic skills can be modified or merged. Invalid,
+Pinned, other-workspace, other-platform and externally edited skills are
+protected. Only fully included automatic skills can be modified or merged. Invalid,
 incomplete or truncated model output leaves the batch unchanged and does not
 advance its cursor. Empty libraries do not call the model. There is no automatic
 retry, timer, idle review or catch-up job on startup.
 
-Changes keep their previous versions and reasons. A library lock prevents
+Changes keep their previous versions and reasons under `.astra/skills-learning/`,
+outside the catalog. Archived skills remain available in that history. A journal
+recovers interrupted multi-file writes. If records cannot be read, `/learn`
+reports the error and the LEARN row shows `? / CHECK`; ordinary chat continues
+without replacing damaged records. A library lock prevents
 concurrent review writes; content checks protect files changed after review
 started. Undo refuses to overwrite later edits. Closing the terminal stops
 unfinished maintenance, while already committed changes remain in history.
+Ctrl+C or a new message cancels review. A short file commit already in progress
+settles before cancellation returns; inspect history for its outcome.
 
 `/learn mode off` disables direct automatic saving. `/learn mode review` enables
 it; the legacy name `review` does not turn on scheduled maintenance. Explicit

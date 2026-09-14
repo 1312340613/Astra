@@ -741,8 +741,8 @@ def test_env_example_documents_only_safe_commented_163_credentials() -> None:
     assert "\nASTRA_163_AUTH_CODE=" not in env_example
 
 
-def test_readme_documents_complete_read_only_163_mail_workflow() -> None:
-    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+def test_guide_documents_complete_read_only_163_mail_workflow() -> None:
+    readme = (PROJECT_ROOT / "docs" / "integrations.md").read_text(encoding="utf-8")
     section_start = readme.index("## Read-only 163 mail")
     next_section = readme.find("\n## ", section_start + 4)
     section = readme[section_start:] if next_section == -1 else readme[section_start:next_section]

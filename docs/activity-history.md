@@ -128,3 +128,46 @@ later summary import checks its period before upserting. Consequently, a future
 `sync` of unchanged source files cannot re-import evidence at or before the
 cutoff. The source files are deliberately not rewritten, so this boundary is
 enforced by the private archive rather than by mutating the source application.
+
+## Activity summary catch-up and health
+
+Mac and Windows activity summaries default to `deepseek-flash` with thinking
+explicitly disabled, independently of the chat model. Set
+`ASTRA_ACTIVITY_SUMMARY_MODEL=deepseek-flash` in the local `.env`; dedicated
+`ASTRA_ACTIVITY_SUMMARY_BASE_URL` and `ASTRA_ACTIVITY_SUMMARY_API_KEY` overrides
+remain supported (the default key is `DEEPSEEK_API_KEY`). Existing official V4
+model overrides migrate at the transport boundary. Each scheduled summary
+subprocess reloads this configuration on its next run; existing summaries are
+not regenerated just because the model changes.
+
+The summarizer maintains a durable queue in the activity database. New, changed
+or late events enqueue their ten-minute windows; failures remain retryable after
+restart and preserve the last valid summary. Only closed windows with at least
+three retained events are eligible. Existing summaries use input revisions to
+avoid repeat model calls. Retention still determines which historical evidence
+can be summarized. Overlapping batches cannot overwrite a newer generation:
+summary text, its input revision and queue acknowledgement commit together.
+
+```text
+uv run --locked python -m agent.runtime.activity_recorder.summarizer --lookback 120 --max-windows 24
+```
+
+This command can call the configured summary model. `--lookback` prioritizes
+recent windows; it no longer excludes older backlog. `--max-windows` limits
+window checks and model calls per run (default 24), with persisted fair ordering
+and one in four slots preferring older work. `--max-windows 0` skips summary
+generation and retries vector indexing. Existing scheduler intervals are
+unchanged; running the CLI once does not install a scheduler.
+
+JSON output includes `windows_processed`, `llm_calls`, `written`,
+`pending_windows`, `oldest_pending_at`, `catchup_pending_windows`, `vector_index`,
+`last_success_at`, `last_summary_at` and `consecutive_failures`. Pending windows
+are queued checks, not necessarily missing summaries: the first run also audits
+retained windows that already have summaries. `last_success_at` records a
+successful batch, including one with no new summary; `last_summary_at` records
+the last batch that wrote a summary. A model, parse, storage or vector-index
+failure produces a nonzero exit status; a remaining bounded backlog alone does
+not. Setting `ASTRA_CONTEXT_INDEX_EMBEDDING=off` intentionally skips vector work
+and reports `vector_index="disabled"` without counting a failure. Health fields
+contain aggregate status, not activity text or provider
+error payloads.

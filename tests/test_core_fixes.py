@@ -7950,8 +7950,8 @@ def test_api_bootstrap_constructs_saved_off_agent(monkeypatch, tmp_path):
     run(agent.close_external_memory())
 
 
-def test_readme_documents_animated_gif_fail_closed_boundary():
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+def test_usage_guide_documents_animated_gif_fail_closed_boundary():
+    readme = (Path(__file__).resolve().parents[1] / "docs" / "usage.md").read_text(
         encoding="utf-8"
     )
     readme = " ".join(readme.split())
