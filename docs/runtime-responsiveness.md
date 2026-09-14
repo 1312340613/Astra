@@ -1,5 +1,7 @@
 # Runtime profiling and diagnosis
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/runtime-responsiveness.md)
+
 Astra records optional timings to help distinguish model wait, tool execution,
 storage and interface delivery. Enable `ASTRA_PROFILE_QUERY=1`, restart Astra,
 reproduce the operation, then exit normally so accepted records can drain.

@@ -1,5 +1,7 @@
 # Search responsiveness and image galleries
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/search-images.md)
+
 Astra keeps the configured search provider and search type. `search_web` and
 `web_extract` explicitly opt into bounded parallel scheduling without changing
 their `network` risk. Individual results are sent to the frontend on completion;

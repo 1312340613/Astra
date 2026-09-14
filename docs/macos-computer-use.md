@@ -1,5 +1,7 @@
 # macOS Computer Use
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/macos-computer-use.md)
+
 Computer Use is a local-only macOS integration for controlling one selected application window at a time. It is currently implemented for macOS 14 and later. Respect the requested channel. Native CU can operate browser forms through AX; browser-specific integration is another supported channel when the user has not selected native CU.
 
 ## Build and readiness

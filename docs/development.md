@@ -1,6 +1,6 @@
 # Development, testing and maintenance
 
-[Home](../README.md) · [Documentation](README.md)
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/development.md)
 
 Run these commands from the source checkout. Keep individual test reports in ignored local storage.
 

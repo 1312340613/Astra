@@ -1,6 +1,6 @@
 # Tool execution and filesystem access
 
-[Home](../README.md) · [Documentation](README.md)
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/execution.md)
 
 Configure where tools run, which files they can access and how execution is approved.
 

@@ -1,5 +1,7 @@
 # Skill learning and manual review
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/skill-learning.md)
+
 Astra can save reusable methods directly as skills while working. It does not
 require a candidate, an experiment and an activation decision for every lesson.
 The model chooses when a lesson is worth saving; it is not required to create

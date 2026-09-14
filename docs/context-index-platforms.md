@@ -1,5 +1,7 @@
 # Context Index on macOS and Windows
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/context-index-platforms.md)
+
 The shared code selects MLX on macOS and OpenAI-compatible llama.cpp embeddings
 on Windows/Linux. An explicit `ASTRA_EMBEDDING_BACKEND` overrides detection.
 macOS retains `mlx-community/Qwen3-Embedding-4B-mxfp8` and the legacy default

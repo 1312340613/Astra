@@ -1,6 +1,6 @@
 # Everyday use
 
-[Home](../README.md) · [Documentation](README.md)
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/usage.md)
 
 Choose a model, adjust the interface and manage work in the terminal.
 

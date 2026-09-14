@@ -1,5 +1,7 @@
 # macOS browser URL recording
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/macos-browser-activity.md)
+
 Edge and Chrome can enrich activity events with the active page URL through the
 existing MV3 extension. Safari retains its existing recorder behavior; this
 bridge does not add Safari support. Ordinary `activity install` does not enable

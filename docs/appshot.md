@@ -1,6 +1,6 @@
 # Appshot: bring a window into the conversation
 
-[Home](../README.md) · [Documentation](README.md)
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/appshot.md)
 
 On macOS and Windows, a shortcut attaches one window screenshot and available interface text to your draft. You choose when to send it.
 

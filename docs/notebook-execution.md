@@ -1,5 +1,7 @@
 # Notebook execution
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/notebook-execution.md)
+
 ## Scope and behavior
 
 `notebook_execute` reuses Python execution approval, the selected Local/Docker

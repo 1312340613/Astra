@@ -1,7 +1,12 @@
 # Astra documentation
 
-Start with [English](../README.md) or [简体中文](../README.zh-CN.md) for a short
-introduction and quick start. The detailed guides below are primarily in English.
+**English** · [简体中文](zh-CN/README.md)
+
+Start with the [English homepage](../README.md) for a short introduction and quick
+start. Common guides are available in both languages; use the
+[Chinese documentation index](zh-CN/README.md) to keep reading in Chinese.
+Low-level designs and historical acceptance references remain in English and are
+labelled in the Chinese navigation.
 
 ## Installation and daily use
 
@@ -55,6 +60,10 @@ introduction and quick start. The detailed guides below are primarily in English
   they are not a current compatibility guarantee for every app or build.
 
 ## Maintaining documentation
+
+Update paired English and Chinese guides together. Keep commands, parameter names,
+error codes and examples aligned, and link to the same language when a translation
+exists. Label English-only design and acceptance references in Chinese pages.
 
 Keep current commands, behavior, limitations, architectural decisions and
 reproducible test procedures in this directory. Update linked code, Skills and

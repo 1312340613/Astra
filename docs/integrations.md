@@ -1,6 +1,6 @@
 # Optional integrations
 
-[Home](../README.md) · [Documentation](README.md)
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/integrations.md)
 
 Enable only the services you need. Run shell examples from the installation checkout. Provider credentials belong in your local `.env`.
 

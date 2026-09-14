@@ -1,5 +1,7 @@
 # Browser interaction: CDP and ordinary Edge
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/browser-interaction.md)
+
 The CDP backend returns structured page observations and supports
 `ref:<id>` targets from the latest snapshot. Existing unique CSS selectors remain
 supported. Restart Astra to load the updated tools. Safari control is not part of

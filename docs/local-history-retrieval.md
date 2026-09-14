@@ -1,5 +1,7 @@
 # On-demand local history retrieval
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/local-history-retrieval.md)
+
 ## Intended behavior
 
 The model can consult previous conversations and saved observations when they

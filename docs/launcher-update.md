@@ -1,6 +1,6 @@
 # Astra installation, startup and updates
 
-[Home](../README.md) · [Documentation](README.md)
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/launcher-update.md)
 
 [Install](#first-installation) · [Upgrade](#upgrade-an-older-checkout) · [Update](#update-from-a-source-checkout) · [Recover](#recovery-and-repair) · [Data](#data-and-installed-distributions) · [Commands](#command-reference) · [Troubleshoot](#troubleshooting)
 

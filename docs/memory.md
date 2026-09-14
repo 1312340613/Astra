@@ -1,6 +1,6 @@
 # Memory, history and learning
 
-[Home](../README.md) · [Documentation](README.md)
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/memory.md)
 
 Astra keeps a small core memory, searchable history and reusable skills. Each has a different purpose and lifecycle.
 

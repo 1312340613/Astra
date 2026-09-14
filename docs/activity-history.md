@@ -1,5 +1,7 @@
 # Local activity history
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/activity-history.md)
+
 Activity history is an opt-in, local archive for looking up recent computer-activity
 observations. It is a source of untrusted evidence, not memory, instructions, or a
 replacement for the source application.

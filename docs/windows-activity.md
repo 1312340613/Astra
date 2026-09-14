@@ -1,5 +1,7 @@
 # Windows computer activity (opt-in)
 
+[Home](../README.md) · [Documentation](README.md) · [简体中文](zh-CN/windows-activity.md)
+
 Double-click `.\scripts\activity-control.bat`. Start runs a hidden
 recorder; Pause suspends new sampling and stops the current summary subprocess
 within the polling interval; Resume clears the pause; Stop shuts it down.
