@@ -102,7 +102,8 @@ def _profile_from_data(name: str, raw: dict[str, Any]) -> ModelProfile:
     base_url = str(raw.get("base_url", "")).strip()
     env_name = str(raw.get("base_url_env", "")).strip()
     if env_name:
-        base_url = os.getenv(env_name, base_url)
+        # Empty optional .env entries must not erase the configured endpoint.
+        base_url = os.getenv(env_name, "").strip() or base_url
     if not base_url:
         raise ValueError(f"Model '{name}' is missing base_url")
     try:

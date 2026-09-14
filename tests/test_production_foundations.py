@@ -70,7 +70,8 @@ def test_failed_provider_switch_keeps_previous_client_state():
     assert client.provider is current_provider
 
 
-def test_yaml_model_catalog_supports_environment_and_user_overrides(tmp_path, monkeypatch):
+@pytest.mark.parametrize("url_override", [None, "", " \t ", "http://127.0.0.1:9000/v1", "  http://127.0.0.1:9000/v1\t"])
+def test_yaml_model_catalog_supports_environment_and_user_overrides(tmp_path, monkeypatch, url_override):
     bundled = tmp_path / "models.yaml"
     bundled.write_text(
         """version: 1
@@ -90,9 +91,13 @@ models:
     user = tmp_path / "user-models.yaml"
     monkeypatch.setenv("AGENT_MODELS_FILE", str(bundled))
     monkeypatch.setenv("AGENT_USER_MODELS_FILE", str(user))
-    monkeypatch.setenv("TEST_LOCAL_URL", "http://127.0.0.1:9000/v1")
+    if url_override is None:
+        monkeypatch.delenv("TEST_LOCAL_URL", raising=False)
+    else:
+        monkeypatch.setenv("TEST_LOCAL_URL", url_override)
 
-    assert model_profiles()["local"].base_url == "http://127.0.0.1:9000/v1"
+    expected_url = "http://127.0.0.1:9000/v1" if (url_override or "").strip() else "http://127.0.0.1:8000/v1"
+    assert model_profiles()["local"].base_url == expected_url
 
     save_model_profile(
         "second",
@@ -102,6 +107,18 @@ models:
     profiles = model_profiles()
     assert profiles["second"].context_limit == 8192
     assert profiles["second"].capabilities == frozenset({"streaming"})
+
+
+@pytest.mark.parametrize("url_override", ["", " \t "])
+def test_env_only_model_still_requires_a_base_url(tmp_path, monkeypatch, url_override):
+    config = tmp_path / "models.yaml"
+    config.write_text("models:\n  custom:\n    base_url_env: TEST_CUSTOM_URL\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_MODELS_FILE", str(config))
+    monkeypatch.setenv("AGENT_USER_MODELS_FILE", str(tmp_path / "absent.yaml"))
+    monkeypatch.setenv("TEST_CUSTOM_URL", url_override)
+
+    with pytest.raises(ValueError, match="Model 'custom' is missing base_url"):
+        model_profiles()
 
 
 def test_model_profile_api_key_uses_environment_before_resolver(monkeypatch):

@@ -4,8 +4,38 @@ import threading
 
 import pytest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from dotenv import dotenv_values
 
 from test_backend_task_protocol import _start_question_protocol_backend, _stop_protocol_backend
+
+
+def test_backend_starts_with_example_env_and_bundled_models(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    example = root / ".env.example"
+    # The standalone backend pins ASTRA_ENV_FILE to its installation. Pass the
+    # parsed example as process values to test first-run settings without
+    # writing an .env into the checkout or inheriting the developer's keys.
+    example_values = {name: value for name, value in dotenv_values(example).items() if value is not None}
+    monkeypatch.setenv("ASTRA_HOME", str(tmp_path / "state"))
+    proc, _, _, wait = _start_question_protocol_backend(
+        tmp_path, 0, "example-env-startup", env_overrides={
+            **example_values,
+            "AGENT_MODELS_FILE": str(root / "config" / "models.yaml"),
+        },
+    )
+    try:
+        initial = wait(lambda event: event.get("type") == "model_info")
+        hunyuan = next(model for model in initial["models"] if model["name"] == "hy4-preview")
+        assert hunyuan["endpoint"] == "https://tokenhub.tencentmaas.com/v1"
+        assert initial["connection_routes"]
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps({"type": "command", "cmd": "/yolo status"}) + "\n")
+        proc.stdin.flush()
+        wait(lambda event: event.get("type") == "yolo_status")
+    finally:
+        _stop_protocol_backend(proc)
 
 
 class ModelsHandler(BaseHTTPRequestHandler):
