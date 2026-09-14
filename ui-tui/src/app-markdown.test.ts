@@ -383,7 +383,7 @@ assert.match(appSource, /active=\{!openToolResult && approvalRequests\.length ==
 assert.match(appSource, /type: "user_question_response"/);
 assert.match(appSource, /type: "user_question_cancel"/);
 assert.match(appSource, /addMessage\("user", formatQuestionAnswerDisplaySummary\(questionRequest, answers\)\)/);
-assert.match(appSource, /disabled=\{Boolean\(openToolResult\) \|\| approvalRequests\.length > 0 \|\| questionRequest !== null\}/);
+assert.match(appSource, /disabled=\{connectionOpen \|\| Boolean\(openToolResult\) \|\| approvalRequests\.length > 0 \|\| questionRequest !== null\}/);
 assert.match(appSource, /if \(questionRequest\) return;/);
 assert.doesNotMatch(appSource, /submit\(formatQuestionAnswerSummary/);
 assert.match(appSource, /queueIndex=\{1\}/);

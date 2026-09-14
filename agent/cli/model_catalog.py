@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass, replace
+import logging
+from urllib.parse import urlsplit
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +14,11 @@ import httpx
 
 from agent.runtime.deepseek import LEGACY_DEEPSEEK_MODELS, canonical_deepseek_model
 
+from . import model_cache
+from .provider_connections import ROUTES, read_connections, record_profile
+
 from .local_omlx import local_omlx_provider_spec
 from .models import (
-    DEFAULT_CONTEXT_LIMIT,
     DEFAULT_MODELS_PATH,
     PACKAGED_MODELS_PATH,
     USER_MODELS_PATH,
@@ -31,6 +35,7 @@ class ProviderEndpoint:
     label: str
     profile: ModelProfile
     discovery_timeout: float = 4.0
+    inferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,9 @@ class CatalogEntry:
     provider_label: str
     base_url: str
     profile: ModelProfile
+    source: str = "preset"
+    metadata_known: bool = True
+    fetched_at: float | None = None
 
     def to_event(self, *, current: bool = False) -> dict[str, Any]:
         return {
@@ -51,6 +59,10 @@ class CatalogEntry:
             "endpoint": self.base_url,
             "context_limit": self.profile.context_limit,
             "current": current,
+            "source": self.source,
+            "metadata_known": self.metadata_known,
+            "capabilities": sorted(self.profile.capabilities),
+            "fetched_at": self.fetched_at,
         }
 
 
@@ -58,6 +70,8 @@ class CatalogEntry:
 class ModelCatalog:
     entries: tuple[CatalogEntry, ...]
     errors: dict[str, str]
+    statuses: dict[str, str] = field(default_factory=dict)
+    error_codes: dict[str, str] = field(default_factory=dict)
 
     @property
     def profiles(self) -> dict[str, ModelProfile]:
@@ -91,7 +105,7 @@ class ModelCatalog:
         if resolved or not value or "::" not in value:
             return resolved
         provider_id, model_id = value.split("::", 1)
-        if not provider_id or not model_id:
+        if not provider_id or not model_id or any(ord(c) < 32 or ord(c) == 127 for c in model_id):
             return None
         if provider_id == "configured":
             # Migrate selections saved before static remote profiles were
@@ -158,6 +172,11 @@ class ModelCatalog:
             return None
         model_id = canonical_deepseek_model(model_id, endpoint.profile.base_url)
         value = f"{provider_id}::{model_id}"
+        cached = model_cache.read_cache(endpoint)
+        if cached:
+            for entry in entries_from_items(endpoint, cached[0], source="cache", fetched_at=cached[1]):
+                if entry.model_id == model_id:
+                    return entry
         static = model_profiles()
         override = static.get(model_id)
         same_endpoint = (
@@ -181,6 +200,8 @@ class ModelCatalog:
             provider_label=endpoint.label,
             base_url=endpoint.profile.base_url,
             profile=profile,
+            source="manual",
+            metadata_known=same_endpoint or not endpoint.inferred,
         )
 
 
@@ -237,6 +258,11 @@ def configured_model_catalog() -> ModelCatalog:
             profile=profile,
         )
 
+    for endpoint in endpoints:
+        cached = model_cache.read_cache(endpoint)
+        if cached:
+            for entry in entries_from_items(endpoint, cached[0], source="cache", fetched_at=cached[1]):
+                entries.setdefault(entry.key, entry)
     return ModelCatalog(tuple(entries.values()), {})
 
 
@@ -297,6 +323,29 @@ def provider_endpoints() -> tuple[ProviderEndpoint, ...]:
             label=local_omlx.label,
             profile=local_omlx.profile,
         ))
+    # Existing cloud profiles become discoverable when their credential is present.
+    # Keep explicit providers (including disabled ones) authoritative.
+    for profile in model_profiles().values():
+        provider_id = profile.catalog_provider
+        if provider_id in {"configured", "local"} or provider_id in raw_providers:
+            continue
+        if not profile.api_key() or any(e.id == provider_id for e in endpoints):
+            continue
+        generic = ModelProfile(profile.base_url, 32_768, api_key_env=profile.api_key_env,
+                               api_key_resolver=profile.api_key_resolver,
+                               capabilities=frozenset({"streaming"}),
+                               catalog_provider=provider_id, provider_label=profile.provider_label)
+        route = next((r for r in ROUTES if r.base_url == profile.base_url.rstrip("/")), None)
+        label = f"{route.provider} · {route.label}" if route else profile.provider_label
+        endpoints.append(ProviderEndpoint(provider_id, label, generic, inferred=True))
+    for provider_id, record in read_connections().items():
+        try:
+            profile = record_profile(provider_id, record)
+        except (KeyError, ValueError, TypeError):
+            logging.getLogger(__name__).warning("Ignoring invalid provider connection: %s", provider_id)
+            continue
+        endpoints = [e for e in endpoints if e.id != provider_id]
+        endpoints.append(ProviderEndpoint(provider_id, profile.provider_label, profile, inferred=True))
     return tuple(endpoints)
 
 
@@ -338,122 +387,148 @@ def _model_items(payload: Any) -> list[dict[str, Any]]:
     return [item for item in (data or []) if isinstance(item, dict)]
 
 
-async def discover_model_catalog(timeout: float = 4.0) -> ModelCatalog:
-    endpoints = provider_endpoints()
+def entries_from_items(endpoint: ProviderEndpoint, items: list[dict], *, source: str,
+                       fetched_at: float | None = None) -> list[CatalogEntry]:
     static = model_profiles()
-    errors: dict[str, str] = {}
+    entries = {}
+    for item in items:
+        model_id = canonical_deepseek_model(str(item.get("id", "")), endpoint.profile.base_url)
+        if not model_id:
+            continue
+        override = next((p for name, p in static.items() if (p.model_id or name) == model_id
+                         and p.base_url.rstrip("/") == endpoint.profile.base_url.rstrip("/")), None)
+        template = override or endpoint.profile
+        context = model_context_limit(item) or template.context_limit
+        output = _positive_int(item.get("max_completion_tokens")) or template.max_tokens
+        capabilities = set(template.capabilities)
+        if override is None:
+            if isinstance(item.get("supported_parameters"), list):
+                capabilities.discard("tools")
+                if "tools" in item["supported_parameters"]:
+                    capabilities.add("tools")
+                if "reasoning" in item["supported_parameters"]:
+                    capabilities.add("reasoning")
+            if "image" in item.get("input_modalities", []):
+                capabilities.add("vision")
+        profile = replace(template, base_url=endpoint.profile.base_url,
+                          api_key_env=endpoint.profile.api_key_env,
+                          api_key_resolver=endpoint.profile.api_key_resolver,
+                          model_id=model_id, context_limit=context, max_tokens=min(output, max(1, context // 2)),
+                          capabilities=frozenset(capabilities), catalog_provider=endpoint.id,
+                          provider_label=endpoint.label)
+        entries[model_id] = CatalogEntry(f"{endpoint.id}::{model_id}", model_id, endpoint.id,
+                                        endpoint.label, endpoint.profile.base_url, profile, source,
+                                        override is not None or not endpoint.inferred or
+                                        bool(item.get("supported_parameters")), fetched_at)
+    return list(entries.values())
 
-    async def discover(endpoint: ProviderEndpoint) -> list[CatalogEntry]:
-        headers = {}
-        api_key = endpoint.profile.api_key()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        url = endpoint.profile.base_url.rstrip("/") + "/models"
-        try:
-            async with httpx.AsyncClient(timeout=max(timeout, endpoint.discovery_timeout)) as client:
-                response = await client.get(url, headers=headers)
+
+def normalize_model_items(payload: Any) -> list[dict]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("data", payload.get("models")), list):
+        raise ValueError("Response is not a model list")
+    items = _model_items(payload)
+    if len(items) > model_cache.MAX_MODELS:
+        raise ValueError("Model list exceeds supported size")
+    normalized = {}
+    for item in items:
+        model_id = str(item.get("id") or item.get("name") or item.get("model") or "").strip()
+        if not model_id or len(model_id) > 512 or any(ord(c) < 32 or ord(c) == 127 for c in model_id):
+            continue
+        top = item.get("top_provider") or {}
+        architecture = item.get("architecture") or {}
+        if not isinstance(top, dict) or not isinstance(architecture, dict):
+            continue
+        output_modalities = architecture.get("output_modalities")
+        # The chat adapter cannot use an image/audio/embedding-only model.
+        if isinstance(output_modalities, list) and "text" not in output_modalities:
+            continue
+        entry: dict[str, Any] = {"id": model_id}
+        context = model_context_limit(item) or model_context_limit(top)
+        if context:
+            entry["context_length"] = context
+        output = _positive_int(top.get("max_completion_tokens") or item.get("max_completion_tokens"))
+        if output:
+            entry["max_completion_tokens"] = output
+        for key, values in (("supported_parameters", item.get("supported_parameters")),
+                            ("input_modalities", architecture.get("input_modalities"))):
+            if isinstance(values, list):
+                entry[key] = [v for v in values if isinstance(v, str) and len(v) < 64][:32]
+        normalized[model_id] = entry
+    return list(normalized.values())
+
+
+async def discover_endpoint(endpoint: ProviderEndpoint, *, force: bool = False,
+                            timeout: float = 4.0) -> ModelCatalog:
+    cached = model_cache.read_cache(endpoint)
+    fresh = model_cache.read_cache(endpoint, fresh=True)
+    if fresh is not None and not force:
+        return ModelCatalog(tuple(entries_from_items(endpoint, fresh[0], source="cache", fetched_at=fresh[1])),
+                            {}, {endpoint.id: "cache"})
+    key = endpoint.profile.api_key()
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(endpoint.profile.base_url.rstrip("/") + "/models", headers=headers)
                 response.raise_for_status()
-                items = _model_items(response.json())
-        except (httpx.HTTPError, ValueError) as exc:
-            errors[endpoint.id] = f"{type(exc).__name__}: {exc}"
-            return []
+                items = normalize_model_items(response.json())
+        try:
+            stamp = model_cache.write_cache(endpoint, items)
+        except OSError:
+            stamp = None  # Read-only cache storage must not hide a successful live list.
+        return ModelCatalog(tuple(entries_from_items(endpoint, items, source="live", fetched_at=stamp)),
+                            {}, {endpoint.id: "live"})
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        error_code = "listing_unsupported" if code in {404, 405} else "auth_failed" if code in {401, 403} else "http_error"
+        reason = ("Authentication rejected; check this route's API key" if code in {401, 403}
+                  else "Model listing is unsupported; enter a model ID manually" if code in {404, 405}
+                  else f"Model listing failed (HTTP {code})")
+    except (httpx.TimeoutException, TimeoutError):
+        error_code = "timeout"
+        reason = "Model listing timed out"
+    except (httpx.HTTPError, ValueError):
+        error_code = "invalid_response"
+        reason = "Model listing failed or returned an invalid response"
+    items = [{"id": p.model_id or n} for n, p in model_profiles().items()
+             if p.base_url.rstrip("/") == endpoint.profile.base_url.rstrip("/")]
+    entries = {e.key: e for e in entries_from_items(endpoint, items, source="preset")}
+    if cached is not None:
+        for entry in entries_from_items(endpoint, cached[0], source="stale-cache", fetched_at=cached[1]):
+            entries.setdefault(entry.key, entry)
+    source = "stale-cache" if cached is not None else "preset"
+    return ModelCatalog(tuple(entries.values()), {endpoint.id: reason}, {endpoint.id: source},
+                        {endpoint.id: error_code})
 
-        entries = []
-        seen = set()
-        for item in items:
-            model_id = str(item.get("id") or item.get("name") or item.get("model") or "").strip()
-            if not model_id:
-                continue
-            model_id = canonical_deepseek_model(model_id, endpoint.profile.base_url)
-            if model_id in seen:
-                continue
-            seen.add(model_id)
-            override = static.get(model_id)
-            same_endpoint = (
-                override is not None
-                and override.base_url.rstrip("/") == endpoint.profile.base_url.rstrip("/")
-            )
-            template = override if override is not None and same_endpoint else endpoint.profile
-            context_limit = model_context_limit(item) or template.context_limit or DEFAULT_CONTEXT_LIMIT
-            profile = replace(
-                template,
-                base_url=endpoint.profile.base_url,
-                api_key_env=endpoint.profile.api_key_env,
-                api_key_resolver=endpoint.profile.api_key_resolver,
-                model_id=model_id,
-                context_limit=context_limit,
-                catalog_provider=endpoint.id,
-                provider_label=endpoint.label,
-            )
-            entries.append(CatalogEntry(
-                key=f"{endpoint.id}::{model_id}",
-                model_id=model_id,
-                provider_id=endpoint.id,
-                provider_label=endpoint.label,
-                base_url=endpoint.profile.base_url,
-                profile=profile,
-            ))
-        return entries
 
-    tasks = {endpoint.id: asyncio.create_task(discover(endpoint)) for endpoint in endpoints}
-    if tasks:
-        done, pending = await asyncio.wait(tasks.values(), timeout=timeout)
-    else:
-        done, pending = set(), set()
-    for endpoint in endpoints:
-        task = tasks[endpoint.id]
-        if task in pending:
-            errors[endpoint.id] = f"Discovery timed out after {timeout:.1f}s"
-            task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    discovered = [
-        tasks[endpoint.id].result()
-        for endpoint in endpoints
-        if tasks[endpoint.id] in done and not tasks[endpoint.id].cancelled()
-    ]
-    entries = [entry for group in discovered for entry in group]
 
-    # Keep configured models visible for a provider that is temporarily offline.
-    # A later menu refresh replaces these fallback entries with live discovery.
-    for endpoint in endpoints:
-        if endpoint.id not in errors:
-            continue
-        endpoint_url = endpoint.profile.base_url.rstrip("/")
-        for name, configured_profile in static.items():
-            if configured_profile.base_url.rstrip("/") != endpoint_url:
-                continue
-            model_id = configured_profile.model_id or name
-            profile = replace(
-                configured_profile,
-                base_url=endpoint.profile.base_url,
-                api_key_env=endpoint.profile.api_key_env,
-                api_key_resolver=endpoint.profile.api_key_resolver,
-                model_id=model_id,
-                catalog_provider=endpoint.id,
-                provider_label=endpoint.label,
-            )
-            entries.append(CatalogEntry(
-                key=f"{endpoint.id}::{model_id}",
-                model_id=model_id,
-                provider_id=endpoint.id,
-                provider_label=endpoint.label,
-                base_url=endpoint.profile.base_url,
-                profile=profile,
-            ))
+async def discover_model_catalog(timeout: float = 4.0, *, provider_id: str | None = None,
+                                 force: bool = True) -> ModelCatalog:
+    endpoints = [e for e in provider_endpoints() if provider_id is None or e.id == provider_id]
+    groups = await asyncio.gather(*(discover_endpoint(e, force=force, timeout=timeout) for e in endpoints))
+    entries = [entry for group in groups for entry in group.entries]
+    dynamic_urls = {e.profile.base_url.rstrip("/") for e in endpoints}
+    for entry in configured_model_catalog().entries:
+        if entry.base_url.rstrip("/") not in dynamic_urls and (provider_id is None or entry.provider_id == provider_id):
+            entries.append(entry)
+    return ModelCatalog(tuple({e.key: e for e in entries}.values()),
+                        {k: v for group in groups for k, v in group.errors.items()},
+                        {k: v for group in groups for k, v in group.statuses.items()},
+                        {k: v for group in groups for k, v in group.error_codes.items()})
 
-    dynamic_urls = {endpoint.profile.base_url.rstrip("/") for endpoint in endpoints}
-    for name, profile in static.items():
-        if profile.base_url.rstrip("/") in dynamic_urls:
-            continue
-        provider_id = profile.catalog_provider or "configured"
-        provider_label = profile.provider_label or "Configured"
-        entries.append(CatalogEntry(
-            key=f"{provider_id}::{name}",
-            model_id=profile.model_id or name,
-            provider_id=provider_id,
-            provider_label=provider_label,
-            base_url=profile.base_url,
-            profile=replace(profile, model_id=profile.model_id or name),
-        ))
-    return ModelCatalog(tuple({entry.key: entry for entry in entries}.values()), errors)
+
+def provider_menu_items(catalog: ModelCatalog) -> list[dict]:
+    endpoints = {e.id: e for e in provider_endpoints()}
+    groups = {e.provider_id: {"id": e.provider_id, "label": e.provider_label,
+                              "endpoint": e.base_url, "connected": bool(e.profile.api_key()) or not e.profile.api_key_env or
+                              urlsplit(e.base_url).hostname in {"localhost", "127.0.0.1", "::1"}} for e in catalog.entries}
+    for endpoint in endpoints.values():
+        groups[endpoint.id] = {"id": endpoint.id, "label": endpoint.label,
+                               "endpoint": endpoint.profile.base_url,
+                               "connected": bool(endpoint.profile.api_key()) or not endpoint.profile.api_key_env or
+                               urlsplit(endpoint.profile.base_url).hostname in {"localhost", "127.0.0.1", "::1"}}
+    for provider_id, group in groups.items():
+        group["source"] = catalog.statuses.get(provider_id, "preset")
+        group["error"] = catalog.errors.get(provider_id, "")
+        group["count"] = sum(e.provider_id == provider_id for e in catalog.entries)
+    return list(groups.values())

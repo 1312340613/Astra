@@ -8,6 +8,7 @@ import os
 import json
 import sqlite3
 import asyncio
+from dataclasses import replace
 import inspect
 import logging
 import platform
@@ -115,16 +116,21 @@ from agent.sandbox.local import LocalSandbox
 from agent.sandbox.docker import DockerSandbox
 from agent.sandbox.router import SandboxRouter
 from agent.cli.images import build_image_message_content, build_user_message_content, message_display_text
-from agent.cli.models import context_limit_for_model, prompt_token_budget
+from agent.cli.models import ModelProfile, context_limit_for_model, prompt_token_budget
 from agent.cli.model_catalog import (
     ModelCatalog,
+    CatalogEntry,
     configured_model_catalog,
     discover_model_catalog,
     parse_model_command_argument,
 )
 from agent.cli.model_preferences import read_selected_model
 from agent.cli.bar_preferences import load_bar_output_mode, save_bar_output_mode
+from agent.cli.provider_connections import connection_routes_event
+from agent.cli.model_catalog import provider_menu_items
+from agent.cli.model_preferences import recent_models
 from agent.cli.connections import (
+    connect_provider,
     create_probe_and_switch,
     is_local_url,
     switch_to_profile,
@@ -754,10 +760,10 @@ async def _main(startup_started: float):
         or (catalog.entries[0] if catalog.entries else None)
     )
     if startup_entry is None:
-        message = "No configured startup model. Check models.yaml or select a provider."
-        print(f"[backend] {message}", file=sys.stderr, flush=True)
-        _send({"type": "error", "message": message})
-        return
+        startup_entry = CatalogEntry("unconfigured::none", "none", "unconfigured", "No provider connected",
+                                     "https://unconfigured.invalid/v1",
+                                     ModelProfile("https://unconfigured.invalid/v1", 32768,
+                                                  api_key_env="ASTRA_UNCONFIGURED_KEY"))
     if not catalog.resolve(startup_entry.key):
         catalog = ModelCatalog((startup_entry, *catalog.entries), catalog.errors)
     current_model_key = startup_entry.key
@@ -768,12 +774,10 @@ async def _main(startup_started: float):
     if not api_key and (is_local_url(startup_base_url) or not startup_profile.api_key_env):
         api_key = "local"
     if not api_key:
-        message = f"{startup_profile.api_key_env} not set for remote model {startup_model}"
-        print(f"[backend] {message}", file=sys.stderr, flush=True)
-        _send({"type": "error", "message": message})
-        return
+        _send({"type": "error", "message": "No provider connected. Use /connect to choose a provider and model."})
 
     llm_config = LLMConfig(
+        connection_required=not bool(api_key),
         provider=startup_profile.provider,
         model=startup_model,
         api_key=api_key,
@@ -1554,25 +1558,48 @@ async def _main(startup_started: float):
                     on_enter()
                 await _stream_reply_inner(msg)
 
-    async def _refresh_model_catalog() -> ModelCatalog:
+    catalog_tasks: dict[str, asyncio.Task] = {}
+
+    async def _refresh_model_catalog(provider_id: str | None = None, *, force: bool = False) -> ModelCatalog:
         nonlocal catalog
-        refreshed = await discover_model_catalog()
-        synced = _sync_current_context_budget(agent, refreshed, current_model_key)
-        if not synced:
-            live_limit = await _live_context_limit(agent.llm.config)
-            if live_limit is not None:
-                agent.llm.config.context_limit = live_limit
-                agent.context.max_prompt_tokens = prompt_token_budget(
-                    live_limit,
-                    agent.llm.config.max_tokens,
-                )
-        # A temporarily unavailable provider must not erase every usable model.
-        if refreshed.entries:
-            current_entry = refreshed.resolve_persisted(current_model_key)
-            if current_entry is not None and not refreshed.resolve(current_entry.key):
-                refreshed = ModelCatalog((current_entry, *refreshed.entries), refreshed.errors)
-            catalog = refreshed
+        refreshed = await discover_model_catalog(provider_id=provider_id, force=force)
+        if provider_id:
+            entries = tuple(e for e in catalog.entries if e.provider_id != provider_id) + refreshed.entries
+            errors = {k: v for k, v in catalog.errors.items() if k != provider_id}
+            errors.update(refreshed.errors)
+            refreshed = ModelCatalog(entries, errors, {**catalog.statuses, **refreshed.statuses})
+        current_entry = catalog.resolve(current_model_key) or refreshed.resolve_persisted(current_model_key)
+        if current_entry is not None and not refreshed.resolve(current_entry.key):
+            refreshed = ModelCatalog((*refreshed.entries, replace(current_entry, source="selected")), refreshed.errors, refreshed.statuses)
+        catalog = refreshed
         return catalog
+
+    async def _refresh_provider(provider_id: str, force: bool = False) -> None:
+        try:
+            await _refresh_model_catalog(provider_id, force=force)
+            await _send_model_info()
+        except (ValueError, OSError):
+            _send({"type": "error", "message": "Could not read provider configuration. Check local connection files."})
+
+    async def _connect_provider(request: dict) -> None:
+        nonlocal catalog
+        request_id = str(request.get("request_id", ""))
+        try:
+            provider_id, discovered = await connect_provider(
+                str(request.get("route_id", "")), base_url=str(request.get("base_url", "")),
+                api_key=str(request.pop("api_key", "")), api_key_env=str(request.get("api_key_env", "")))
+            error = discovered.errors.get(provider_id, "")
+            catalog = ModelCatalog(tuple(e for e in catalog.entries if e.provider_id != provider_id) + discovered.entries,
+                                   {**{k: v for k, v in catalog.errors.items() if k != provider_id}, **discovered.errors}, {**catalog.statuses, **discovered.statuses})
+            await _send_model_info()
+            _send({"type": "connection_result", "request_id": request_id, "provider_id": provider_id,
+                   "error": "", "notice": error or "Connection saved. Select a model; chat access is checked on use."})
+        except (ValueError, OSError) as exc:
+            # Only validation errors are suitable for display; never include filesystem/HTTP payloads.
+            message = str(exc) if isinstance(exc, ValueError) else "Could not save connection; current model unchanged."
+            _send({"type": "connection_result", "request_id": request_id, "error": message})
+        finally:
+            request.pop("api_key", None)
 
     async def _send_model_info(*, refresh: bool = False):
         if refresh:
@@ -1594,6 +1621,9 @@ async def _main(startup_started: float):
                "models": [entry.to_event(current=entry.key == current_model_key)
                           for entry in catalog.entries],
                "provider_errors": catalog.errors,
+               "providers": provider_menu_items(catalog),
+               "connection_routes": connection_routes_event(),
+               "recent_models": recent_models(),
                "total_tokens": ctx.total_tokens,
                "prompt_tokens": ctx.total_prompt_tokens,
                "completion_tokens": ctx.total_completion_tokens,
@@ -1841,6 +1871,10 @@ async def _main(startup_started: float):
 
     def _start_message(msg: Msg, input_text: str, resume_task: dict | None = None, *, appshot_turn_owned: bool = False) -> bool:
         nonlocal active_task, active_task_id, active_task_persisted, goal_turn_generation, _reply_done
+        if agent.llm.config.connection_required:
+            _send({"type": "error", "message": "Use /connect and select a model before sending a message."})
+            _send({"type": "done"})
+            return False
         if appshot_turn_owned and active_task is not None and not active_task.done():
             return False
         request_id = msg.metadata.get("request_id") or msg.id
@@ -2069,7 +2103,19 @@ async def _main(startup_started: float):
                     _send({"type": "error", "message": str(e)})
 
             elif cmd.get("type") == "refresh_models":
-                await _send_model_info(refresh=True)
+                provider_id = str(cmd.get("provider_id", ""))
+                if not provider_id:
+                    await _send_model_info()  # Opening the provider list performs no network I/O.
+                elif provider_id not in catalog_tasks or catalog_tasks[provider_id].done():
+                    catalog_tasks[provider_id] = asyncio.create_task(_refresh_provider(provider_id, bool(cmd.get("force"))))
+
+            elif cmd.get("type") == "connect_provider":
+                if "connect" not in catalog_tasks or catalog_tasks["connect"].done():
+                    catalog_tasks["connect"] = asyncio.create_task(_connect_provider(dict(cmd)))
+                else:
+                    _send({"type": "connection_result", "request_id": str(cmd.get("request_id", "")),
+                           "error": "A connection request is still running."})
+                cmd.pop("api_key", None)
 
             elif cmd.get("type") == "command":
                 raw_command = cmd.get("cmd")
@@ -2967,6 +3013,11 @@ async def _main(startup_started: float):
                             agent, parts[1], parts[2], api_key_env
                         )
                         if probe.ok:
+                            catalog = configured_model_catalog()
+                            connected_entry = next((e for e in catalog.entries if e.model_id == parts[1]
+                                                    and e.base_url.rstrip("/") == parts[2].rstrip("/")), None)
+                            if connected_entry:
+                                current_model_key = connected_entry.key
                             output = f"{probe.message}\nSaved profile and startup selection in {settings_path}."
                             error = ""
                         else:
@@ -2976,19 +3027,24 @@ async def _main(startup_started: float):
                     _send({"type": "done"})
                     await _send_model_info()
                 elif c.startswith("/model"):
-                    await _refresh_model_catalog()
                     arg = parse_model_command_argument(c)
+                    if active_task is not None and not active_task.done():
+                        _send({"type": "tool_result", "name": "model", "output": "",
+                               "error": "Wait for the current reply or cancel it before switching models.", "code": "busy"})
+                        continue
                     if arg:
-                        entry = catalog.resolve(arg)
+                        # An explicit provider::model also supports unlisted/custom IDs.
+                        # Resolve from current metadata without refreshing other providers.
+                        entry = catalog.resolve(arg) or catalog.resolve_persisted(arg)
                         if entry is not None:
                             try:
                                 settings_path = switch_to_profile(
                                     agent,
                                     entry.key,
                                     entry.profile,
-                                    valid_models=set(catalog.profiles),
+                                    valid_models=set(catalog.profiles) | {entry.key},
                                 )
-                            except ValueError as exc:
+                            except (ValueError, OSError) as exc:
                                 _send({
                                     "type": "tool_result",
                                     "name": "model",
@@ -2998,11 +3054,13 @@ async def _main(startup_started: float):
                                 })
                             else:
                                 current_model_key = entry.key
+                                if not catalog.resolve(entry.key):
+                                    catalog = ModelCatalog((*catalog.entries, entry), catalog.errors, catalog.statuses)
                                 _send({"type": "tool_result", "name": "model",
                                        "output": f"Model connection switched to: {entry.model_id}\n"
                                                  f"Provider: {entry.provider_label} @ {entry.base_url}\n"
                                                  f"Saved as startup default in {settings_path}.\n"
-                                                 "Start the matching model server separately before sending a message.",
+                                                 "Model access and tool support are checked when used.",
                                        "error": "", "code": ""})
                         else:
                             lines = [f"Unknown model: {arg}. Available:"]
@@ -3246,7 +3304,7 @@ async def _main(startup_started: float):
                         _send({"type": "done"})
     finally:
         await channel_manager.stop()
-        pending_startup = [task for task in startup_tasks if not task.done()]
+        pending_startup = [task for task in [*startup_tasks, *catalog_tasks.values()] if not task.done()]
         for task in pending_startup:
             task.cancel()
         if pending_startup:

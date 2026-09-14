@@ -7,6 +7,7 @@ import { useTheme } from "../theme-context.js";
 import { randomUUID } from "node:crypto";
 import { emptyDraft, appendAppshot, reconcileAppshotInput, mapAppshotOrdinaryText, projectAppshotText, appshotSubmission, freezeAppshotSubmission, settleAppshotSubmission, revokeAppshots, appshotCount, validateAppshotOffer, type AppshotInputState, type AppshotInputOffer, type AppshotManifestReader } from "../appshot-input.js";
 import type { AppshotConsumer, AppshotDraftState } from "../appshot-client.js";
+import type { ProviderInfo } from "../types.js";
 import type { InputSubmission } from "../types.js";
 import type { RuntimeMode } from "../types.js";
 import type { ThemeName } from "../theme.js";
@@ -38,6 +39,7 @@ import {
 } from "../paste-command.js";
 
 export interface AppshotInputHandle extends AppshotConsumer {
+  openModelMenu(providerId: string): void;
   snapshot(): AppshotInputState;
   capacity(): AppshotDraftState;
   acceptSubmission(id: string): void;
@@ -60,7 +62,9 @@ interface Props {
   modelList: ModelMenuItem[];
   personas?: { name: string; description: string }[];
   menuRows?: number;
-  onModelMenuOpen?: () => void;
+  providers?: ProviderInfo[];
+  recentModels?: string[];
+  onModelMenuOpen?: (providerId?: string) => void;
   onMenuVisibilityChange?: (visible: boolean) => void;
   menuFocusActive?: boolean;
   currentTheme?: ThemeName;
@@ -129,6 +133,7 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
   localSessionList = [],
   localMode,
   modelList,
+  providers, recentModels,
   personas = [],
   menuRows = 8,
   onModelMenuOpen,
@@ -149,10 +154,11 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
   const [pastedText, setPastedText] = useState<PastedTextAttachment[]>([]);
   const [cursorOffset, setCursorOffset] = useState(0);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [selectedModelSuggestion, setSelectedModelSuggestion] = useState<string | null>(null);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [submissionHint, setSubmissionHint] = useState("");
   const submittedValueRef = useRef<string | null>(null);
-  const modelMenuOpenRef = useRef(false);
+  const modelMenuOpenRef = useRef<string | null>(null);
   const inputRef = useRef("");
   const attachmentsRef = useRef<ImageInputAttachment[]>([]);
   const pastedTextRef = useRef<PastedTextAttachment[]>([]);
@@ -245,6 +251,10 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
     && !appshotRef.current.draft.attachments.some(a => a.requestId === requestId)
     && !appshotRef.current.pending?.draft.attachments.some(a => a.requestId === requestId);
   useImperativeHandle(ref, () => ({
+    openModelMenu: (providerId: string) => {
+      const value = `/model ${providerId}::`;
+      commitInput(value, value.length);
+    },
     snapshot: () => appshotRef.current,
     capacity,
     stage: (offer, binding) => {
@@ -311,6 +321,7 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
     onAppshotStateChange?.(capacity());
   }, [disabled, onAppshotStateChange]);
   const commandContext = {
+    providers, recentModels,
     themeName: currentTheme,
     barSessions: barSessionList,
     minimalSessions: minimalSessionList,
@@ -319,8 +330,11 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
     personas,
   };
   const commandSuggestions = disabled || menuDismissed ? [] : slashCommandSuggestions(input, sessionList, modelList, commandContext);
+  const modelSuggestionIndex = selectedModelSuggestion === null ? -1 : commandSuggestions.findIndex(
+    s => (s.submitValue ?? s.completion ?? s.command) === selectedModelSuggestion,
+  );
   const normalizedSelectedCommandIndex = normalizeSelectedCommandIndex(
-    selectedCommandIndex,
+    modelSuggestionIndex >= 0 ? modelSuggestionIndex : selectedCommandIndex,
     commandSuggestions.length,
   );
   const menuVisible = commandSuggestions.length > 0;
@@ -348,8 +362,9 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
 
   useEffect(() => {
     const isOpen = /^\/model(?:\s|$)/i.test(input.trimStart());
-    if (isOpen && !modelMenuOpenRef.current) onModelMenuOpen?.();
-    modelMenuOpenRef.current = isOpen;
+    const providerId = input.trimStart().match(/^\/model\s+([^\s]+?)::/)?.[1] ?? "";
+    if (isOpen && modelMenuOpenRef.current !== providerId) onModelMenuOpen?.(providerId || undefined);
+    modelMenuOpenRef.current = isOpen ? providerId : null;
   }, [input, onModelMenuOpen]);
 
   const commitInput = (nextValue: string, nextCursor: number) => {
@@ -368,6 +383,7 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
     pastedTextRef.current = pasteUpdate.attachments;
     setPastedText(pasteUpdate.attachments);
     setSelectedCommandIndex(0);
+    setSelectedModelSuggestion(null);
     setMenuDismissed(false);
     submittedValueRef.current = null;
     setSubmissionHint("");
@@ -506,12 +522,13 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
       return;
     }
 
-    if (commandSuggestions.length > 0 && key.upArrow) {
-      setSelectedCommandIndex((current) => normalizeSelectedCommandIndex(current - 1, commandSuggestions.length));
-      return;
-    }
-    if (commandSuggestions.length > 0 && key.downArrow) {
-      setSelectedCommandIndex((current) => normalizeSelectedCommandIndex(current + 1, commandSuggestions.length));
+    if (commandSuggestions.length > 0 && (key.upArrow || key.downArrow)) {
+      const next = normalizeSelectedCommandIndex(normalizedSelectedCommandIndex + (key.upArrow ? -1 : 1), commandSuggestions.length);
+      setSelectedCommandIndex(next);
+      if (providers !== undefined && /^\/model(?:\s|$)/.test(inputRef.current)) {
+        const item = commandSuggestions[next];
+        setSelectedModelSuggestion(item.submitValue ?? item.completion ?? item.command);
+      }
       return;
     }
     if (commandSuggestions.length > 0 && key.escape) {

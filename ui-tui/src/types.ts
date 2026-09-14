@@ -241,6 +241,7 @@ export type PyEvent =
       count: number;
       has_more: boolean;
     }
+  | { type: "connection_result"; request_id: string; provider_id?: string; error: string; notice?: string }
   | { type: "done" }
   | { type: "backend_hello"; protocol_version: number }
   | {
@@ -257,7 +258,7 @@ export type PyEvent =
       details?: Record<string, unknown>;
       artifact_ref?: string;
     }
-  | { type: "model_info"; model: string; model_key?: string; reasoning_effort?: "low" | "high" | "max" | null; code_mode?: "native" | "code" | "both"; personas?: { name: string; description: string }[]; models?: (string | ModelInfo)[]; provider_errors?: Record<string, string>; total_tokens: number; prompt_tokens: number; completion_tokens: number; cache_hit_tokens?: number; cache_miss_tokens?: number; context_pct: number; context_used?: number; context_limit: number; show_reasoning?: boolean }
+  | { type: "model_info"; model: string; model_key?: string; reasoning_effort?: "low" | "high" | "max" | null; code_mode?: "native" | "code" | "both"; personas?: { name: string; description: string }[]; models?: (string | ModelInfo)[]; providers?: ProviderInfo[]; connection_routes?: ConnectionRoute[]; recent_models?: string[]; provider_errors?: Record<string, string>; total_tokens: number; prompt_tokens: number; completion_tokens: number; cache_hit_tokens?: number; cache_miss_tokens?: number; context_pct: number; context_used?: number; context_limit: number; show_reasoning?: boolean }
   | { type: "session_info"; name: string; messages: number }
     | { type: "cache_status"; cache_hit_tokens: number; cache_miss_tokens: number }
 
@@ -356,7 +357,19 @@ export interface ToolProgressInfo {
   unit?: string;
 }
 
+export interface ProviderInfo {
+  id: string; label: string; endpoint: string; connected: boolean;
+  source: string; error: string; count: number;
+}
+export interface ConnectionRoute {
+  id: string; provider: string; label: string; base_url: string;
+  api_key_env: string; key_available: boolean;
+}
 export interface ModelInfo {
+  source?: string;
+  metadata_known?: boolean;
+  capabilities?: string[];
+  fetched_at?: number;
   key: string;
   name: string;
   provider: string;
@@ -391,7 +404,8 @@ export type TuiCommand =
   | {type:'submission_status'; submission_id:string}
   | { type: "image"; path: string; prompt: string }
   | { type: "command"; cmd: string }
-  | { type: "refresh_models" }
+  | { type: "refresh_models"; provider_id?: string; force?: boolean }
+  | { type: "connect_provider"; request_id: string; route_id: string; base_url: string; api_key: string; api_key_env: string }
   | { type: "event_replay"; after_cursor: number; limit?: number }
   | { type: "tool_approval_response"; request_id: string; decision: "once" | "session" | "deny" }
   | { type: "user_question_response"; request_id: string; answers: UserQuestionAnswer[] }

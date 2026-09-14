@@ -59,6 +59,8 @@ def save_selected_model(model: str, valid_models: set[str] | None = None) -> Pat
         pass
 
     data["selected_model"] = model
+    previous = data.get("recent_models", [])
+    data["recent_models"] = [model, *[m for m in previous if isinstance(m, str) and m != model]][:8] if isinstance(previous, list) else [model]
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -80,3 +82,12 @@ def resolve_startup_model(env_model: str, env_base_url: str) -> tuple[str, str]:
     if env_model in profiles:
         return env_model, profiles[env_model].base_url
     return env_model, env_base_url
+
+
+def recent_models() -> list[str]:
+    try:
+        data = json.loads(model_settings_path().read_text(encoding="utf-8"))
+        items = data.get("recent_models", [])
+        return [m for m in items if isinstance(m, str)][:8] if isinstance(items, list) else []
+    except (OSError, ValueError, AttributeError):
+        return []

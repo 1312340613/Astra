@@ -10,15 +10,32 @@
 
 ## 连接模型
 
-内置配置位于 `config/models.yaml`。本机专用配置写入 `.astra/models.yaml`，可覆盖同名内置项；配置文件记录凭据的环境变量名，不保存 API Key 值。
+输入 `/connect`，依次选择提供商、API 线路，再输入 API Key 或选择已有环境变量。Astra 会读取该端点的模型列表，然后打开可搜索的模型菜单。首次设置不需要先配置默认模型的 Key。连接成功只保存提供商；选定模型后，才会保存为下次启动的默认模型。
 
 ```text
+/connect
 /model
-/connect my-local http://127.0.0.1:8084/v1 LLM_API_KEY
+/model deepseek::deepseek-flash
 /doctor
 ```
 
-`/connect` 的第三个参数是保存 API Key 的环境变量名，默认使用 `LLM_API_KEY`。
+在 `/model` 中按 Enter 进入已连接的提供商，输入文字筛选模型。第一层还显示最近使用的模型。提供商子菜单有 **Refresh model list**（刷新）和 **Back to providers**（返回）。需要使用未列出的模型时，在 `provider::` 后输入完整 ID，选择 **Use model ID**。
+
+只查询当前打开的提供商；缓存有效期为一小时，也可手动刷新，没有后台定时轮询。条目分别标注 `live`（实时）、`cache`（缓存）、`stale-cache`（查询失败后的旧缓存）、`preset`（预设）或手填模型。失败原因会与缓存/预设一起显示；接口成功返回空列表时不拿旧列表补充；当前选择可能以 `selected` 标记继续显示。能列出模型，不代表已验证聊天权限、套餐额度或工具能力。
+
+向导支持 DeepSeek、Qwen / 百炼、智谱、混元、OpenRouter，以及自定义 OpenAI 兼容端点。普通 API、Coding / Token Plan、不同地域分别保存，不会把套餐 Key 自动重试到普通计费 API。百炼需要业务空间地址的线路，应粘贴控制台给出的 Base URL。本地模型（含 oMLX）沿用现有发现方式；非兼容协议仍需要独立适配器。
+
+内置模型参数仍在 `config/models.yaml`，本机覆盖项仍在 `.astra/models.yaml`。已知模型保留自己的参数；新模型优先使用接口返回的元数据，缺失时按保守的 32K 上下文、4K 输出预算处理，不假定视觉或推理支持。提供商有特殊限制时，可补充本机模型覆盖项。
+
+向导中的 Key 遮蔽显示，经专用控制消息传递，只保存到 `.astra/connections/*.json`，不进入 Git 或会话历史。POSIX 文件仅所有者可读写；Windows 使用安装目录所属用户的目录权限。环境变量方式只保存变量名。模型元数据另存于 `.astra/model-cache`，按端点及凭据隔离。这些文件都属于安装状态（或 `ASTRA_HOME`），`astra update` 会保留。它们是本机私有文件，并非加密凭据库。
+
+旧命令仍可使用：
+
+```text
+/connect my-local http://127.0.0.1:8084/v1 LLM_API_KEY
+```
+
+第三个参数是环境变量**名称**，不要填 Key 值。纯 CLI 中，`/connect` 提供编号选择和隐藏 Key 输入；`/model <provider>::` 列出该提供商的模型。
 
 <a id="deepseek-model-migration"></a>
 

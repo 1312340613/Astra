@@ -57,7 +57,8 @@ from ..sandbox.router import SandboxRouter
 from .images import build_image_message_content, build_user_message_content
 from .models import context_limit_for_model, model_profiles, prompt_token_budget
 from .model_catalog import parse_model_command_argument
-from .model_preferences import resolve_startup_model
+from .model_preferences import resolve_startup_model, read_selected_model
+from .model_catalog import configured_model_catalog, discover_model_catalog
 from .mode_preferences import (
     MODE_USAGE,
     REASONING_EFFORTS,
@@ -699,8 +700,11 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
                     return msg
 
     elif command == "/connect":
-        if len(parts) < 3:
-            print("  Usage: /connect <model-name> <base-url> [api-key-env]\n")
+        if len(parts) == 1:
+            from .connections import prompt_provider_connection
+            await prompt_provider_connection(agent)
+        elif len(parts) < 3:
+            print("  Usage: /connect or /connect <model-name> <base-url> [api-key-env]\n")
         else:
             name, base_url = parts[1], parts[2]
             api_key_env = parts[3] if len(parts) > 3 else "LLM_API_KEY"
@@ -712,32 +716,25 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
                 print(f"  \033[33mConnection failed; current model unchanged: {probe.message}\033[0m\n")
 
     elif command == "/model":
-        profiles = model_profiles()
+        catalog = configured_model_catalog()
         model_arg = parse_model_command_argument(cmd)
-        if model_arg:
-            if model_arg in profiles:
-                profile = profiles[model_arg]
-                try:
-                    settings_path = switch_to_profile(agent, model_arg, profile)
-                except ValueError as exc:
-                    print(f"  \033[33mModel switch rejected; current model unchanged: {exc}\033[0m\n")
-                else:
-                    print(f"  \033[90mModel connection switched to: \033[36m{model_arg}\033[0m @ {profile.base_url}")
-                    print(f"  \033[90mSaved as startup default in {settings_path}.\033[0m\n")
-            else:
-                print(f"  \033[33mUnknown model: {model_arg}. Available:\033[0m")
-                for m in profiles:
-                    marker = " \033[1m*\033[0m" if m == agent.llm.config.model else "  "
-                    print(f"    {marker} \033[36m{m}\033[0m")
-                print()
+        if not model_arg or model_arg.endswith("::"):
+            provider_id = model_arg[:-2] if model_arg else None
+            catalog = await discover_model_catalog(provider_id=provider_id, force=False)
+            for entry in catalog.entries:
+                print(f"  {entry.key} · {entry.source}")
+            for provider_id, error in catalog.errors.items():
+                print(f"  {provider_id}: {error}")
         else:
-            current = agent.llm.config.model
-            print(f"  \033[90mCurrent model: \033[36m{current}\033[0m @ {agent.llm.config.base_url}")
-            print("  \033[90mAvailable:\033[0m")
-            for m in profiles:
-                marker = " \033[1m*\033[0m" if m == current else "  "
-                print(f"    {marker} \033[36m{m}\033[0m")
-            print()
+            entry = catalog.resolve(model_arg) or catalog.resolve_persisted(model_arg)
+            if entry is None:
+                print("  Unknown model. Use /model or /model <provider>::<model ID>.")
+            else:
+                try:
+                    switch_to_profile(agent, entry.key, entry.profile, valid_models={entry.key})
+                    print(f"  Selected {entry.key}; saved as startup default.")
+                except (ValueError, OSError) as exc:
+                    print(f"  Model switch rejected; current model unchanged: {exc}")
 
     elif command == "/handoff":
         from ..runtime.session_handoff import generate_handoff, save_handoff
@@ -1045,15 +1042,20 @@ def main():
             startup_model = selected_key
             startup_base_url = profiles[selected_key].base_url or startup_base_url
 
-    startup_profile = profiles.get(startup_model, profiles["deepseek-flash"])
+    catalog = configured_model_catalog()
+    saved_entry = catalog.resolve_persisted(read_selected_model())
+    if saved_entry is not None and not astra_backend:
+        startup_model, startup_base_url = saved_entry.key, saved_entry.base_url
+        profiles[startup_model] = saved_entry.profile
+    startup_profile = profiles.get(startup_model) or next(iter(profiles.values()))
     api_key = startup_profile.api_key()
     if not api_key and is_local_url(startup_base_url):
         api_key = "local"
     if not api_key:
-        print(f"\033[31m[Error] {startup_profile.api_key_env} not set for remote model {startup_model}\033[0m")
-        sys.exit(1)
+        print("No provider connected. Use /connect to choose a provider and model.")
 
     config = LLMConfig(
+        connection_required=not bool(api_key),
         provider=startup_profile.provider,
         model=(startup_profile.model_id or startup_model) if startup_model in profiles else startup_model,
         api_key=api_key,

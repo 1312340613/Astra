@@ -897,6 +897,7 @@ def _start_question_protocol_backend(
     session_name: str,
     *,
     settings_overrides: dict | None = None,
+    env_overrides: dict | None = None,
 ):
     settings = tmp_path / "settings.json"
     settings_payload = {"selected_model": "Qwen3.6-35B-A3B"}
@@ -945,6 +946,7 @@ def _start_question_protocol_backend(
         "AGENT_MCP_CONFIG": str(tmp_path / "missing-mcp.json"),
         "PYTHONUNBUFFERED": "1",
     })
+    env.update(env_overrides or {})
     proc = subprocess.Popen(
         [sys.executable, "-m", "agent.cli.backend"],
         stdin=subprocess.PIPE,

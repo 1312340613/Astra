@@ -1,3 +1,5 @@
+import type { ProviderInfo, ConnectionRoute } from "./types.js";
+import { ConnectionPanel } from "./components/connection-panel.js";
 import { appshotRejectionNotice } from "./appshot-rejection.js";
 import { openImageGallery } from "./image-gallery.js";
 import type { AppshotConsumer, AppshotDraftState } from "./appshot-client.js";
@@ -604,6 +606,14 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
   const [barShift, setBarShift] = useState<BarShiftState>({ turn_count: 0, phase: "early" });
   const [barOutputMode, setBarOutputMode] = useState<"atomic" | "stream">("atomic");
   const [barNotice, setBarNotice] = useState("");
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [connectionRoutes, setConnectionRoutes] = useState<ConnectionRoute[]>([]);
+  const [recentModelKeys, setRecentModelKeys] = useState<string[]>([]);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const connectionOpenRef = useRef(false);
+  const [connectionPending, setConnectionPending] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
+  const connectionRequestRef = useRef("");
   const [modelList, setModelList] = useState<ModelMenuItem[]>(DEFAULT_MODEL_LIST);
   const [activeTask, setActiveTask] = useState<TaskInfo | null>(null);
   const activeTaskRef = useRef<TaskInfo | null>(null);
@@ -920,13 +930,19 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
           personas: event.personas ?? [],
         });
 
-        if (event.models?.length) {
+        if (event.providers) setProviders(event.providers);
+        if (event.connection_routes) setConnectionRoutes(event.connection_routes);
+        if (event.recent_models) setRecentModelKeys(event.recent_models);
+        if (event.models) {
           setModelList(event.models.map((model) => typeof model === "string"
             ? { name: model }
             : {
                 name: model.name,
                 key: model.key,
                 provider: model.provider,
+                provider_id: model.provider_id,
+                source: model.source,
+                metadata_known: model.metadata_known,
                 endpoint: model.endpoint,
                 current: model.current,
               }));
@@ -934,6 +950,17 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
         if (event.show_reasoning !== undefined) {
           setShowReasoning(event.show_reasoning);
           showReasoningRef.current = event.show_reasoning;
+        }
+        break;
+      case "connection_result":
+        if (event.request_id !== connectionRequestRef.current) break;
+        setConnectionPending(false);
+        setConnectionError(event.error);
+        if (!event.error) {
+          setConnectionOpen(false);
+          addMessage("system", event.notice ?? "Connection saved.");
+          if (event.provider_id && connectionOpenRef.current) appshotInputRef.current?.openModelMenu(event.provider_id);
+          connectionOpenRef.current = false;
         }
         break;
       case "cache_status":
@@ -1571,7 +1598,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
     (id: string) => appshotClientRef.current?.release(id),
     [],
   );
-  const refreshModels = useCallback(() => send({ type: "refresh_models" }), [send]);
+  const refreshModels = useCallback((providerId?: string) => send({ type: "refresh_models", provider_id: providerId }), [send]);
 
   const submitQuestionAnswer = useCallback((requestId: string, answers: UserQuestionAnswer[]) => {
     if (!questionRequest || questionRequest.request_id !== requestId) return;
@@ -1636,6 +1663,18 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       return;
     }
     if (!text.trim()) return;
+    if (text.trim() === "/connect") {
+      connectionRequestRef.current = "";
+      setConnectionError(""); setConnectionPending(false);
+      setConnectionOpen(true); connectionOpenRef.current = true;
+      return;
+    }
+    if (text.trim().startsWith("/model-refresh ")) {
+      const providerId = text.trim().slice("/model-refresh ".length);
+      send({ type: "refresh_models", provider_id: providerId, force: true });
+      appshotInputRef.current?.openModelMenu(providerId);
+      return;
+    }
     if (/^\/appshot\s+pending(?:\s|$)/i.test(text.trim())) {
       const action = text.trim().toLowerCase();
       const pending = appshotInputRef.current?.snapshot().pending;
@@ -1850,6 +1889,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
 
   useInput((input, key) => {
     appshotClientRef.current?.recordInput();
+    if (connectionOpenRef.current) return;
     if (key.ctrl && input === "y") {
       // Handle before modal navigation; backend owns state and pending approvals.
       send({ type: "command", cmd: "/yolo" });
@@ -2023,6 +2063,14 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
           contextPct={info.ctxPct}
         />}
         auxiliary={<>
+          {connectionOpen && <ConnectionPanel routes={connectionRoutes} pending={connectionPending} error={connectionError}
+            onCancel={() => { setConnectionOpen(false); connectionOpenRef.current = false; }}
+            onSave={(request) => {
+              connectionRequestRef.current = request.request_id;
+              setConnectionError("");
+              if (send(request)) setConnectionPending(true);
+              else setConnectionError("Backend disconnected. Reconnect before saving.");
+            }} />}
           {!compactQuestion && runtimeMode === "bar" && <BarShelf drink={barDrink} columns={columns} />}
 
           {approvalRequests[0] && (
@@ -2055,7 +2103,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
           onAppshotStateChange={updateAppshotDraft}
           onAppshotRelease={releaseAppshot}
           onSubmit={submit}
-          disabled={Boolean(openToolResult) || approvalRequests.length > 0 || questionRequest !== null}
+          disabled={connectionOpen || Boolean(openToolResult) || approvalRequests.length > 0 || questionRequest !== null}
           yolo={yolo}
           sessionList={sessionList}
           barSessionList={barSessionList}
@@ -2066,6 +2114,8 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
             ...model,
             current: model.current ?? (model.key ? model.key === info.modelKey : model.name === info.model),
           }))}
+          providers={providers}
+          recentModels={recentModelKeys}
           onModelMenuOpen={refreshModels}
           onMenuVisibilityChange={setCommandMenuVisible}
           menuFocusActive={commandMenuVisible}

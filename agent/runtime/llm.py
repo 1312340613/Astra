@@ -482,6 +482,7 @@ class LLMConfig:
     # Resolved provider context window, separate from proactive compression.
     # None keeps legacy/custom runtimes on their existing conservative budget.
     context_limit: int | None = None
+    connection_required: bool = False
 
     def __post_init__(self) -> None:
         self.model = canonical_deepseek_model(self.model, self.base_url)
@@ -549,7 +550,10 @@ class OpenAICompatibleProvider:
             else DefaultAsyncHttpxClient(trust_env=False)
         )
         return AsyncOpenAI(
-            api_key=self.config.api_key or os.getenv("LLM_API_KEY", ""),
+            # SDK construction requires a credential even in setup-only state.
+            # _create_completion rejects every request until a real model is selected.
+            api_key=("astra-setup" if self.config.connection_required else
+                     self.config.api_key or os.getenv("LLM_API_KEY", "")),
             base_url=self.config.base_url,
             # Read/overall deadlines are progress-aware below. Keeping a second
             # SDK wall-clock timeout would reintroduce premature stream kills.
@@ -581,6 +585,8 @@ class OpenAICompatibleProvider:
             self._proxy_url = proxy_url
 
     async def _create_completion(self, kwargs: dict):
+        if self.config.connection_required:
+            raise ValueError("Connect a provider with /connect and select a model before sending a request.")
         await self._ensure_client_route()
         from .deepseek_files import DeepSeekImageFiles, supports_file_reuse
         prepared = kwargs
@@ -1297,6 +1303,7 @@ class LLMClient:
         """Switch API model/endpoint without managing the external model server."""
         # A direct model switch must not inherit the previous model capacity.
         generation_settings.setdefault("context_limit", None)
+        generation_settings.setdefault("connection_required", False)
         next_config = replace(
             self.config,
             model=model,

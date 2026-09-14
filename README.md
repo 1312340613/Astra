@@ -75,7 +75,7 @@ astra doctor
 astra
 ```
 
-Inside Astra, use `/model` to choose a profile and `/help` to explore commands.
+Inside Astra, use `/connect` to add a provider, `/model` to browse its models, and `/help` to explore commands.
 The current folder is the workspace unless `SANDBOX_WORKDIR` overrides it.
 
 Already have an older installation? See the

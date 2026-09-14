@@ -1,3 +1,4 @@
+import type { ProviderInfo } from "./types.js";
 import type { LocalModeDefinition } from "./types.js";
 import { THEMES, THEME_NAMES, type ThemeName } from "./theme.js";
 
@@ -20,6 +21,8 @@ export type SlashCommandSubmission =
   | { kind: "none" };
 
 export type CommandMenuContext = {
+  providers?: ProviderInfo[];
+  recentModels?: string[];
   themeName?: ThemeName;
   barSessions?: SessionMenuItem[];
   minimalSessions?: SessionMenuItem[];
@@ -40,7 +43,7 @@ const SLASH_COMMANDS: SlashCommandSuggestion[] = [
   { command: "/think", description: "toggle reasoning display", group: "CHAT" },
   { command: "/model", description: "show or switch model", takesArgs: true, group: "MODEL" },
   { command: "/mode", description: "set reasoning effort (low/high/max)", takesArgs: true, group: "MODEL" },
-  { command: "/connect", description: "probe, save and switch a model endpoint", takesArgs: true, group: "MODEL" },
+  { command: "/connect", description: "connect a provider and choose its model", takesArgs: true, group: "MODEL" },
   { command: "/persona", description: "show or switch prompt persona", takesArgs: true, group: "MODEL" },
   { command: "/search", description: "show or switch web search provider", takesArgs: true, group: "TOOLS" },
   { command: "/tool", description: "open latest or numbered tool result details", takesArgs: true, group: "TOOLS" },
@@ -84,6 +87,9 @@ export type SessionMenuItem = {
 };
 
 export type ModelMenuItem = {
+  provider_id?: string;
+  source?: string;
+  metadata_known?: boolean;
   name: string;
   key?: string;
   provider?: string;
@@ -411,22 +417,56 @@ export function slashCommandSuggestions(
   }
   const modelMatch = trimmed.match(/^\/model(?:\s+([\s\S]*))?$/i);
   if (modelMatch && (trimmed.toLowerCase() === "/model" || trimmed === "/model " || modelMatch[1] !== undefined)) {
-    const query = (modelMatch[1] ?? "").trim().toLowerCase();
-    return models
-      .filter((model) => [model.name, model.key, model.provider]
-        .some((value) => value?.toLowerCase().includes(query)))
-      .map((model) => ({
-        command: model.name,
-        description: [model.current ? "current" : "", model.provider ?? "", model.endpoint ?? "available"]
-          .filter(Boolean)
-          .join(" · "),
-        completion: `/model ${model.key ?? model.name}`,
-        submitValue: `/model ${model.key ?? model.name}`,
-        kind: "command",
-        group: "MODELS",
-        current: model.current,
+    const raw = (modelMatch[1] ?? "").trim();
+    const query = raw.toLowerCase();
+    const modelItem = (model: ModelMenuItem, group = "MODELS"): SlashCommandSuggestion => ({
+      command: model.name,
+      description: (context.providers === undefined
+        ? [model.current ? "current" : "", model.provider ?? "", model.endpoint ?? "available"]
+        : [model.current ? "current" : "", model.source ?? "preset",
+           model.metadata_known === false ? "capabilities unknown" : "", model.provider ?? ""])
+        .filter(Boolean).join(" · "),
+      completion: `/model ${model.key ?? model.name}`, submitValue: `/model ${model.key ?? model.name}`,
+      kind: "command", group, current: model.current,
+    });
+    if (context.providers !== undefined) {
+      const split = raw.indexOf("::");
+      if (split >= 0) {
+        const id = raw.slice(0, split);
+        const filter = raw.slice(split + 2).trim().toLowerCase();
+        const provider = context.providers.find(p => p.id === id);
+        const matching = models.filter(m => (m.provider_id ?? m.key?.split("::")[0]) === id
+          && m.name.toLowerCase().includes(filter));
+        const items = matching.map(m => modelItem(m));
+        const manual = raw.slice(split + 2).trim();
+        if (manual && !matching.some(m => m.name === manual)) items.push({
+          command: `Use model ID: ${manual}`, description: "Unlisted model · conservative defaults",
+          submitValue: `/model ${id}::${manual}`, completion: `/model ${id}::${manual}`, kind: "command", group: "MANUAL",
+        });
+        if (!filter) items.push({ command: "Type a model ID…", description: "Type after :: to search or enter an unlisted ID",
+          completion: `/model ${id}:: `, kind: "submenu", group: "MODELS" });
+        return [...items, { command: "Refresh model list", description: provider?.error || `${provider?.source ?? "preset"} · query this provider`,
+          submitValue: `/model-refresh ${id}`, kind: "command", group: "PROVIDER" },
+          { command: "Back to providers", description: "Choose another provider", completion: "/model ", kind: "submenu", group: "PROVIDER" }];
+      }
+      const providers: SlashCommandSuggestion[] = context.providers.filter(p => p.connected &&
+        [p.label, p.id].some(v => v.toLowerCase().includes(query))).map(p => ({
+        command: p.label, description: `${p.count} models · ${p.source}${p.error ? ` · ${p.error}` : ""}`,
+        completion: `/model ${p.id}::`, kind: "submenu", group: "PROVIDERS",
       }));
+      const recent = (context.recentModels ?? []).map(k => models.find(m => m.key === k))
+        .filter((m): m is ModelMenuItem => !!m && (!query || m.name.toLowerCase().includes(query)))
+        .map(m => modelItem(m, "RECENT"));
+      // Typed model names still work directly, without forcing navigation.
+      const matches = query ? models.filter(m => [m.name, m.key].some(v => v?.toLowerCase().includes(query)))
+        .map(m => modelItem(m)) : [];
+      return [...providers, ...recent, ...matches, { command: "Connect a provider…",
+        description: "Add or update an API connection", submitValue: "/connect", kind: "command", group: "CONNECT" }];
+    }
+    return models.filter(m => [m.name, m.key, m.provider].some(v => v?.toLowerCase().includes(query)))
+      .map(m => modelItem(m));
   }
+
   const personaMatch = trimmed.match(/^\/persona(?:\s+([\s\S]*))?$/i);
   if (personaMatch && (trimmed.toLowerCase() === "/persona" || trimmed === "/persona " || personaMatch[1] !== undefined)) {
     const query = (personaMatch[1] ?? "").trim().toLowerCase();

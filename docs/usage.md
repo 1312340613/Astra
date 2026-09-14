@@ -8,18 +8,60 @@ Choose a model, adjust the interface and manage work in the terminal.
 
 ## Model connections
 
-Bundled profiles live in `config/models.yaml`. Machine-specific profiles are
-written to `.astra/models.yaml` and override bundled entries without
-storing API-key values.
+Run `/connect` to choose a provider, its API route, and an API key or environment
+variable. Astra requests that endpoint's model list, then opens the searchable
+model menu. No existing key is needed to open setup. Connecting saves the provider;
+selecting a model makes it the startup default.
 
 ```text
+/connect
 /model
-/connect my-local http://127.0.0.1:8084/v1 LLM_API_KEY
+/model deepseek::deepseek-flash
 /doctor
 ```
 
-The third `/connect` argument is the environment-variable name holding the API
-key; it defaults to `LLM_API_KEY`.
+In `/model`, choose a connected provider with Enter, then type to filter its
+models. Recent selections appear on the first level. The provider submenu also
+has **Refresh model list** and **Back to providers**. To use an unlisted model,
+type its exact ID after `provider::` and choose **Use model ID**.
+
+Astra fetches only the provider you open, uses a one-hour cache, and offers manual
+refresh. Nothing polls in the background. Rows distinguish `live`, `cache`,
+`stale-cache`, `preset`, and manually entered models. An error remains visible
+when cached or preset entries are shown. A successful empty response is not replaced by an old list; the current selection
+may remain visible with a `selected` label.
+A list response does not verify chat access, billing entitlement, or tool support.
+
+The connection panel supports DeepSeek, Qwen / Model Studio, Zhipu, Hunyuan,
+OpenRouter, and custom OpenAI-compatible endpoints. Regular API, Coding / Token
+Plan and region routes stay separate; Astra never retries a plan key on a
+regular API. For workspace-specific Qwen endpoints, paste the base URL from the
+provider console. Existing local discovery, including oMLX, remains available.
+Native non-compatible protocols need their own adapters.
+
+Bundled per-model settings in `config/models.yaml` and machine-specific overrides
+in `.astra/models.yaml` remain supported. Known models keep their own settings;
+new model IDs use advertised metadata when available, otherwise a conservative
+32K context and 4K output budget with no assumed vision or reasoning support.
+Edit the model override if the provider requires specific limits or parameters.
+
+Keys entered in the panel are masked, travel through a dedicated control message,
+and are saved only in `.astra/connections/*.json`, outside Git and conversation
+history. POSIX files use owner-only permissions; Windows uses the installation's
+user-directory permissions. Environment references store only the variable name.
+Model metadata is cached separately in `.astra/model-cache`, scoped to endpoint
+and credential. Both live under the installation state (or `ASTRA_HOME`) and are
+preserved by `astra update`. They are local private files, not an encrypted vault.
+
+The legacy command is still accepted:
+
+```text
+/connect my-local http://127.0.0.1:8084/v1 LLM_API_KEY
+```
+
+Its third argument is an environment-variable **name**, never the key value.
+In the plain CLI, `/connect` offers numbered choices and a hidden key prompt;
+`/model <provider>::` lists that provider's models.
 
 ### DeepSeek model migration
 

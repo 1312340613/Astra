@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_provider_connections(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_CONNECTIONS_DIR", str(tmp_path / "connections"))
+    monkeypatch.setenv("AGENT_MODEL_CACHE_DIR", str(tmp_path / "model-cache"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_local_personas(tmp_path, monkeypatch):
     monkeypatch.setenv("ASTRA_PERSONA_FILE", str(tmp_path / "persona.local.json"))
     monkeypatch.setenv("ASTRA_LOCAL_MODE_FILE", str(tmp_path / "missing-local-mode.py"))

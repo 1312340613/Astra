@@ -68,7 +68,7 @@ astra doctor
 astra
 ```
 
-进入 Astra 后，用 `/model` 选择模型，用 `/help` 查看命令。当前文件夹会作为工作区，除非设置了 `SANDBOX_WORKDIR`。
+进入 Astra 后，用 `/connect` 添加提供商，用 `/model` 浏览其模型，用 `/help` 查看命令。当前文件夹会作为工作区，除非设置了 `SANDBOX_WORKDIR`。
 
 已经装过旧版？请看[旧版本升级指南](docs/zh-CN/launcher-update.md#upgrade-an-older-checkout)。
 
