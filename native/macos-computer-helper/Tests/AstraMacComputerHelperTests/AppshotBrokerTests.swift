@@ -563,12 +563,12 @@ extension AppshotBrokerTests {
   let process = Process()
   let input = Pipe(), output = Pipe()
   var decoder = AppshotFrameDecoder()
-  init(path: String) throws {
+  init(path: String, startupDelay: TimeInterval = 0) throws {
     process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
     process.arguments = [
       "-u", "-c",
-      "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]+'/broker.sock'); f=s.makefile('rb'); [(s.sendall(line.encode()), sys.stdout.buffer.write(f.readline()), sys.stdout.buffer.flush()) for line in sys.stdin]",
-      path,
+      "import socket,sys,time; time.sleep(float(sys.argv[2])); s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]+'/broker.sock'); f=s.makefile('rb'); [(s.sendall(line.encode()), sys.stdout.buffer.write(f.readline()), sys.stdout.buffer.flush()) for line in sys.stdin]",
+      path, String(startupDelay),
     ]
     process.standardInput = input
     process.standardOutput = output
@@ -578,18 +578,23 @@ extension AppshotBrokerTests {
   func exchange(_ message: AppshotMessage) async throws -> AppshotMessage {
     try input.fileHandleForWriting.write(contentsOf: message.encodeFrame())
     var diagnostics = BrokerReadDiagnostics()
-    for _ in 0..<100 {
+    // This includes launching the real interpreter. Keep a bounded elapsed
+    // deadline without confusing cold startup with the disconnect under test.
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(5))
+    while clock.now < deadline {
       var buffer = [UInt8](repeating: 0, count: 65536)
       let count = read(output.fileHandleForReading.fileDescriptor, &buffer, buffer.count)
       diagnostics.record(count, error: errno)
       if count > 0, let message = try decoder.feed(Data(buffer.prefix(count))).first {
         return message
       }
+      if count <= 0 && !process.isRunning { break }
       try await Task.sleep(nanoseconds: 5_000_000)
     }
     let childState = process.isRunning ? "running" : "exited(\(process.terminationStatus))"
     throw BrokerTestFailure(
-      description: "child exchange exhausted 100 polls: \(diagnostics) child=\(childState)")
+      description: "child exchange did not complete within 5s: \(diagnostics) child=\(childState)")
   }
   func terminate() {
     if process.isRunning {
@@ -645,7 +650,9 @@ extension AppshotBrokerTests {
             canAccept: true)))
       _ = try await other.receive()
       stage = "recipient child startup and identity"
-      let recipient = try BrokerChildClient(path: path)
+      // Cold interpreter startup may exceed the old 100 x 5 ms poll loop.
+      // Reproduce that delay independently of the host's current load.
+      let recipient = try BrokerChildClient(path: path, startupDelay: 1)
       defer { recipient.terminate() }
       let identity = try #require(
         AppshotSystemProcesses().identity(pid: recipient.process.processIdentifier))
