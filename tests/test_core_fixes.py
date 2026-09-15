@@ -5086,7 +5086,7 @@ def test_transactional_file_write_commits_complete_content_atomically(tmp_path):
         registry = ToolRegistry()
         register_file_tools(registry, str(tmp_path))
         target = tmp_path / "large.html"
-        chunks = ["<html>\n", "猫娘" * 2_000, "\n</html>"]
+        chunks = ["<html>\n", "示例" * 2_000, "\n</html>"]
         payload = "".join(chunks)
         encoded = payload.encode("utf-8")
         digest = __import__("hashlib").sha256(encoded).hexdigest()

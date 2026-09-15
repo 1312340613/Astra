@@ -53,7 +53,7 @@ class TestExpireStale:
     def test_does_not_expire_no_valid_until(self, repo, consolidator):
         repo.add(
             kind="preference",
-            content="我喜欢白透及膝袜",
+            content="我喜欢简洁的界面",
             # No valid_until — permanent
         )
         expired = consolidator.expire_stale()

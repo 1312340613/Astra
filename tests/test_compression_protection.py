@@ -202,12 +202,12 @@ class TestPreferenceRegex:
     """Verify the deterministic preference/correction pattern matcher."""
 
     @pytest.mark.parametrize("text", [
-        "我喜欢白透及膝袜",
-        "我不喜欢黑丝连裤袜",
+        "我喜欢简洁的界面",
+        "我不喜欢复杂的菜单",
         "我偏好简约风格",
         "我想要自然光影",
         "我习惯用 Euler 30步",
-        "我讨厌男友酱这个称呼",
+        "我讨厌弹窗广告",
         "我不要自动发送",
         "以后都用 split loader",
         "下次要用 QAT 版本",
@@ -247,16 +247,16 @@ class TestPreferenceRegex:
 class TestExtractProtectedContent:
     def test_extracts_chinese_preference(self):
         turns = [
-            {"role": "user", "content": "我喜欢白透及膝袜，以后生图都用这个"},
+            {"role": "user", "content": "我喜欢简洁的界面，以后开发都用这个"},
             {"role": "assistant", "content": "好的，记住了"},
         ]
         items = ContextCompressor._extract_protected_content(turns)
         assert len(items) == 1
-        assert "白透及膝袜" in items[0]
+        assert "简洁的界面" in items[0]
 
     def test_extracts_english_preference(self):
         turns = [
-            {"role": "user", "content": "I prefer monochrome lineart for selfies"},
+            {"role": "user", "content": "I prefer monochrome lineart for diagrams"},
         ]
         items = ContextCompressor._extract_protected_content(turns)
         assert len(items) == 1
@@ -288,8 +288,8 @@ class TestExtractProtectedContent:
 
     def test_deduplicates(self):
         turns = [
-            {"role": "user", "content": "我喜欢白透及膝袜"},
-            {"role": "user", "content": "我喜欢白透及膝袜"},
+            {"role": "user", "content": "我喜欢简洁的界面"},
+            {"role": "user", "content": "我喜欢简洁的界面"},
         ]
         items = ContextCompressor._extract_protected_content(turns)
         assert len(items) == 1
@@ -371,17 +371,17 @@ class TestExtractActiveTaskState:
 
 class TestValidateProtectedSurvival:
     def test_all_survived(self):
-        summary = "用户喜欢白透及膝袜，偏好简约风格"
-        items = ["我喜欢白透及膝袜", "偏好简约风格"]
+        summary = "用户喜欢简洁的界面，偏好简约风格"
+        items = ["我喜欢简洁的界面", "偏好简约风格"]
         missing = ContextCompressor._validate_protected_survival(summary, items)
         assert len(missing) == 0
 
     def test_detects_missing(self):
-        summary = "用户有一些袜子偏好"
-        items = ["我喜欢白透及膝袜"]
+        summary = "用户有一些界面偏好"
+        items = ["我喜欢简洁的界面"]
         missing = ContextCompressor._validate_protected_survival(summary, items)
         assert len(missing) == 1
-        assert missing[0] == "我喜欢白透及膝袜"
+        assert missing[0] == "我喜欢简洁的界面"
 
     def test_empty_items(self):
         missing = ContextCompressor._validate_protected_survival("any summary", [])
@@ -389,8 +389,8 @@ class TestValidateProtectedSurvival:
 
     def test_partial_overlap_survives(self):
         # 60%+ overlap should count as survived
-        summary = "Critical Context: 我喜欢白透及膝袜，以后都用这个"
-        items = ["我喜欢白透及膝袜，以后都用这个"]
+        summary = "Critical Context: 我喜欢简洁的界面，以后都用这个"
+        items = ["我喜欢简洁的界面，以后都用这个"]
         missing = ContextCompressor._validate_protected_survival(summary, items)
         assert len(missing) == 0
 
@@ -402,7 +402,7 @@ class TestValidateProtectedSurvival:
 class TestCompressionProtection:
     def _make_messages(self, user_prefs: list[str], filler_count: int = 10):
         """Build a message list with system prompt, filler, and user prefs."""
-        messages = [{"role": "system", "content": "You are Lyra."}]
+        messages = [{"role": "system", "content": "You are a test assistant."}]
         for i in range(filler_count):
             messages.append({"role": "user", "content": f"普通对话消息 {i}"})
             messages.append({"role": "assistant", "content": f"回复 {i}"})
@@ -419,42 +419,42 @@ class TestCompressionProtection:
         compressor = ContextCompressor(llm, tail_token_budget=10)
 
         turns = [
-            {"role": "user", "content": "我喜欢白透及膝袜"},
+            {"role": "user", "content": "我喜欢简洁的界面"},
             {"role": "assistant", "content": "ok"},
         ]
         run(compressor._generate_summary(turns))
 
         assert "MUST PRESERVE VERBATIM" in llm.last_prompt
-        assert "白透及膝袜" in llm.last_prompt
+        assert "简洁的界面" in llm.last_prompt
 
     def test_missing_items_appended_as_protected_context(self):
         """When LLM paraphrases away a preference, it gets appended."""
         # LLM returns a summary that drops the preference
         llm = ParaphrasingLLM(
             "## Active Task\nNone\n## Completed Actions\n- chatted\n"
-            "## Critical Context\nUser has some sock preferences"
+            "## Critical Context\nUser has some interface preferences"
         )
         compressor = ContextCompressor(llm, tail_token_budget=10)
 
         turns = [
-            {"role": "user", "content": "我喜欢白透及膝袜，以后生图都用这个"},
+            {"role": "user", "content": "我喜欢简洁的界面，以后开发都用这个"},
             {"role": "assistant", "content": "好的"},
         ]
         result = run(compressor._generate_summary(turns))
         assert result is not None
         assert "Protected Context" in result
-        assert "白透及膝袜" in result
+        assert "简洁的界面" in result
 
     def test_surviving_items_not_duplicated(self):
         """When LLM preserves the preference verbatim, no extra section."""
         llm = ParaphrasingLLM(
             "## Active Task\nNone\n## Critical Context\n"
-            "用户明确说：我喜欢白透及膝袜，以后生图都用这个"
+            "用户明确说：我喜欢简洁的界面，以后开发都用这个"
         )
         compressor = ContextCompressor(llm, tail_token_budget=10)
 
         turns = [
-            {"role": "user", "content": "我喜欢白透及膝袜，以后生图都用这个"},
+            {"role": "user", "content": "我喜欢简洁的界面，以后开发都用这个"},
             {"role": "assistant", "content": "好的"},
         ]
         result = run(compressor._generate_summary(turns))
@@ -474,14 +474,14 @@ class TestCompressionProtection:
         compressor = ContextCompressor(llm, tail_token_budget=10)
 
         messages = self._make_messages([
-            "我喜欢白透及膝袜，以后生图都用这个",
+            "我喜欢简洁的界面，以后开发都用这个",
             "不是，应该用 qwen_image_vae 而不是 ae.safetensors",
         ])
         compressed = run(compressor.compress(messages, max_prompt_tokens=100, force=True))
 
         # Check ALL compressed messages for the preferences
         all_text = " ".join(str(msg.get("content", "")) for msg in compressed)
-        assert "白透及膝袜" in all_text, "Preference 1 must survive compression"
+        assert "简洁的界面" in all_text, "Preference 1 must survive compression"
         assert "qwen_image_vae" in all_text, "Preference 2 must survive compression"
 
     def test_active_task_state_in_prompt(self):
@@ -504,12 +504,12 @@ class TestCompressionProtection:
     def test_iterative_update_preserves_old_protections(self):
         """On re-compression, previous protected items still get checked."""
         llm = ParaphrasingLLM(
-            "## Active Task\nNone\n## Critical Context\nUser likes socks"
+            "## Active Task\nNone\n## Critical Context\nUser likes simple interfaces"
         )
         compressor = ContextCompressor(llm, tail_token_budget=10)
         compressor._previous_summary = (
             "## Active Task\nNone\n## Critical Context\n"
-            "用户说：我喜欢白透及膝袜"
+            "用户说：我喜欢简洁的界面"
         )
 
         turns = [
@@ -533,7 +533,7 @@ class TestTailBudgetAgainstPromptWindow:
 
     def test_tail_budget_shrinks_for_small_windows(self):
         compressor = ContextCompressor(ParaphrasingLLM("x"))
-        head = [{"role": "system", "content": "You are Lyra. " * 500}]
+        head = [{"role": "system", "content": "You are a test assistant. " * 500}]
         head_tokens = compressor._estimate_head_tokens(head)
         small = compressor._tail_budget_tokens(max_prompt_tokens=20_000, head_tokens=head_tokens)
         large = compressor._tail_budget_tokens(max_prompt_tokens=100_000, head_tokens=head_tokens)
@@ -640,12 +640,12 @@ class TestFallbackPreservesProtectedContent:
         compressor = ContextCompressor(ExplodingLLM())
         messages = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "我喜欢白透及膝袜，以后都用这个"},
+            {"role": "user", "content": "我喜欢简洁的界面，以后都用这个"},
             {"role": "assistant", "content": "ok"},
             {"role": "user", "content": "继续之前的工作"},
         ]
         compressed = run(compressor.compress(messages, max_prompt_tokens=10_000, force=True))
         text = " ".join(str(m.get("content", "")) for m in compressed)
         assert "Summary unavailable" in text
-        assert "白透及膝袜" in text
+        assert "简洁的界面" in text
         assert "继续之前的工作" in text
