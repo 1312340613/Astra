@@ -448,11 +448,13 @@ def test_activity_reader_integrates_habit_and_invalidates_after_clear(
         activity_connection,
         ["2026-08-03", "2026-08-10", "2026-08-17"],
     )
-    reader = ActivityRecommendationReader(path, local_zone=ZoneInfo("UTC"))
+    # Cache invalidation is the contract here; latency has a separate gate.
+    # Its 20% habit slice must tolerate host scheduling during this fixture.
+    reader = ActivityRecommendationReader(path, deadline_ms=1000, local_zone=ZoneInfo("UTC"))
 
     first = reader.recommend("", UTC_WORKSPACE, MONDAY_0900)
 
-    assert first.habit is not None
+    assert first.habit is not None, (first.error_category, first.stages)
     opened = reader.open(first.habit.locator, window=99)
     assert opened.source == "habit"
     assert opened.trust_label == "inferred_pattern"

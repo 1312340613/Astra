@@ -572,7 +572,6 @@ class SessionRecommendationSource:
                 has_workspace_key,
             )
         pool_limit = _candidate_pool_limit(len(active_fingerprints))
-        seeds: list[tuple[int, float]] = []
         fts_from = (
             "messages_fts "
             "JOIN messages AS m ON m.rowid = messages_fts.rowid "
@@ -581,21 +580,10 @@ class SessionRecommendationSource:
 
         guards, _ = self._pool_guards()
 
-        def add_pool(where: str, params: tuple[object, ...]) -> None:
-            rows = connection.execute(
-                "SELECT m.id, bm25(messages_fts) AS native_query_rank "
-                f"FROM {fts_from} "
-                f"WHERE messages_fts MATCH ? {guards}{where} "
-                "AND m.role IN ('user', 'assistant') "
-                "ORDER BY native_query_rank ASC, m.timestamp DESC, m.id DESC LIMIT ?",
-                (fts_query, *params, pool_limit),
-            ).fetchall()
-            seeds.extend(
-                (int(row["id"]), float(row["native_query_rank"])) for row in rows
-            )
+        pools: list[tuple[str, tuple[object, ...]]] = []
 
         if has_workspace_key and workspace.key:
-            add_pool("AND s.workspace_key = ?", (workspace.key,))
+            pools.append(("AND workspace_key = ?", (workspace.key,)))
 
         inferred_ids = self._inferred_session_ids(
             connection,
@@ -604,40 +592,42 @@ class SessionRecommendationSource:
         )
         if inferred_ids:
             placeholders = ", ".join("?" for _ in inferred_ids)
-            add_pool(f"AND m.session_id IN ({placeholders})", inferred_ids)
+            pools.append((f"AND session_id IN ({placeholders})", inferred_ids))
 
         workspace_fts_query = _fts_query(workspace.label)
         if workspace_fts_query is not None:
             content_workspace_predicate = ""
             if has_workspace_key:
                 content_workspace_predicate = (
-                    "AND (s.workspace_key IS NULL OR s.workspace_key = '') "
+                    "AND (workspace_key IS NULL OR workspace_key = '') "
                 )
-            # Materialize user-query ranks before intersecting workspace hits.
-            # Repeated rowid-constrained FTS probes can otherwise dominate the
-            # entire deadline. Keep BM25 based solely on the user's query.
-            rows = connection.execute(
-                "WITH user_hits AS MATERIALIZED ("
-                "SELECT rowid AS id, bm25(messages_fts) AS native_query_rank "
-                "FROM messages_fts WHERE messages_fts MATCH ?), "
-                "workspace_hits AS MATERIALIZED (SELECT rowid AS id FROM messages_fts(?)) "
-                "SELECT m.id, u.native_query_rank FROM user_hits AS u "
-                "JOIN workspace_hits AS w ON w.id = u.id "
-                "JOIN messages AS m ON m.id = u.id JOIN sessions AS s ON s.id = m.session_id "
-                f"WHERE m.role IN ('user', 'assistant') {guards}{content_workspace_predicate} "
-                "ORDER BY u.native_query_rank ASC, m.timestamp DESC, m.id DESC LIMIT ?",
-                (fts_query, workspace_fts_query, pool_limit),
-            ).fetchall()
-            seeds.extend((int(row['id']), float(row['native_query_rank'])) for row in rows)
+            pools.append((
+                "AND id IN (SELECT rowid FROM messages_fts(?)) " + content_workspace_predicate,
+                (workspace_fts_query,),
+            ))
 
-        add_pool("", ())
+        pools.append(("", ()))
+        # Compute each user-query hit/rank once and reuse it across workspace
+        # and global pools. Broad terms previously repeated the same MATCH,
+        # BM25 and canonical-row reads for every pool.
+        workspace_column = "s.workspace_key" if has_workspace_key else "NULL"
+        pool_sql = " UNION ".join(
+            "SELECT * FROM (SELECT id, native_query_rank FROM hits "
+            f"WHERE 1 {where} ORDER BY native_query_rank ASC, timestamp DESC, id DESC LIMIT ?)"
+            for where, _ in pools
+        )
+        pool_params = tuple(value for _, params in pools for value in (*params, pool_limit))
+        rows = connection.execute(
+            "WITH hits AS MATERIALIZED ("
+            f"SELECT m.id, m.session_id, m.timestamp, {workspace_column} AS workspace_key, "
+            f"bm25(messages_fts) AS native_query_rank FROM {fts_from} "
+            f"WHERE messages_fts MATCH ? {guards} AND m.role IN ('user', 'assistant')) " + pool_sql,
+            (fts_query, *pool_params),
+        ).fetchall()
         del current_session_id, current_message_id
-        unique_seeds: dict[int, float] = {}
-        for message_id, native_query_rank in seeds:
-            unique_seeds.setdefault(message_id, native_query_rank)
         return self._enrich_seed_rows(
             connection,
-            tuple(unique_seeds.items()),
+            tuple((int(row["id"]), float(row["native_query_rank"])) for row in rows),
             has_workspace_key=has_workspace_key,
         )
 

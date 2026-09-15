@@ -1852,6 +1852,9 @@ def test_plain_continue_reuses_budget_interrupted_task(tmp_path):
 
 
 def test_time_budget_interrupts_real_backend_and_only_explicit_continue_restarts_it(tmp_path):
+    # Exercise interruption of an active stream, not a race against cold
+    # backend/database startup on slower CI hosts.
+    budget_seconds = 3
     release = threading.Event()
     requests = []
     class Handler(_SlowOpenAIHandler):
@@ -1869,7 +1872,7 @@ def test_time_budget_interrupts_real_backend_and_only_explicit_continue_restarts
             try:
                 self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
                 self.wfile.flush()
-                release.wait(5)
+                release.wait(budget_seconds * 5)
             except (BrokenPipeError, ConnectionResetError):
                 pass
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -1881,7 +1884,7 @@ def test_time_budget_interrupts_real_backend_and_only_explicit_continue_restarts
         def send(payload):
             proc.stdin.write(json.dumps(payload) + "\n")
             proc.stdin.flush()
-        send({"type": "command", "cmd": "/budget 0.6"})
+        send({"type": "command", "cmd": f"/budget {budget_seconds}"})
         wait_for(lambda e: e.get("type") == "done")
         task_id = ""
         for number, message in enumerate(["do work", "继续"], 1):

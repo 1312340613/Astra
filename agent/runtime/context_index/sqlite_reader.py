@@ -95,6 +95,11 @@ def open_readonly(
     try:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
+        # Large text archives and vector snapshots should not copy every page
+        # through SQLite's small per-connection cache. Bound the read-only map
+        # to 128 MiB; SQLite preserves WAL visibility and falls back to normal
+        # reads beyond this limit or on platforms without mmap support.
+        connection.execute("PRAGMA mmap_size=134217728")
         set_read_window(connection)
         deadline = time.monotonic() + max(0, deadline_ms) / 1000
         connection.set_progress_handler(

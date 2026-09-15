@@ -306,6 +306,25 @@ def test_open_readonly_handles_uri_characters_and_forbids_writes(tmp_path):
     assert (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes()) == before
 
 
+def test_readonly_connection_observes_wal_commits_and_clear(tmp_path):
+    path = tmp_path / "live.db"
+    with sqlite3.connect(path) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE evidence(content TEXT)")
+        writer.execute("INSERT INTO evidence VALUES ('original')")
+        writer.commit()
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        with open_readonly(path, deadline_ms=2000) as reader:
+            assert reader.execute("SELECT content FROM evidence").fetchone()[0] == "original"
+            writer.execute("UPDATE evidence SET content='committed update'")
+            writer.commit()
+            assert Path(str(path) + "-wal").stat().st_size > 0
+            assert reader.execute("SELECT content FROM evidence").fetchone()[0] == "committed update"
+            writer.execute("DELETE FROM evidence")
+            writer.commit()
+            assert reader.execute("SELECT content FROM evidence").fetchall() == []
+
+
 def test_exact_workspace_precedes_inferred_and_legacy_global(recall_db, monkeypatch):
     # This test checks candidate ordering, independent of CI scheduling.
     # Deadline interruption and latency have dedicated regression/acceptance tests.
