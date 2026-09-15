@@ -1,8 +1,0 @@
-{
-  "id": "llm-chat-max-tokens",
-  "category": "bugfix",
-  "start_commit": "3eca2bb2e81ee7239a13d11ac900059192c77887",
-  "target_commit": "4791bec30128770b6d35697ca4edab13ceccdd7a",
-  "judge": "verify/test_task.py",
-  "timeout_min": 20
-}

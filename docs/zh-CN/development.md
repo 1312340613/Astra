@@ -73,11 +73,13 @@ uv run --locked --extra dev --extra mcp --extra tracing --extra server --extra n
 
 `--provider-smoke` 会显式发送真实模型请求。自动检查通过不能证明桌面动作真实生效、Appshot 捕获权限可用或真实模型服务验收通过，这些仍需有针对性的手动检查。
 
-最终跨平台验收时，推送完成的一批改动，在 **Actions → Maintenance → Run workflow** 手动运行一次，选择最终分支并核对运行对应的 commit。Ubuntu、macOS、Windows 三个平台都必须通过。失败时先在本地修复和验证，再重新运行。完整 Maintenance 工作流按需手动触发，包括普通检查和 wheel smoke，以及 macOS 原生/性能验收。
+最终跨平台验收时，在最终 commit 上分别运行 Ubuntu、macOS、Windows 检查。可以使用对应系统的本地机器，也可以在 **Actions → Maintenance → Run workflow** 手动运行一次。每个平台保留 commit、操作系统、命令和结果；没有可用机器的平台应标为未运行。失败时先在本地修复和验证，再重新运行。手动 Maintenance 工作流包含三个平台的普通检查和 wheel smoke，以及 macOS 原生/性能验收。
 
 独立的 [Launcher compatibility 工作流](../../.github/workflows/launcher.yml) 在 push 或 pull request 涉及其列出的启动器文件时自动运行，也支持 **Run workflow**。它在三个平台检查源码发现、原生命令转发、真实 Git 更新、进程排除和恢复。本机 macOS 通过不能替代 Windows CMD、PowerShell 或 Linux 验收，应检查目标 commit 对应任务的最终结果。
 
-私有仓库运行仍消耗账号的 [GitHub Actions 配额（英文）](https://docs.github.com/en/billing/concepts/product-billing/github-actions)。Maintenance 使用 `--keep-going` 在一次运行中收集相互独立的失败；任一项失败，整体仍以失败退出。本地默认遇到首个失败即停止。
+私有仓库运行消耗账号的 GitHub Actions 配额。公开仓库使用标准 GitHub 托管 runner 免费，较大型 runner 单独计费，详见 [Actions 计费说明（英文）](https://docs.github.com/en/actions/concepts/billing-and-usage)。私有仓库额度用完时，可以保留本地验收记录，将暂时无法运行的平台检查留待补验；购买额外额度是可选项。如果 GitHub 同时提示付款失败，应先检查账户账单状态。被拦截而未启动的任务不能算测试已执行。
+
+Maintenance 使用 `--keep-going` 在一次运行中收集相互独立的失败；任一项失败，整体仍以失败退出。本地默认遇到首个失败即停止。
 
 macOS/POSIX 原生权限测试需要对应主机能力，Windows 仍会执行可移植的拒绝路径和协议测试。沙箱镜像测试需要 Linux Docker 引擎。Appshot 集成会把 Swift 依赖/构建耗时与有时限的端到端测试分开。
 

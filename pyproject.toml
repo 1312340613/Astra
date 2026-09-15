@@ -7,6 +7,11 @@ name = "agent-lab-local"
 version = "0.2.0"
 description = "A personal AI agent for everyday tasks, powered by model APIs, with computer use, memory, and a terminal interface"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Zhi Hang", email = "149870896+1312340613@users.noreply.github.com" },
+]
 requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12",
@@ -20,6 +25,12 @@ dependencies = [
   "tzdata; sys_platform == 'win32'",
   "websockets>=14,<16",
 ]
+
+[project.urls]
+Homepage = "https://github.com/1312340613/Astra"
+Repository = "https://github.com/1312340613/Astra"
+Issues = "https://github.com/1312340613/Astra/issues"
+Documentation = "https://github.com/1312340613/Astra/blob/main/docs/README.md"
 
 [project.optional-dependencies]
 notebook = ["nbclient>=0.10,<1", "nbformat>=5.10,<6", "ipykernel>=6,<8"]
@@ -40,6 +51,10 @@ agent-lab = "agent.cli.main:main"
 agent-lab-backend = "agent.launcher.cli:backend"
 agent-lab-eval = "agent.evals.replay:main"
 astra = "agent.launcher.cli:main"
+
+[tool.hatch.build.targets.sdist]
+# Hatch reads the root ignore file, not the nested Swift package ignore files.
+exclude = ["/native/**/.build", "/native/**/.swiftpm"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent"]

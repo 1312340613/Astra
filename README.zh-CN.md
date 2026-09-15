@@ -115,3 +115,7 @@ astra update
 | 开发、测试或维护 Astra | [开发指南](docs/zh-CN/development.md) |
 
 架构、活动历史、Notebook 和故障排查等内容，可继续浏览[完整文档索引](docs/zh-CN/README.md)。
+
+## 许可证
+
+Astra 使用 [MIT 许可证](LICENSE)。第三方依赖与评测资料保留各自的许可，见[评测来源说明](evals/coding/README.zh-CN.md#sources-and-licenses)。

@@ -7,7 +7,7 @@ judges the result with pytest using the official FAIL_TO_PASS / PASS_TO_PASS
 node lists.
 
 Usage:
-    python -m agent.evals.swebench --dry-run
+    python -m agent.evals.swebench --instances psf__requests-1142 --dry-run
     python -m agent.evals.swebench --instances psf__requests-1142
     python -m agent.evals.swebench --all --model deepseek-flash
 """
@@ -206,7 +206,10 @@ async def run_instance(
         if dry_run:
             apply_test_patch(instance, workspace)
             judge = judge_instance(instance, workspace)
-            result["status"] = "dry-run"
+            if judge["returncode"] in (0, 1):
+                result["status"] = "dry-run"
+            else:
+                result["error"] = f"baseline judge could not run (exit {judge['returncode']})"
             result["judge_returncode"] = judge["returncode"]
             result["judge_stdout"] = judge["stdout"]
             result["judge_stderr"] = judge["stderr"]
@@ -214,9 +217,9 @@ async def run_instance(
             return result
 
         from agent.core.msg import ContentBlock, Msg
-        from agent.evals.coding_bench import _build_agent
+        from agent.evals.coding_agent import build_coding_agent
 
-        agent = await _build_agent(workspace, model_key)
+        agent = await build_coding_agent(workspace, model_key)
         task = str(instance["problem_statement"]).strip()
         msg = Msg(
             sender="user",
@@ -323,8 +326,12 @@ def main(argv: list[str] | None = None) -> int:
 
     resolved = sum(1 for item in all_results if item["resolved"])
     attempted = sum(1 for item in all_results if not args.dry_run)
-    print(f"summary: {resolved}/{attempted} resolved" if attempted else f"summary: {len(all_results)} dry-run", flush=True)
-    return 0 if args.dry_run or resolved == attempted else 1
+    if args.dry_run:
+        prepared = sum(item["status"] == "dry-run" for item in all_results)
+        print(f"summary: {prepared}/{len(all_results)} baselines checked", flush=True)
+        return 0 if prepared == len(all_results) else 1
+    print(f"summary: {resolved}/{attempted} resolved", flush=True)
+    return 0 if resolved == attempted else 1
 
 
 if __name__ == "__main__":

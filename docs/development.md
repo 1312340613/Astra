@@ -94,12 +94,13 @@ thresholds.
 `--provider-smoke` explicitly enables real model requests. A green automated
 gate does not establish live desktop action effects, Appshot capture permission,
 or acceptance against a real provider; those still need targeted manual checks.
-For final cross-platform acceptance, push the completed batch and start one
-manual run from **Actions → Maintenance → Run workflow**, selecting the final
-branch and verifying the run's commit. All three platform jobs must pass; if a
-check fails, fix and verify it locally before rerunning. This full Maintenance
-workflow is manual. It checks the normal gate and wheel smoke on Ubuntu, macOS
-and Windows, with native/performance acceptance on macOS.
+For final cross-platform acceptance, run the checks at the final commit on
+Ubuntu, macOS and Windows. You can collect results from matching local machines
+or start one manual run from **Actions → Maintenance → Run workflow**. Record
+the commit, operating system, commands and results for each platform; report
+unavailable platforms as not run. If a check fails, fix and verify it locally
+before rerunning. The manual Maintenance workflow checks the normal gate and
+wheel smoke on all three platforms, with native/performance acceptance on macOS.
 
 The separate [Launcher compatibility workflow](../.github/workflows/launcher.yml)
 runs automatically when its listed launcher files change in a push or pull
@@ -108,8 +109,13 @@ native command forwarding, real Git updates, process exclusion and recovery on
 all three platforms. A passing local macOS run does not establish Windows CMD,
 PowerShell or Linux acceptance; verify the target commit's completed jobs.
 
-Private-repository runs still consume
-the account's [GitHub Actions allowance](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Private-repository runs consume the account's GitHub Actions allowance. Standard
+GitHub-hosted runners are free for public repositories; larger runners are
+billed separately. See [Actions billing](https://docs.github.com/en/actions/concepts/billing-and-usage).
+When private-repository minutes are exhausted, retain local acceptance results
+and leave unavailable platform checks pending. Buying extra minutes is optional.
+If GitHub reports failed payments as well as a spending limit, check the account's
+billing status before retrying; a blocked job has not executed its tests.
 The Maintenance gate uses `--keep-going` to collect
 independent check failures in one run and still exits unsuccessfully if any
 check fails; local invocations stop at the first failure by default. Native

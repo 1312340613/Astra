@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,3 +93,78 @@ def test_run_instance_dry_run_builds_judge_pipeline(tmp_path, monkeypatch):
 
     assert result["status"] == "dry-run"
     assert result["judge_returncode"] == 0
+
+
+@pytest.mark.parametrize("failure", ["checkout", "install", "judge"])
+def test_dry_run_cli_reports_pipeline_failures(tmp_path, monkeypatch, failure):
+    instance = _passing_instance("unused-in-fixture")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps([instance]), encoding="utf-8")
+
+    def checkout(*args, **kwargs):
+        if failure == "checkout":
+            raise RuntimeError("checkout unavailable")
+        return tmp_path
+
+    monkeypatch.setattr(swebench, "clone_and_checkout", checkout)
+    monkeypatch.setattr(swebench, "install_repo", lambda workspace: "install failed" if failure == "install" else "")
+    monkeypatch.setattr(swebench, "apply_test_patch", lambda *args: None)
+    monkeypatch.setattr(swebench, "judge_instance", lambda *args: {
+        "resolved": False, "returncode": 2, "stdout": "", "stderr": "collection failed",
+    })
+    reports = tmp_path / "reports"
+    monkeypatch.setattr(swebench, "RESULTS_ROOT", reports)
+
+    assert swebench.main([
+        "--manifest", str(manifest), "--all", "--dry-run", "--work-root", str(tmp_path / "work"),
+    ]) == 1
+    report = json.loads(next(reports.glob("*.json")).read_text(encoding="utf-8"))
+    assert report[0]["status"] == "error"
+    assert report[0]["error"]
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_dry_run_preserves_executed_baseline_results(tmp_path, monkeypatch, returncode):
+    monkeypatch.setattr(swebench, "clone_and_checkout", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(swebench, "apply_test_patch", lambda *args: None)
+    monkeypatch.setattr(swebench, "judge_instance", lambda *args: {
+        "resolved": returncode == 0, "returncode": returncode, "stdout": "baseline result", "stderr": "",
+    })
+    result = asyncio.run(swebench.run_instance(
+        _passing_instance("fixture"), work_root=tmp_path, model_key="fake", dry_run=True, install=False,
+    ))
+    assert result["status"] == "dry-run"
+    assert result["judge_returncode"] == returncode
+    assert result["resolved"] is False
+
+
+def test_model_round_keeps_judge_hidden_until_after_reply(tmp_path, monkeypatch):
+    from agent.evals import coding_agent
+
+    repo = _make_repo(tmp_path)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    instance = _passing_instance(commit)
+    replies = []
+
+    async def reply(message):
+        assert not (repo / "test_sample.py").exists()
+        replies.append(message)
+
+    async def build(workdir, model_key):
+        assert workdir == repo
+        assert model_key == "fake"
+        return SimpleNamespace(reply=reply, context=SimpleNamespace(
+            iteration_count=1, total_prompt_tokens=20, total_completion_tokens=10,
+            total_cache_hit_tokens=0, total_cache_miss_tokens=20,
+        ))
+
+    monkeypatch.setattr(coding_agent, "build_coding_agent", build)
+    monkeypatch.setattr(swebench, "clone_and_checkout", lambda *args, **kwargs: repo)
+    result = asyncio.run(swebench.run_instance(
+        instance, work_root=tmp_path / "work", model_key="fake", dry_run=False, install=False,
+    ))
+    assert len(replies) == 1
+    assert result["status"] == "pass"
+    assert result["resolved"] is True
+    assert result["prompt_tokens"] == 20
+    assert result["completion_tokens"] == 10

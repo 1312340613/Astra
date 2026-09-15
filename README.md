@@ -131,3 +131,9 @@ is not yet provided by its Appshot helper; see [platform limits](docs/appshot.md
 
 For architecture, activity history, notebooks and troubleshooting, browse the
 [full documentation index](docs/README.md).
+
+## License
+
+Astra is licensed under the [MIT License](LICENSE).
+Third-party dependencies and evaluation materials retain their own licenses;
+see the [evaluation sources](evals/coding/README.md#sources-and-licenses).
