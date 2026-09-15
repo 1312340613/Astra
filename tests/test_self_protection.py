@@ -97,9 +97,22 @@ def test_local_execution_blocks_before_starting_child(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_shell", unexpected)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected)
     with pytest.raises(SelfProtectionError):
-        asyncio.run(sandbox.execute_shell("kill 4100"))
+        command = "Stop-Process -Id 4100" if os.name == "nt" else "kill 4100"
+        asyncio.run(sandbox.execute_shell(command))
     with pytest.raises(SelfProtectionError):
         asyncio.run(sandbox.execute_python("import os; os.kill(4100, 15)"))
+
+
+def test_local_windows_routing_keeps_host_and_wsl_targets_separate(tmp_path, monkeypatch):
+    from agent.sandbox.local import LocalSandbox
+    sandbox = LocalSandbox(workdir=str(tmp_path))
+    monkeypatch.setattr(sandbox, "process_guard", guard())
+    monkeypatch.setattr("agent.sandbox.local.sys.platform", "win32")
+    with pytest.raises(SelfProtectionError):
+        sandbox.check_host_processes("Stop-Process -Id 4100")
+    sandbox.check_host_processes("kill 4100")  # auto routes a Linux command to WSL
+    with pytest.raises(SelfProtectionError):
+        sandbox.check_host_processes("taskkill.exe /PID 4100 /F", "wsl")
 
 
 def test_real_current_process_is_guarded_without_sending_signal():
