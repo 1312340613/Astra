@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -133,7 +134,10 @@ def test_real_execution_does_not_masquerade_as_coding_verification(tmp_path):
 
         try:
             await call("edit_probe", path="broken.py")
-            pwd = await call("execute_shell", command="pwd", foreground_yield_ms=0)
+            # Exercise a real native shell without requiring WSL on Windows.
+            pwd = await call("execute_shell", command="cd" if sys.platform == "win32" else "pwd",
+                             environment="windows" if sys.platform == "win32" else "posix",
+                             foreground_yield_ms=0)
             assert pwd["execution"]["exit_code"] == 0
             assert agent._verification_required is True
             contract = store.get_task(task["id"])["verification"]

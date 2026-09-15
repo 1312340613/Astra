@@ -192,3 +192,32 @@ def test_reader_drains_short_reads_before_waiting_for_exit(monkeypatch):
         f"C:/Fixture/appshot-{value['manifest']['token']}.manifest.json",
         broker_id=binding["instance_id"], session_id=binding["session_id"], runtime_root="C:/Fixture"))
     assert result.png_bytes == PNG
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows reader subprocess flags")
+def test_reader_rejects_missing_output_pipe_and_reaps_child(monkeypatch):
+    from agent.cli import appshot_windows as reader
+    value = artifact()
+    class Child:
+        stdout = None
+        returncode = None
+        killed = False
+        waited = False
+        def kill(self):
+            self.killed = True
+        async def wait(self):
+            assert self.killed
+            self.waited = True
+            self.returncode = 1
+            return 1
+    child = Child()
+    async def create(*args, **kwargs):
+        return child
+    binding = value["manifest"]["broker"]
+    monkeypatch.setattr(reader.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(reader, "read_windows_recipient_identity", lambda: WindowsAppshotProcessIdentity(**binding["recipient"]))
+    with pytest.raises(AppshotValidationError, match="artifact_unsafe"):
+        asyncio.run(reader.read_windows_appshot("fixture.exe",
+            f"C:/Fixture/appshot-{value['manifest']['token']}.manifest.json",
+            broker_id=binding["instance_id"], session_id=binding["session_id"], runtime_root="C:/Fixture"))
+    assert child.killed and child.waited

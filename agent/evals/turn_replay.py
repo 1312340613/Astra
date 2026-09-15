@@ -204,6 +204,11 @@ async def run_case(case: TurnCase, root: Path, *, emit: Callable[[dict], None] |
                             raise ValueError("Browser replay may open only its local fixture")
                         call["arguments"] = json.dumps({"url": browser.url, "extract": False})
     provider = ReplayProvider(TurnCase.model_validate(case_data).responses)
+    if case.budget_seconds:
+        # Budget scenarios include real task/session writes before their stall.
+        # Keep provider timers later so they cannot preempt the intended fault.
+        provider.config.idle_timeout = max(0.12, case.budget_seconds * 2)
+        provider.config.overall_timeout = max(5, case.budget_seconds * 2)
     store = TaskStore(root / "tasks.db")
     task = store.start_run("replay", case.id, session_id="replay", model="replay")
     agent = ReActAgent("replay", LLMClient(provider.config, provider=provider), registry, task_store=store, max_iterations=10,

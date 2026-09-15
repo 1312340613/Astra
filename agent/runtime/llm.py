@@ -204,9 +204,16 @@ class _RequestBudget:
             and (remaining is None or remaining > 0)
         )
 
-    def _raise_overall_timeout(self) -> None:
-        from .turn_budget import check_work_budget
+    def _raise_overall_timeout(self, *, deadline_expired: bool = False) -> None:
+        from .turn_budget import TurnBudgetExceeded, check_work_budget, current_turn_budget
         check_work_budget()
+        # asyncio timers may wake one clock-resolution tick before monotonic()
+        # reaches the deadline (notably on Windows). Attribute a fired timer to
+        # the deadline that limited it, even when the request timeout is disabled.
+        turn = current_turn_budget()
+        if (deadline_expired and turn is not None and self.turn_deadline is not None
+                and self.deadline == self.turn_deadline):
+            raise TurnBudgetExceeded(turn)
         raise LLMOverallTimeout(
             f"LLM request exceeded overall timeout {self.timeout:g}s"
         )
@@ -260,7 +267,7 @@ class _RequestBudget:
         except TimeoutError as exc:
             if timeout_context.expired():
                 if overall_is_limit:
-                    self._raise_overall_timeout()
+                    self._raise_overall_timeout(deadline_expired=True)
                 raise _RequestCapTimeout from exc
             raise
 
@@ -271,7 +278,7 @@ class _RequestBudget:
         bounded_delay = max(0.0, float(delay))
         if remaining is not None and bounded_delay >= remaining:
             await asyncio.sleep(remaining)
-            self._raise_overall_timeout()
+            self._raise_overall_timeout(deadline_expired=True)
         await asyncio.sleep(bounded_delay)
 
     def fork_attempts(self, max_retries: int) -> "_RequestBudget":

@@ -259,6 +259,9 @@ def test_lexical_and_vector_votes_share_only_the_same_canonical_revision(archive
 
 
 def test_shared_encoding_waits_for_both_sources_within_broker_budget(archive, monkeypatch):
+    # This checks shared waiting/encoding, including SQL readback on slow hosts.
+    # Production latency remains enforced by the separate performance gate.
+    monkeypatch.setenv("ASTRA_CONTEXT_INDEX_SOURCE_MS", "2000")
     class SlowEncoder(Encoder):
         def encode(self, texts):
             time.sleep(0.09)

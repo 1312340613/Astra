@@ -270,7 +270,7 @@
         ],
         "resume_kind": "time_budget"
       },
-      "budget_seconds": 0.1
+      "budget_seconds": 2
     },
     {
       "id": "budget-during-tool",
@@ -302,7 +302,7 @@
         ],
         "resume_kind": "time_budget"
       },
-      "budget_seconds": 0.1
+      "budget_seconds": 2
     },
     {
       "id": "cancel-during-tool",

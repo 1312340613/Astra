@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import time
 
 from .common import LauncherError
@@ -49,6 +50,8 @@ def _argv(pid: int) -> list[str]:
 
 
 def _candidates() -> list[int]:
+    if sys.platform == "win32":
+        raise LauncherError("macOS embedding worker maintenance is unavailable on Windows.")
     try:
         result = subprocess.run(["ps", "-axo", "pid=,uid=,command="], capture_output=True,
                                 text=True, check=False, timeout=10)
@@ -66,6 +69,8 @@ def _key(directory: str) -> str:
 
 
 def _state(directory: Path, pid: int) -> dict | None:
+    if sys.platform == "win32":
+        raise LauncherError("macOS embedding worker maintenance is unavailable on Windows.")
     for index, path in enumerate(directory.glob("*.json")):
         if index >= 64:
             raise LauncherError("Too many embedding runtime records; inspect this directory.")

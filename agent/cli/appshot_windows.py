@@ -123,10 +123,13 @@ async def read_windows_appshot(executable: str, manifest_path: str, *, broker_id
     except OSError as exc:
         raise AppshotValidationError("artifact_unsafe") from exc
     try:
+        output = process.stdout
+        if output is None:
+            raise AppshotValidationError("artifact_unsafe")
         async with asyncio.timeout(2):
             raw = bytearray()
             while True:
-                chunk = await process.stdout.read(min(65536, 16 * 1024 * 1024 + 1 - len(raw)))
+                chunk = await output.read(min(65536, 16 * 1024 * 1024 + 1 - len(raw)))
                 if not chunk:
                     break
                 raw.extend(chunk)

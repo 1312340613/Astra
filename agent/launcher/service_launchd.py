@@ -8,6 +8,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -36,6 +37,8 @@ def _missing(result: subprocess.CompletedProcess[str]) -> bool:
 
 
 def _read(path: Path) -> tuple[dict, str]:
+    if sys.platform == "win32":
+        raise LauncherError("LaunchAgent maintenance requires macOS.")
     # Do not follow a replaced definition into a different user's configuration.
     if path.is_symlink():
         raise LauncherError("An Astra service definition is symlinked; inspect it before maintenance.")
@@ -55,7 +58,13 @@ def _read(path: Path) -> tuple[dict, str]:
 
 
 class LaunchdServices:
+    install: Installation
+    folder: Path
+    domain: str
+
     def __init__(self, install: Installation):
+        if sys.platform == "win32":
+            raise LauncherError("LaunchAgent maintenance requires macOS.")
         self.install = install
         self.folder = Path.home() / "Library/LaunchAgents"
         self.domain = f"gui/{os.getuid()}"

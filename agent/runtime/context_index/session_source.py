@@ -694,6 +694,16 @@ class SessionRecommendationSource:
             from_clause = "query_masks AS q JOIN messages AS m ON m.id = q.id"
             mask, term_params = "q.query_match_mask", ()
             fts_guard, fts_params = "", ()
+        elif not fts_params:
+            start, before, cutoff = connection.execute(
+                "SELECT context_index_after(), context_index_before(), context_index_cutoff()"
+            ).fetchone()
+            if start == 0 and before == cutoff:
+                # Unindexed short terms must inspect the full history. A
+                # timestamp-index walk adds one table lookup per row without
+                # pruning it; sequential reads are much cheaper on long archives.
+                # Explicit date windows keep the selective timestamp index.
+                from_clause += " NOT INDEXED"
         # Text is matched once per indexed hit. Short scans discard nonmatches
         # before materialization; coverage uses cheap integer masks afterwards.
         scan_guard = "1" if fts_params or indexed_masks else "query_match_mask != 0"

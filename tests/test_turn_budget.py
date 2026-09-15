@@ -5,7 +5,7 @@ import pytest
 
 from agent.cli.turn_budget import execute_budget_command
 from agent.core.msg import ContentBlock, Msg
-from agent.runtime.llm import _RequestBudget
+from agent.runtime.llm import LLMOverallTimeout, _RequestBudget, _RequestCapTimeout
 from agent.runtime.task_resume import budget_resume_candidate
 from agent.runtime.task_store import TaskStore
 from agent.runtime.tools.registry import ToolDef, ToolRegistry
@@ -37,6 +37,32 @@ def test_one_deadline_covers_all_requests_and_retries_and_closes_the_source():
         assert len(set(deadlines)) == 1
         assert closed.is_set()
         assert current_turn_budget() is None
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("request_seconds", "cap", "error"), [
+    (0, None, TurnBudgetExceeded),
+    (120, None, TurnBudgetExceeded),
+    (1, None, LLMOverallTimeout),
+    (0, 0.01, _RequestCapTimeout),
+])
+def test_early_timer_expiry_is_attributed_to_its_limiting_deadline(monkeypatch, request_seconds, cap, error):
+    from agent.runtime import turn_budget
+    timeout = asyncio.timeout
+
+    async def scenario():
+        budget = turn_budget.TurnBudget(60)
+        token = turn_budget._CURRENT.set(budget)
+        try:
+            request = _RequestBudget.from_policy(request_seconds, 0)
+            # Fire the actual asyncio timeout before the monotonic deadline,
+            # reproducing a coarse clock tick without depending on host timing.
+            monkeypatch.setattr(asyncio, "timeout", lambda _: timeout(0))
+            with pytest.raises(error):
+                await request.run(lambda: asyncio.Event().wait(), cap=cap)
+            assert request.remaining() > 0
+        finally:
+            turn_budget._CURRENT.reset(token)
     asyncio.run(scenario())
 
 
@@ -138,7 +164,9 @@ def test_expiry_ends_real_agent_once_and_preserves_uncertain_tool_outcomes(tmp_p
             writes.append("dispatched")
             await asyncio.Event().wait()
         registry.register(ToolDef("mutation", "mutation", {"type": "object"}, mutation, risk="write"))
-        agent = make_agent(registry, WaitingLLM("mutation" if tool else None), task_store=store, turn_timeout_seconds=0.08)
+        # Include real persistence and tool dispatch before the intended stall;
+        # this is an outcome test, not an 80 ms startup performance benchmark.
+        agent = make_agent(registry, WaitingLLM("mutation" if tool else None), task_store=store, turn_timeout_seconds=2)
         agent.context.set_session(str(tmp_path / "session.json"))
         events = [e async for e in agent.reply_stream(Msg(content=[ContentBlock.text("go")], metadata={"task_id": task["id"]}))]
         assert sum(e.get("code") == "turn_budget_exhausted" for e in events) == 1
@@ -267,7 +295,7 @@ def test_expiry_during_post_action_readback_blocks_replay_of_the_unknown_write(t
             writes.append("dispatched")
             return "written"
         registry.register(ToolDef("mutation", "mutation", {"type": "object"}, mutation, risk="write"))
-        agent = make_agent(registry, WaitingLLM("mutation"), task_store=store, turn_timeout_seconds=0.08)
+        agent = make_agent(registry, WaitingLLM("mutation"), task_store=store, turn_timeout_seconds=2)
         agent._source_mutation_intent = lambda *_: {"mode": "track"}
         snapshots = 0
         async def snapshot():
