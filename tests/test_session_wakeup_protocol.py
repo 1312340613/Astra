@@ -123,14 +123,15 @@ def test_cancel_stops_running_check_and_drops_late_output(tmp_path, model):
         _stop_protocol_backend(proc)
 
 
-def test_switching_session_stops_pending_plan(tmp_path, model):
+@pytest.mark.parametrize(("command", "state"), [("/session another", "session_changed"), ("/reset", "session_reset")])
+def test_switching_or_resetting_session_stops_pending_plan(tmp_path, model, command, state):
     proc, _, _, wait_for = start(tmp_path, model)
     try:
         wait_for(lambda e: e.get("type") == "startup_banner", timeout=30)
         send(proc, {"type": "command", "cmd": "/wakeup after 1200 Check later"})
         wait_for(lambda e: e.get("type") == "wakeup_status")
-        send(proc, {"type": "command", "cmd": "/session another"})
-        status = wait_for(lambda e: e.get("type") == "wakeup_status" and e.get("plan", {}).get("state") == "session_changed")
+        send(proc, {"type": "command", "cmd": command})
+        status = wait_for(lambda e: e.get("type") == "wakeup_status" and e.get("plan", {}).get("state") == state)
         assert status["plan"]["runs"] == 0
         assert not model[1]
     finally:

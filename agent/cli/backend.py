@@ -2976,6 +2976,10 @@ async def _main(startup_started: float):
                                 _send({"type": "tool_result", "name": "resume", "output": "", "error": str(exc), "code": ""})
                                 _send({"type": "done"})
                 elif c == "/reset":
+                    if wakeups.status()["state"] in {"scheduled", "running"}:
+                        _wakeup_event(wakeups.cancel("session_reset"), "Session wakeup stopped because the conversation was reset.")
+                        await _stop_wakeup_turn()
+                    latest_user_request = ""
                     current_memory_session = Path(agent.context.session_path).stem or "default"
                     memory_store.clear_working(current_memory_session)
                     agent.end_session("reset")
