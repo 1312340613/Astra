@@ -15,7 +15,7 @@
 Windows：
 
 ```powershell
-git clone https://github.com/1312340613/Astra.git
+git clone https://github.com/ZihangHe13123/Astra.git
 cd Astra
 .\astra.bat setup --install-command
 ```
@@ -23,7 +23,7 @@ cd Astra
 macOS/Linux：
 
 ```bash
-git clone https://github.com/1312340613/Astra.git
+git clone https://github.com/ZihangHe13123/Astra.git
 cd Astra
 ./astra.sh setup --install-command
 ```

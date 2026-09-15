@@ -244,6 +244,9 @@ export type PyEvent =
   | { type: "connection_result"; request_id: string; provider_id?: string; error: string; notice?: string }
   | { type: "done" }
   | { type: "backend_hello"; protocol_version: number }
+  | { type: "restart_ready"; request_id: string; session: string; replayed?: boolean }
+  | { type: "restart_status"; request_id: string; state: string; message: string }
+  | { type: "wakeup_status"; plan: Record<string, unknown>; message: string }
   | {
       type: "error";
       message: string;
@@ -399,6 +402,7 @@ export interface WorkingMemory {
 
 // Commands from TUI (via stdout)
 export type TuiCommand =
+  | { type: "restart_ack"; request_id: string }
   | { type: "message"; text: string; appshots?:never }
   | { type: "message"; text: string; appshots:Array<{label:string;manifest_path:string}>; submission_id:string; appshot_session_id:string; appshot_broker_id:string }
   | {type:'submission_status'; submission_id:string}

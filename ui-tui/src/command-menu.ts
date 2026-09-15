@@ -77,6 +77,8 @@ const SLASH_COMMANDS: SlashCommandSuggestion[] = [
   { command: "/permissions", description: "inspect or change tool policy", takesArgs: true, group: "SYSTEM" },
   { command: "/reload", description: "hot-reload agent runtime (code/persona/skills/model)", takesArgs: true, group: "SYSTEM" },
   { command: "/reconnect", description: "restart backend connection", group: "SYSTEM" },
+  { command: "/restart", description: "restart backend after current work is delivered; cancel stops waiting", takesArgs: true, group: "SYSTEM" },
+  { command: "/wakeup", description: "session wakeups: status, cancel, after/every SECONDS PROMPT", takesArgs: true, group: "SYSTEM" },
   { command: "/help", description: "show command help", group: "SYSTEM" },
 ];
 

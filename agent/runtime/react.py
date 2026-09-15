@@ -1539,7 +1539,9 @@ class ReActAgent(AgentBase):
                 "unprotected_external_images": bundle.unprotected_external_images,
             }
         canonical_content = storage_content if storage_content != chat_content else chat_content
-        self.context.add_user(canonical_content)
+        self.context.add_user(canonical_content, provenance=(
+            "session_wakeup" if msg.metadata.get("source") == "session_wakeup" else ""
+        ))
         if storage_content == chat_content:
             storage_content = None
         if storage_content is not None:

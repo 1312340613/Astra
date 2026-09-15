@@ -81,3 +81,5 @@ jobs:
           tests/test_embedding_runtime.py tests/test_posix_scripts.py tests/test_auxiliary_scripts.py
           tests/test_session_recall.py tests/test_session_recall_selftest.py tests/test_instance_lock.py
           tests/test_backend_handshake.py tests/test_cross_platform_examples.py tests/test_production_foundations.py
+          tests/test_self_protection.py tests/test_graceful_restart.py tests/test_session_wakeup.py
+          tests/test_session_lifecycle_protocol.py tests/test_session_wakeup_protocol.py

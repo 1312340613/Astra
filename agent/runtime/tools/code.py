@@ -539,6 +539,9 @@ def register_code_tools(
         background: bool = False,
         _task_id: str = "",
     ) -> str:
+        active = getattr(sandbox, "current", sandbox)
+        if isinstance(active, LocalSandbox):
+            active.process_guard.check_python(code)
         sandbox_spec = _supervisor_sandbox_spec()
         result, process = await _run_or_background(
             lambda on_output: _execute_python_stream(code, on_output),
@@ -566,6 +569,9 @@ def register_code_tools(
         background: bool = False,
         _task_id: str = "",
     ) -> str:
+        active = getattr(sandbox, "current", sandbox)
+        if isinstance(active, LocalSandbox):
+            active.check_host_processes(command, environment)
         sandbox_spec = _supervisor_sandbox_spec()
         result, process = await _run_or_background(
             lambda on_output: _execute_shell_stream(command, environment, on_output),

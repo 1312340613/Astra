@@ -898,6 +898,7 @@ def _start_question_protocol_backend(
     *,
     settings_overrides: dict | None = None,
     env_overrides: dict | None = None,
+    bootstrap_code: str | None = None,
 ):
     settings = tmp_path / "settings.json"
     settings_payload = {"selected_model": "Qwen3.6-35B-A3B"}
@@ -948,7 +949,7 @@ def _start_question_protocol_backend(
     })
     env.update(env_overrides or {})
     proc = subprocess.Popen(
-        [sys.executable, "-m", "agent.cli.backend"],
+        [sys.executable, "-c", bootstrap_code] if bootstrap_code else [sys.executable, "-m", "agent.cli.backend"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

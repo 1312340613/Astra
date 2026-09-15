@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from ..runtime.process_env import hidden_process_creationflags
+from ..runtime.self_protection import HostProcessGuard
 from .windows_job import WindowsJob, asyncio_process_handle
 from .base import OutputCallback, Sandbox
 from .wsl_pty import PersistentWslShell
@@ -75,6 +76,7 @@ class LocalSandbox(Sandbox):
             raise ValueError("windows_job_max_processes must be positive")
         self.windows_job_max_processes = configured_processes
         self._persistent_bash_shell: PersistentWslShell | None = None
+        self.process_guard = HostProcessGuard()
 
     @staticmethod
     def _resolve_persistent_bash_timeout(timeout: int | float | None) -> int | float | None:
@@ -225,7 +227,12 @@ class LocalSandbox(Sandbox):
         artifact.write_text("\n".join(sections), encoding="utf-8")
         return str(artifact.resolve())
 
-    def _check_dangerous(self, command: str):
+    def check_host_processes(self, command: str, environment: str = "auto") -> None:
+        resolved = self.resolve_shell_environment(command, environment)
+        self.process_guard.check_shell(command, foreign_namespace=resolved == "wsl")
+
+    def _check_dangerous(self, command: str, environment: str = "auto"):
+        self.check_host_processes(command, environment)
         cmd_lower = re.sub(r"\s+", " ", command.lower().strip())
         for pattern in DANGEROUS_PATTERNS:
             if pattern in cmd_lower:
@@ -372,6 +379,7 @@ class LocalSandbox(Sandbox):
         code: str,
         on_output: OutputCallback | None = None,
     ) -> dict:
+        self.process_guard.check_python(code)
         proc = None
         job = None
         try:
@@ -420,7 +428,7 @@ class LocalSandbox(Sandbox):
         environment: str = "auto",
         on_output: OutputCallback | None = None,
     ) -> dict:
-        self._check_dangerous(command)
+        self._check_dangerous(command, environment)
         resolved_environment = self.resolve_shell_environment(command, environment)
         if self.windows_job_containment and sys.platform == "win32" and resolved_environment == "wsl":
             raise SandboxError(
@@ -485,7 +493,7 @@ class LocalSandbox(Sandbox):
         on_output: OutputCallback | None = None,
     ) -> dict:
         """Run a command in the owner-scoped persistent Bash PTY used by Minimal Mode."""
-        self._check_dangerous(command)
+        self._check_dangerous(command, "wsl" if sys.platform == "win32" else "posix")
         if self._persistent_bash_shell is None:
             self._persistent_bash_shell = PersistentWslShell(
                 self._persistent_bash_args(),

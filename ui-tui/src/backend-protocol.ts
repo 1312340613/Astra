@@ -30,6 +30,9 @@ export class EventDeliveryState {
     return Math.min(this.highWater, this.gapFloor ?? this.highWater,
       ...[...this.failed].map(value => value - 1));
   }
+  get hasPendingDelivery(): boolean {
+    return this.failed.size > 0 || this.gapFloor !== undefined;
+  }
   duplicate(event: Envelope): boolean {
     return Boolean(event.event_id && this.seen.has(event.event_id))
       || Boolean(event.replayed && typeof event.cursor === "number"

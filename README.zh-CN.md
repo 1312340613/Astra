@@ -32,7 +32,7 @@ Lyra 是 Astra 的默认人格。想体验一个终端小彩蛋，可以试试 `
 **Windows — CMD 或 PowerShell**
 
 ```powershell
-git clone https://github.com/1312340613/Astra.git
+git clone https://github.com/ZihangHe13123/Astra.git
 cd Astra
 .\astra.bat setup --install-command
 ```
@@ -40,7 +40,7 @@ cd Astra
 **macOS 或 Linux**
 
 ```bash
-git clone https://github.com/1312340613/Astra.git
+git clone https://github.com/ZihangHe13123/Astra.git
 cd Astra
 ./astra.sh setup --install-command
 ```
@@ -83,6 +83,8 @@ astra
 | `/memory` · `/skills` | 查看记忆和技能库。 |
 | `/learn review` | 检查下一批自动总结的技能，再次运行即可继续。 |
 | `/tasks` · `/resume <task-id>` | 查看任务记录，或恢复符合条件的任务。 |
+| `/restart` · `/restart cancel` | 等当前工作完成后重启本次后端，或取消等待。 |
+| `/wakeup` · `/wakeup cancel` | 查看或停止[会话内唤醒](docs/zh-CN/session-lifecycle.md)。 |
 | `/appshot enable` | 安装原生辅助程序后，启用窗口捕获。 |
 
 `Ctrl+L` 打开活动详情，`Ctrl+O` 打开最近一次工具结果，`Ctrl+C` 请求取消执行。更多操作见[日常使用指南](docs/zh-CN/usage.md)。

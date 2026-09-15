@@ -12,7 +12,7 @@ import {
 
 assert.deepEqual(
   slashCommandSuggestions("/").map((item) => item.command),
-  ["/image", "/bar", "/minimal", "/sip", "/reset", "/compress", "/undo", "/retry", "/think", "/model", "/mode", "/connect", "/persona", "/search", "/tool", "/gallery", "/memory", "/skills", "/learn", "/tools", "/computer", "/conclave", "/appshot", "/tasks", "/budget", "/resume", "/cancel", "/goal", "/today", "/session", "/handoff", "/theme", "/timeline", "/health", "/doctor", "/diagnostics", "/maintenance", "/sandbox", "/vision-tiles", "/context-index", "/mcp", "/yolo", "/permissions", "/reload", "/reconnect", "/help"],
+  ["/image", "/bar", "/minimal", "/sip", "/reset", "/compress", "/undo", "/retry", "/think", "/model", "/mode", "/connect", "/persona", "/search", "/tool", "/gallery", "/memory", "/skills", "/learn", "/tools", "/computer", "/conclave", "/appshot", "/tasks", "/budget", "/resume", "/cancel", "/goal", "/today", "/session", "/handoff", "/theme", "/timeline", "/health", "/doctor", "/diagnostics", "/maintenance", "/sandbox", "/vision-tiles", "/context-index", "/mcp", "/yolo", "/permissions", "/reload", "/reconnect", "/restart", "/wakeup", "/help"],
 );
 
 assert.deepEqual(

@@ -14,6 +14,7 @@ labelled in the Chinese navigation.
 | --- | --- |
 | Install, update, keep local changes or recover an interrupted update | [Launcher and updates](launcher-update.md) |
 | Select a model, adjust reasoning and use terminal commands | [Everyday use](usage.md) |
+| Restart safely or check back within the current session | [Session lifecycle](session-lifecycle.md) |
 | Configure sandboxing, host file access and tool permissions | [Tool execution](execution.md) |
 | Understand what is saved, injected or retrieved | [Memory overview](memory.md) |
 | Save learned skills, review a batch, migrate old candidates or undo changes | [Skill learning](skill-learning.md) |

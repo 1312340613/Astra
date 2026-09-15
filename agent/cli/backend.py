@@ -8,6 +8,7 @@ import os
 import json
 import sqlite3
 import asyncio
+import contextvars
 from dataclasses import replace
 import inspect
 import logging
@@ -69,7 +70,9 @@ from agent.runtime.event_writer import OrderedEventWriter
 from agent.runtime.async_io import durable_io
 from agent.runtime.latency import RuntimeProfiler, current_profiler, profile_request
 from agent.runtime.user_questions import UserQuestionBroker
-from agent.runtime.tools.registry import ToolRegistry
+from agent.runtime.tools.registry import ToolDef, ToolRegistry
+from agent.cli.session_lifecycle import ControlledRestart, RESTART_EXIT_CODE
+from agent.runtime.session_wakeup import SessionWakeups, visible_wakeup_history, wakeup_prompt
 from agent.runtime.tools.code import register_code_tools
 from agent.runtime.tools.files import register_file_tools
 from agent.runtime.tools.git import register_git_tools
@@ -699,7 +702,7 @@ async def main():
     profile = RuntimeProfiler.from_env(PROJECT_ROOT)
     with profile.activate() if profile is not None else nullcontext():
         try:
-            await _main(startup_started)
+            return await _main(startup_started)
         finally:
             try:
                 if _event_writer is not None:
@@ -712,6 +715,11 @@ async def main():
 
 async def _main(startup_started: float):
     global _runtime_event_stream, _event_writer
+    restart = ControlledRestart(supported=os.getenv("ASTRA_TUI_RESTART") == "1")
+    wakeups = SessionWakeups()
+    wakeup_context: contextvars.ContextVar[dict | None] = contextvars.ContextVar("session_wakeup", default=None)
+    latest_user_request = ""
+    exit_code = 0
     from agent.runtime.native_startup import prepare_native_dependencies
 
     prepare_native_dependencies()
@@ -1130,6 +1138,102 @@ async def _main(startup_started: float):
             "memory": memory_store.get_working(_current_memory_session()),
         })
 
+    def _require_local_work_session() -> None:
+        if active_channel.get() or bar_mode.active or minimal_mode.active or local_mode.active:
+            raise ValueError("Session lifecycle controls are available in the local Work TUI only.")
+
+    async def _request_restart() -> str:
+        _require_local_work_session()
+        event = restart.request()
+        _send(event)
+        return event["message"]
+
+    async def _restart_permission(_args: dict) -> dict | None:
+        _require_local_work_session()
+        if not restart.supported:
+            raise ValueError("Controlled restart requires the current Astra TUI.")
+        if restart.draining:
+            return None
+        return {"reason": "Restart the current backend after its current work is delivered.",
+                "approval_title": "Restart Astra backend",
+                "approval_question": "Restart this backend after the current reply finishes?",
+                "approval_effect": "The TUI stays open; the same session is restored. Other services are not restarted."}
+
+    tools.register(ToolDef(
+        name="request_restart",
+        description="Request a controlled restart of this TUI's backend. Waits for current work and delivery; requires user confirmation. Does not update dependencies or restart other services. Return a final reply after requesting it; do not wait for the restart inside this turn.",
+        parameters={"type": "object", "properties": {}},
+        fn=_request_restart, risk="write", cache_results=False,
+        permission_check=_restart_permission, permission_authoritative=True,
+        permission_grant=lambda _args, _request, _decision: None,
+    ))
+
+    def _wakeup_event(status: dict, message: str = "") -> None:
+        _send({"type": "wakeup_status", "plan": status, "message": message})
+
+    async def _schedule_wakeup(prompt: str, delay_seconds: float = 300,
+                               interval_seconds: float = 0, lifetime_seconds: float = 3600) -> str:
+        _require_local_work_session()
+        if wakeup_context.get() is not None or restart.draining:
+            raise ValueError("A wakeup cannot create further schedules or run while restart is pending.")
+        status = wakeups.schedule(session=Path(agent.context.session_path).stem, prompt=prompt,
+                                  original_request=latest_user_request,
+                                  delay_seconds=delay_seconds, interval_seconds=interval_seconds,
+                                  lifetime_seconds=lifetime_seconds)
+        await _stop_wakeup_turn()
+        _wakeup_event(status, f"Wakeup scheduled for {status['next_at']}; expires {status['expires_at']}. "
+                       + ("The previous plan was replaced. " if status.get("replaced_id") else "")
+                       + "Use /wakeup to inspect or /wakeup cancel to stop. Closing Astra stops the plan.")
+        return json.dumps(status, ensure_ascii=False)
+
+    async def _wakeup_status() -> str:
+        _require_local_work_session()
+        return json.dumps(wakeups.status(), ensure_ascii=False)
+
+    async def _cancel_wakeup() -> str:
+        _require_local_work_session()
+        status = wakeups.cancel()
+        await _stop_wakeup_turn()
+        _wakeup_event(status, "Session wakeup stopped.")
+        return json.dumps(status, ensure_ascii=False)
+
+    async def _report_wakeup(outcome: str, summary: str = "") -> str:
+        tick = wakeup_context.get()
+        if tick is None:
+            raise ValueError("report_wakeup is only available during a scheduled wakeup turn.")
+        if outcome not in {"unchanged", "changed", "completed", "failed"}:
+            raise ValueError("Invalid wakeup outcome.")
+        if tick.get("outcome"):
+            raise ValueError("This wakeup already has an outcome. Finish the turn.")
+        if outcome != "unchanged" and not summary.strip():
+            raise ValueError("A visible wakeup outcome needs a summary.")
+        tick.update(outcome=outcome, summary=summary[:4000])
+        return "Wakeup outcome recorded. Finish this turn; do not wait or schedule another check."
+
+    tools.register(ToolDef(
+        name="schedule_wakeup",
+        description="Only when the user explicitly asks to check back later or monitor something, schedule one bounded check in THIS session. Zero interval is one-shot; positive interval repeats until completion, failure, cancellation or expiry. Replaces the current plan. Closing/switching/restarting Astra stops it. Include what to inspect and the stop condition in prompt. Does not grant permission for new actions.",
+        parameters={"type": "object", "properties": {
+            "prompt": {"type": "string", "maxLength": 4000},
+            "delay_seconds": {"type": "number", "minimum": 60, "default": 300},
+            "interval_seconds": {"type": "number", "minimum": 0, "default": 0},
+            "lifetime_seconds": {"type": "number", "minimum": 60, "maximum": 43200, "default": 3600},
+        }, "required": ["prompt"]}, fn=_schedule_wakeup, risk="write", cache_results=False,
+    ))
+    for name, description, fn in (
+        ("wakeup_status", "Inspect the current session's wakeup plan and latest outcome.", _wakeup_status),
+        ("cancel_wakeup", "Stop the current session wakeup plan.", _cancel_wakeup),
+    ):
+        tools.register(ToolDef(name=name, description=description,
+                               parameters={"type": "object", "properties": {}}, fn=fn, cache_results=False))
+    tools.register(ToolDef(
+        name="report_wakeup", description="During a scheduled wakeup only, record one result. unchanged stays quiet; changed notifies; completed/failed notifies and ends repetition. Include the useful result or blocker and relevant links in summary.",
+        parameters={"type": "object", "properties": {
+            "outcome": {"type": "string", "enum": ["unchanged", "changed", "completed", "failed"]},
+            "summary": {"type": "string", "maxLength": 4000},
+        }, "required": ["outcome"]}, fn=_report_wakeup, cache_results=False,
+    ))
+
     manual_reviews: set[asyncio.Task] = set()
     startup_tasks: set[asyncio.Task] = set()
     agent_turn_lock = asyncio.Lock()
@@ -1255,6 +1359,8 @@ async def _main(startup_started: float):
             print(f"[backend] goal verification failed: {exc}", file=sys.stderr, flush=True)
 
     async def _maybe_start_goal_verification(turn_generation: int) -> None:
+        if restart.draining:
+            return
         if task_store is None or not goal_mode_enabled() or bar_mode.active or minimal_mode.active or local_mode.active:
             return
         session_id = _current_memory_session()
@@ -1277,6 +1383,7 @@ async def _main(startup_started: float):
 
     async def _stream_reply_inner(msg: Msg):
         nonlocal _reply_done
+        tick = wakeup_context.get()
         lifecycle = RequestLifecycle(msg.metadata.get("request_id") or msg.id)
         task_id = str(msg.metadata.get("task_id") or "")
         runtime_task_id = str(msg.metadata.get("runtime_task_id") or "")
@@ -1291,7 +1398,7 @@ async def _main(startup_started: float):
         lifecycle.start()
         try:
             # ── Session recall auto-logging ──
-            if _session_recall_auto_logging_enabled(
+            if tick is None and _session_recall_auto_logging_enabled(
                 bar_active=bar_mode.active,
                 minimal_active=minimal_mode.active,
                 local_active=local_mode.active,
@@ -1335,9 +1442,11 @@ async def _main(startup_started: float):
                     await _event_writer.wait_for_capacity()
                 if event["type"] == "chunk":
                     _sr_chunks.append(event["content"])
-                    _send({"type": "chunk", "content": event["content"]})
+                    if tick is None:
+                        _send({"type": "chunk", "content": event["content"]})
                 elif event["type"] == "reasoning":
-                    _send({"type": "reasoning", "content": event["content"]})
+                    if tick is None:
+                        _send({"type": "reasoning", "content": event["content"]})
                 elif event["type"] == "generation_progress":
                     _send({
                         "type": "generation_progress",
@@ -1398,7 +1507,8 @@ async def _main(startup_started: float):
                     ):
                         if key in event:
                             error_event[key] = event[key]
-                    _send(error_event)
+                    if tick is None:
+                        _send(error_event)
                 elif event["type"] == "tool_calls":
                     visible_calls = [
                         call for call in event.get("calls", [])
@@ -1456,7 +1566,8 @@ async def _main(startup_started: float):
                         "cache_hit_tokens": cache_hit,
                         "cache_miss_tokens": cache_miss,
                     })
-                    _send({"type": "done"})
+                    if tick is None:
+                        _send({"type": "done"})
                     # ── Log assistant response ──
                     try:
                         if _sr_auto is not None and _sr_sid and _sr_chunks:
@@ -1479,9 +1590,11 @@ async def _main(startup_started: float):
                 "[Cancelled] Tool call was cancelled before completion.",
                 "cancelled",
             )
-            _send({"type": "error", "message": "Request cancelled before completion."})
+            if tick is None:
+                _send({"type": "error", "message": "Request cancelled before completion."})
             _reply_done = True
-            _send({"type": "done"})
+            if tick is None:
+                _send({"type": "done"})
         except Exception as e:
             failed_message = _stream_error_message(e)
             lifecycle.fail(failed_message)
@@ -1492,13 +1605,15 @@ async def _main(startup_started: float):
                 f"[ToolInterrupted] Backend stream failed: {failed_message}",
                 "backend_stream_failed",
             )
-            _send({
-                "type": "error",
-                "code": "provider_request_failed",
-                "message": failed_message,
-            })
+            if tick is None:
+                _send({
+                    "type": "error",
+                    "code": "provider_request_failed",
+                    "message": failed_message,
+                })
             _reply_done = True
-            _send({"type": "done"})
+            if tick is None:
+                _send({"type": "done"})
         finally:
             _finish_pending_tool_calls(
                 pending_tool_calls,
@@ -1507,6 +1622,19 @@ async def _main(startup_started: float):
                 "backend_stream_closed",
             )
             lifecycle.finish()
+            if tick is not None:
+                outcome = tick.get("outcome") or "failed"
+                summary = tick.get("summary") or "Wakeup stopped: the check ended without a reported result."
+                if was_cancelled or failed_message:
+                    outcome, summary = "failed", failed_message or "Wakeup was interrupted."
+                status = wakeups.finish(tick["plan"]["id"], outcome=outcome, summary=summary)
+                if status is not None:
+                    _wakeup_event(status)
+                    if outcome != "unchanged":
+                        agent.context.add_assistant_raw({"role": "assistant", "content": summary,
+                                                         "provenance": "wakeup_notification"})
+                        _send({"type": "chunk", "content": summary})
+                _send({"type": "done"})
             await agent.context.save_async()
             if bar_mode.active:
                 if turn_completed and not was_cancelled and not failed_message:
@@ -1536,7 +1664,7 @@ async def _main(startup_started: float):
                 _send({"type": "task_status", "task": {"id": runtime_task_id, "status": status}})
             await _send_model_info()
             _send_startup_status()
-            if should_verify_goal_turn(
+            if tick is None and should_verify_goal_turn(
                 turn_completed=turn_completed,
                 was_cancelled=was_cancelled,
                 failed_message=failed_message,
@@ -1554,9 +1682,24 @@ async def _main(startup_started: float):
             await _stream_reply_inner(msg)
         else:
             async with agent_turn_lock:
+                plan = msg.metadata.get("wakeup_plan")
+                remaining = wakeups.remaining(plan["id"], Path(agent.context.session_path).stem) if plan else 0
+                if plan is not None and remaining <= 0:
+                    raise asyncio.CancelledError("Scheduled check no longer belongs to this session")
                 if on_enter is not None:
                     on_enter()
-                await _stream_reply_inner(msg)
+                if plan is None:
+                    await _stream_reply_inner(msg)
+                else:
+                    token = wakeup_context.set({"plan": plan})
+                    previous_timeout, previous_iterations = agent.turn_timeout_seconds, agent.max_iterations
+                    agent.turn_timeout_seconds = min(previous_timeout or 300, 300, remaining)
+                    agent.max_iterations = min(previous_iterations or 10, 10)
+                    try:
+                        await _stream_reply_inner(msg)
+                    finally:
+                        agent.turn_timeout_seconds, agent.max_iterations = previous_timeout, previous_iterations
+                        wakeup_context.reset(token)
 
     catalog_tasks: dict[str, asyncio.Task] = {}
 
@@ -1636,7 +1779,7 @@ async def _main(startup_started: float):
 
     async def _send_history():
         hist = []
-        for message in agent.context.messages:
+        for message in visible_wakeup_history(agent.context.messages):
             if message.get("role") not in ("user", "assistant"):
                 continue
             if message.get("_meta", {}).get("type") == "reasoning_context":
@@ -1813,7 +1956,8 @@ async def _main(startup_started: float):
     if restored:
         await _send_history()
 
-    channel_router = AgentChannelRouter(agent, agent_turn_lock, sessions_dir(PROJECT_ROOT))
+    channel_router = AgentChannelRouter(agent, agent_turn_lock, sessions_dir(PROJECT_ROOT),
+                                        admission=lambda: not restart.draining)
     channel_manager = ChannelManager(load_channels_config(), channel_router.handle)
     channel_manager_holder["manager"] = channel_manager
     # The QQ reverse-WebSocket port is a process-wide resource, while the CLI
@@ -1825,11 +1969,27 @@ async def _main(startup_started: float):
     active_task: asyncio.Task | None = None
     active_task_id = ""
     active_task_persisted = False
+    active_wakeup = False
     goal_turn_generation = 0
     _reply_done = False  # True once {"type": "done"} is sent; post-processing may still run
 
+    async def _stop_wakeup_turn() -> None:
+        # A tool inside this turn may stop repetition without awaiting its own parent.
+        if (wakeup_context.get() is None and active_wakeup
+                and active_task is not None and not active_task.done()):
+            active_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await active_task
+
     async def _launch_message(msg: Msg, input_text: str, resume_task: dict | None = None) -> bool:
         nonlocal active_task, active_task_id, goal_turn_generation, _reply_done
+        if restart.draining:
+            _send({"type": "restart_status", "state": restart.state, "request_id": restart.request_id,
+                   "message": "Restart is pending. Use /restart cancel before starting more work."})
+            return False
+        if active_wakeup and active_task is not None and not active_task.done():
+            _wakeup_event(wakeups.cancel("user_interrupted"), "Wakeup stopped for your new request.")
+            await _stop_wakeup_turn()
         if appshot_admission.reserved:
             return False
         await _cancel_goal_verifications(exclude=asyncio.current_task())
@@ -1870,7 +2030,8 @@ async def _main(startup_started: float):
         return _start_message(msg, input_text, resume_task=resume_task)
 
     def _start_message(msg: Msg, input_text: str, resume_task: dict | None = None, *, appshot_turn_owned: bool = False) -> bool:
-        nonlocal active_task, active_task_id, active_task_persisted, goal_turn_generation, _reply_done
+        nonlocal active_task, active_task_id, active_task_persisted, active_wakeup, goal_turn_generation, _reply_done
+        active_wakeup = msg.metadata.get("source") == "session_wakeup"
         if agent.llm.config.connection_required:
             _send({"type": "error", "message": "Use /connect and select a model before sending a message."})
             _send({"type": "done"})
@@ -1963,12 +2124,42 @@ async def _main(startup_started: float):
 
     appshot_admission = AppshotAdmission(
         lock=agent_turn_lock,
-        busy=lambda: active_task is not None and not active_task.done(),
+        busy=lambda: restart.draining or (active_task is not None and not active_task.done()),
         context=lambda: agent.context,
         prepare=_prepare_appshot,
         launch=lambda msg, text: _start_message(msg, text, appshot_turn_owned=True),
         send=_send,
     )
+
+    async def _lifecycle_tick() -> None:
+        while True:
+            busy = (agent_turn_lock.locked() or appshot_admission.reserved
+                    or (active_task is not None and not active_task.done())
+                    or any(not task.done() for task in (*goal_tasks, *manual_reviews)))
+            event = restart.advance(busy=busy, session=Path(agent.context.session_path).stem)
+            if event is not None:
+                _send(event)
+            previous = wakeups.status()
+            # A channel turn temporarily borrows agent.context under the same lock.
+            # Only an idle context is authoritative for a Work session switch.
+            session = (previous.get("session", "") if agent_turn_lock.locked()
+                       else Path(agent.context.session_path).stem)
+            plan = wakeups.claim(session=session, busy=busy or restart.draining)
+            current = wakeups.status()
+            if previous["state"] != current["state"] and plan is None:
+                await _stop_wakeup_turn()
+                _wakeup_event(current, f"Session wakeup stopped: {current['state']}.")
+            if plan is not None:
+                text = wakeup_prompt(plan)
+                msg = Msg(sender="scheduler", role="user", content=build_user_message_content(text),
+                          metadata={"source": "session_wakeup", "wakeup_plan": plan})
+                if not _start_message(msg, plan["prompt"]):
+                    status = wakeups.finish(plan["id"], outcome="failed", summary="Could not start the wakeup turn.")
+                    if status:
+                        _wakeup_event(status, status["summary"])
+            await asyncio.sleep(0.25)
+
+    lifecycle_task = asyncio.create_task(_lifecycle_tick(), name="session-lifecycle")
 
     try:
         # 主循环
@@ -1994,6 +2185,17 @@ async def _main(startup_started: float):
 
             if cmd.get("type") == "exit":
                 break
+
+            elif cmd.get("type") == "restart_ack":
+                if restart.acknowledge(str(cmd.get("request_id") or "")):
+                    try:
+                        await agent.context.save_async(allow_empty=True)
+                    except Exception:
+                        _send(restart.cancel("Restart cancelled because the session could not be saved."))
+                        continue
+                    exit_code = RESTART_EXIT_CODE
+                    _wakeup_event(wakeups.cancel("backend_restarted"), "Session wakeups stop on backend restart.")
+                    break
 
             elif cmd.get("type") == "performance_ack":
                 profile = current_profiler()
@@ -2074,7 +2276,12 @@ async def _main(startup_started: float):
                     _send(appshot_admission.status(submission_id))
 
             elif cmd.get("type") == "message":
+                if isinstance(cmd.get("text"), str):
+                    latest_user_request = cmd["text"][:8000]
                 if cmd.get("appshots") or "submission_id" in cmd:
+                    if active_wakeup and active_task is not None and not active_task.done():
+                        _wakeup_event(wakeups.cancel("user_interrupted"), "Wakeup stopped for your new request.")
+                        await _stop_wakeup_turn()
                     await appshot_admission.submit(cmd)
                     continue
                 text = cmd.get("text")
@@ -2091,6 +2298,7 @@ async def _main(startup_started: float):
 
             elif cmd.get("type") == "image":
                 try:
+                    latest_user_request = str(cmd.get("prompt", ""))[:8000]
                     max_bytes = int(os.getenv("MAX_IMAGE_UPLOAD_BYTES", str(10 * 1024 * 1024)))
                     blocks = build_image_message_content(
                         cmd.get("path", ""),
@@ -2110,6 +2318,10 @@ async def _main(startup_started: float):
                     catalog_tasks[provider_id] = asyncio.create_task(_refresh_provider(provider_id, bool(cmd.get("force"))))
 
             elif cmd.get("type") == "connect_provider":
+                if restart.draining:
+                    _send({"type": "connection_result", "request_id": str(cmd.get("request_id") or ""),
+                           "error": "Restart is pending. Cancel it before changing connections."})
+                    continue
                 if "connect" not in catalog_tasks or catalog_tasks["connect"].done():
                     catalog_tasks["connect"] = asyncio.create_task(_connect_provider(dict(cmd)))
                 else:
@@ -2127,6 +2339,42 @@ async def _main(startup_started: float):
                     _send({"type": "done"})
                     continue
                 c = raw_command.strip()
+                if c == "/wakeup" or c.startswith("/wakeup "):
+                    try:
+                        _require_local_work_session()
+                        if c == "/wakeup cancel":
+                            await _cancel_wakeup()
+                        elif c == "/wakeup":
+                            _wakeup_event(wakeups.status(), await _wakeup_status())
+                        else:
+                            parts = c.split(maxsplit=3)
+                            if len(parts) != 4 or parts[1] not in {"after", "every"}:
+                                raise ValueError("Usage: /wakeup [cancel | after SECONDS PROMPT | every SECONDS PROMPT]")
+                            latest_user_request = c[:8000]
+                            seconds = float(parts[2])
+                            await _schedule_wakeup(parts[3], delay_seconds=seconds,
+                                                   interval_seconds=seconds if parts[1] == "every" else 0)
+                    except ValueError as exc:
+                        _wakeup_event(wakeups.status(), str(exc))
+                    continue
+                if c == "/restart" or c.startswith("/restart "):
+                    try:
+                        _require_local_work_session()
+                        if c == "/restart cancel":
+                            _send(restart.cancel())
+                        elif c == "/restart":
+                            _send(restart.request())
+                        else:
+                            raise ValueError("Usage: /restart [cancel]")
+                    except ValueError as exc:
+                        _send({"type": "restart_status", "state": restart.state,
+                               "request_id": restart.request_id, "message": str(exc)})
+                    continue
+                if restart.draining and c.split(maxsplit=1)[:1] not in (["/cancel"], ["/yolo"]):
+                    _send({"type": "restart_status", "state": restart.state,
+                           "request_id": restart.request_id,
+                           "message": "Restart is pending; use /restart cancel before changing the session."})
+                    continue
                 if c.lower().split(maxsplit=1)[:1] not in (["/learn"], ["/yolo"], ["/cancel"]):
                     await _cancel_manual_reviews()
                 if c.lower().split(maxsplit=1)[:1] == ["/yolo"]:
@@ -3303,6 +3551,10 @@ async def _main(startup_started: float):
                     if active_task is None or active_task.done():
                         _send({"type": "done"})
     finally:
+        wakeups.cancel("backend_closed")
+        lifecycle_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await lifecycle_task
         await channel_manager.stop()
         pending_startup = [task for task in [*startup_tasks, *catalog_tasks.values()] if not task.done()]
         for task in pending_startup:
@@ -3347,6 +3599,8 @@ async def _main(startup_started: float):
             if close:
                 await close()
             _runtime_event_stream = None
+
+    return exit_code
 
 
 def _write_event(event: dict) -> None:
@@ -3403,8 +3657,7 @@ def run() -> int:
         # Pytest and some embedders replace stderr with an object without a
         # Windows file descriptor; crash diagnostics must not block startup.
         pass
-    asyncio.run(main())
-    return 0
+    return asyncio.run(main()) or 0
 
 
 if __name__ == "__main__":

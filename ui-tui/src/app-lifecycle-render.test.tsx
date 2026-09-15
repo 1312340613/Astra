@@ -265,6 +265,68 @@ test("yolo commands preserve a live reply and its busy state", async () => {
   } finally { h.app.unmount(); }
 });
 
+test("restart drains a live reply, acknowledges delivery, and restores once", async () => {
+  const h = await setup();
+  try {
+    await h.submit("first");
+    h.child.event({ type: "chunk", content: "FINAL BEFORE RESTART" });
+    await settle();
+    await h.submit("/restart");
+    assert.deepEqual(h.child.commands.at(-1), { type: "command", cmd: "/restart" });
+    assert.match(h.frame(), /FINAL BEFORE RESTART/);
+    h.child.event({ type: "restart_status", state: "draining", request_id: "a".repeat(32), message: "Waiting for completion" });
+    await settle();
+    await h.submit("new work");
+    assert.equal(h.child.commands.filter(c => c.text === "new work").length, 0);
+    h.child.event({ type: "done" });
+    h.child.event({ type: "restart_ready", request_id: "a".repeat(32), session: "same_session" });
+    await settle();
+    assert.deepEqual(h.child.commands.at(-1), { type: "restart_ack", request_id: "a".repeat(32) });
+    const before = children.length;
+    h.child.emit("exit", 42);
+    await settle();
+    assert.equal(children.length, before + 1);
+    const next = children.at(-1)!;
+    next.event({ type: "history", session_id: "same_session", messages: [] });
+    await settle();
+    assert.match(h.frame(), /session has been restored/);
+    h.child.emit("exit", 42);
+    await settle();
+    assert.equal(children.length, before + 1);
+  } finally { h.app.unmount(); }
+});
+
+test("wakeup status and cancellation work while busy without clearing the reply", async () => {
+  const h = await setup();
+  try {
+    await h.submit("first");
+    h.child.event({ type: "chunk", content: "KEEP THIS REPLY" });
+    await settle();
+    for (const cmd of ["/wakeup", "/wakeup cancel"]) {
+      await h.submit(cmd);
+      assert.deepEqual(h.child.commands.at(-1), { type: "command", cmd });
+      h.child.event({ type: "wakeup_status", plan: { state: "cancelled" }, message: "Wakeup stopped" });
+      await settle();
+      assert.match(h.frame(), /KEEP THIS REPLY/);
+    }
+  } finally { h.app.unmount(); }
+});
+
+test("a missing display update cancels controlled restart without acknowledging it", async () => {
+  const h = await setup();
+  try {
+    h.child.stdout.write("{broken frame\n");
+    h.child.event({ type: "restart_ready", request_id: "a".repeat(32), session: "same_session" });
+    await settle();
+    assert.equal(h.child.commands.filter(c => c.type === "restart_ack").length, 0);
+    assert.deepEqual(h.child.commands.at(-1), { type: "command", cmd: "/restart cancel" });
+    const before = children.length;
+    h.child.emit("exit", 42);
+    await settle();
+    assert.equal(children.length, before);
+  } finally { h.app.unmount(); }
+});
+
 test("Ctrl+Y toggles yolo through approvals without approving a request or losing the draft", async () => {
   const h = await setup();
   try {

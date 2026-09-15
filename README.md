@@ -36,7 +36,7 @@ You need **Python 3.11+**, **Node.js 18+ with npm**, and **Git**.
 **Windows — CMD or PowerShell**
 
 ```powershell
-git clone https://github.com/1312340613/Astra.git
+git clone https://github.com/ZihangHe13123/Astra.git
 cd Astra
 .\astra.bat setup --install-command
 ```
@@ -44,7 +44,7 @@ cd Astra
 **macOS or Linux**
 
 ```bash
-git clone https://github.com/1312340613/Astra.git
+git clone https://github.com/ZihangHe13123/Astra.git
 cd Astra
 ./astra.sh setup --install-command
 ```
@@ -92,6 +92,8 @@ Enter these **inside Astra**:
 | `/memory` · `/skills` | Inspect memory and the skill library. |
 | `/learn review` | Review the next batch of automatic skills; repeat to continue. |
 | `/tasks` · `/resume <task-id>` | Inspect task history or resume an eligible task. |
+| `/restart` · `/restart cancel` | Restart this backend after the current work finishes, or cancel the wait. |
+| `/wakeup` · `/wakeup cancel` | Inspect or stop a [session wakeup](docs/session-lifecycle.md). |
 | `/appshot enable` | Enable window capture after installing the native helper. |
 
 `Ctrl+L` opens activity details, `Ctrl+O` opens the latest tool result, and

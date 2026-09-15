@@ -95,6 +95,7 @@ def launch(install: Installation, *, cli: bool = False, textual: bool = False, a
         dependencies.python_health(install)
     workspace = Path.cwd()
     env = runtime_environment(install, workspace)
+    env["ASTRA_LAUNCHER_PID"] = str(os.getpid())
     if cli or textual or activity is not None:
         command = [str(install.python), "-m", "agent.cli.main"]
         command.extend(["activity", *(activity or [])] if activity is not None else ["--tui"] if textual else [])

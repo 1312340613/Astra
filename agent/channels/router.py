@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import hashlib
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from agent.core.msg import ContentBlock, Msg
@@ -35,10 +36,12 @@ def channel_session_name(message: ChannelMessage) -> str:
 class AgentChannelRouter:
     """Serialize use of a stateful ReActAgent and park one context per chat."""
 
-    def __init__(self, agent, turn_lock: asyncio.Lock, session_root: Path):
+    def __init__(self, agent, turn_lock: asyncio.Lock, session_root: Path,
+                 *, admission: Callable[[], bool] | None = None):
         self.agent = agent
         self.turn_lock = turn_lock
         self.session_root = Path(session_root)
+        self.admission = admission or (lambda: True)
         self._contexts: dict[str, AgentContext] = {}
         self._template = agent.context
 
@@ -72,8 +75,12 @@ class AgentChannelRouter:
         message: ChannelMessage,
         reply_sink: ReplySink | None = None,
     ) -> str:
+        if not self.admission():
+            return "Astra is preparing a restart. Please retry after it reconnects."
         session_name = channel_session_name(message)
         async with self.turn_lock:
+            if not self.admission():
+                return "Astra is preparing a restart. Please retry after it reconnects."
             previous = self.agent.context
             context = self._context(session_name)
             self.agent.context = context

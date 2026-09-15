@@ -8,6 +8,7 @@ import type { GenerationProgress, GenerationStats, InputSubmission, LocalModeDef
 import { generationProgressLabel } from "./generation-progress.js";
 import { createBackendEventReceiver, EventDeliveryState, writeProtocolDiagnostic } from "./backend-protocol.js";
 import { RuntimeTiming } from "./runtime-timing.js";
+import { ControlledBackendRestart } from "./controlled-restart.js";
 import { randomUUID } from "node:crypto";
 import { createTextEventBatcher } from "./text-event-batcher.js";
 import { createBackendHandshake } from "./backend-handshake.js";
@@ -326,7 +327,7 @@ export function submitStreamLifecyclePolicy(
   text: string,
   timelineCommand: ReturnType<typeof resolveTimelineCommand> = resolveTimelineCommand(text, false),
 ): SubmitStreamLifecycle {
-  if (timelineCommand !== null || /^\/(?:cancel|theme|yolo|help)(?:\s|$)/i.test(text.trim())) {
+  if (timelineCommand !== null || /^\/(?:cancel|theme|restart|wakeup|yolo|help)(?:\s|$)/i.test(text.trim())) {
     return "preserve";
   }
   return "clear";
@@ -1370,6 +1371,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
   useLayoutEffect(() => { runtimeTimingRef.current?.commit(); });
 
   const handleEventRef = useRef(handleEvent);
+  const restartPendingRef = useRef(false);
   handleEventRef.current = handleEvent;
   const addMessageRef = useRef(addMessage);
   addMessageRef.current = addMessage;
@@ -1380,6 +1382,8 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
     let disposed = false;
     let discardPendingText = () => {};
     let closeHandshake = () => {};
+    const restart = new ControlledBackendRestart();
+    let restartSession: string | undefined;
 
     const startBackend = () => {
       if (procRef.current || disposed) return;
@@ -1389,7 +1393,9 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       const proc = spawn(python, ["-m", "agent.cli.backend"], {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: backendCwd,
-        env: { ...process.env, PYTHONUNBUFFERED: "1", ASTRA_EVENT_SCOPE: eventScopeRef.current },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", ASTRA_EVENT_SCOPE: eventScopeRef.current,
+          ASTRA_TUI_PID: String(process.pid), ASTRA_TUI_RESTART: "1",
+          ...(restartSession ? { AGENT_SESSION: restartSession } : {}) },
       });
       // increase pipe buffer on Windows (default 64KB on Linux, ~4KB on Windows)
       proc.stdout?.setEncoding("utf-8");
@@ -1426,11 +1432,13 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
         },
       );
       closeHandshake = handshake;
+      let deliveryFailed = false;
       // Lifecycle events remain synchronous. Only volatile text is batched,
       // before Markdown parsing, so terminal state cannot wait behind a timer.
       const textBatcher = createTextEventBatcher(
         (event) => runtimeTiming.handle(event, () => handleEventRef.current(event)),
         (event) => {
+          deliveryFailed = true;
           void writeProtocolDiagnostic(backendCwd, {
             phase: "handle", event_type: event.type, error_type: "Error",
           }).catch(() => {});
@@ -1439,8 +1447,29 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       discardPendingText = textBatcher.discard;
       discardPendingTextRef.current = textBatcher.discard;
       const receiveEvent = createBackendEventReceiver(
-        (event) => { handshake(); textBatcher.accept(event); },
+        (event) => {
+          handshake();
+          textBatcher.accept(event);
+          if (event.type === "wakeup_status") {
+            if (event.message) addMessageRef.current("system", event.message);
+          } else if (event.type === "restart_status") {
+            restartPendingRef.current = ["draining", "awaiting_ack", "exiting"].includes(event.state);
+            if (event.state === "cancelled") restart.cancel();
+            addMessageRef.current("system", event.message);
+          } else if (event.type === "restart_ready" && restart.acceptReady(event)) {
+            if (deliveryFailed || eventDeliveryRef.current.hasPendingDelivery) {
+              restart.cancel();
+              proc.stdin?.write(JSON.stringify({ type: "command", cmd: "/restart cancel" }) + "\n");
+              addMessageRef.current("system", "Restart cancelled because a response update could not be fully displayed. Check the protocol diagnostic before reconnecting.");
+            } else {
+              proc.stdin?.write(JSON.stringify({ type: "restart_ack", request_id: event.request_id }) + "\n");
+            }
+          } else if (event.type === "history" && restart.restored(event.session_id ?? "")) {
+            addMessageRef.current("system", "Astra backend restarted. The session has been restored.");
+          }
+        },
         (diagnostic) => {
+          deliveryFailed = true;
           void writeProtocolDiagnostic(backendCwd, diagnostic).catch(() => {});
           if (protocolNoticeShown) return;
           protocolNoticeShown = true;
@@ -1468,7 +1497,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       });
 
       let terminated = false;
-      const terminate = (message: string) => {
+      const terminate = (message: string, code: number | null = null) => {
         if (terminated) return;
         terminated = true;
         handshake();
@@ -1488,9 +1517,16 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
         setBackendStatus("disconnected");
         setYolo(false);
         setStartupVisible(false);
+        restartPendingRef.current = false;
+        const session = restart.onExit(code);
+        if (session) {
+          restartSession = session;
+          startBackend();
+          return;
+        }
         addMessageRef.current("error", `${message} Use /reconnect to restart it.`);
       };
-      proc.on("exit", (code) => terminate(`Backend exited (code ${code ?? "unknown"}).`));
+      proc.on("exit", (code) => terminate(`Backend exited (code ${code ?? "unknown"}).`, code));
       proc.on("error", (error) => terminate(`Backend failed: ${error.message}.`));
       proc.stdin?.on("error", (error) => {
         terminate(`Backend input failed: ${error.message}.`);
@@ -1633,6 +1669,11 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
 
   const submit = useCallback((submission: InputSubmission) => {
     const text = submission.text;
+    if (restartPendingRef.current && !/^\/(?:restart(?: cancel)?|wakeup(?: cancel)?|cancel|yolo(?:\s.*)?|exit|quit)$/.test(text.trim())) {
+      if (submission.submissionId) appshotInputRef.current?.rejectSubmission(submission.submissionId);
+      addMessage("system", "Restart is pending. Use /restart cancel before starting more work.");
+      return;
+    }
     if (submission.appshots.length && /^\/appshot(?:\s|$)/i.test(text.trimStart())) {
       // A pasted-text expansion can reveal a command only after InputBar's local dispatch.
       appshotInputRef.current?.rejectSubmission(submission.submissionId!);
@@ -1719,7 +1760,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       return;
     }
     const timelineCommand = resolveTimelineCommand(text, timelineVisibleRef.current);
-    const controlWhileBusy = /^\/(?:cancel|theme|timeline|reconnect|yolo|help)(?:\s|$)/i.test(trimmedText);
+    const controlWhileBusy = /^\/(?:cancel|theme|timeline|reconnect|restart|wakeup|yolo|help)(?:\s|$)/i.test(trimmedText);
     const streamLifecycle = submitStreamLifecyclePolicy(text, timelineCommand);
     if (busyRef.current && !controlWhileBusy) {
       // Auto-steering: send as a normal message; the backend routes it
@@ -1832,7 +1873,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
             "SESSION  /tasks  /resume  /cancel  /session  /handoff",
             "CAPTURE  /appshot status · shortcut · enable · disable",
             "DISPLAY  /theme  /timeline",
-            "SYSTEM   /health  /doctor  /diagnostics  /maintenance  /sandbox  /vision-tiles  /mcp  /yolo  /permissions  /reload  /reconnect  /help",
+            "SYSTEM   /health  /doctor  /diagnostics  /maintenance  /sandbox  /vision-tiles  /mcp  /yolo  /permissions  /reload  /reconnect  /restart  /wakeup  /help",
           ].join("\n"));
         } else if (text === "/reconnect") {
           if (procRef.current) {

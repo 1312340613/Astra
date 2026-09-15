@@ -10,6 +10,7 @@
 | --- | --- |
 | 安装、更新、保留本地改动或恢复中断 | [安装、启动与更新](launcher-update.md) |
 | 选择模型、调整推理、使用终端命令 | [日常使用](usage.md) |
+| 受控重启、会话内稍后继续或定期检查 | [会话生命周期](session-lifecycle.md) |
 | 配置沙箱、主机文件访问和工具权限 | [工具执行](execution.md) |
 | 选择 Lyra 或定制本地人格、了解酒吧模式 | [Lyra 人格](persona.md) |
 | 添加搜索、MCP、QQ 消息、ComfyUI 或 163 邮箱 | [可选集成](integrations.md) |
