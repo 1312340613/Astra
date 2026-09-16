@@ -14,6 +14,8 @@ async def execute_browser_command(args, registry) -> tuple[str, str]:
     try:
         result = await asyncio.wait_for(tool.fn(), timeout=5)
     except TimeoutError:
+        if action == "status":
+            return "", "Browser status check timed out; this does not prove that control is released or unavailable."
         return "", "Browser release is still pending; new browser work waits for cleanup. Use /browser status to inspect."
     except Exception as exc:
         return "", f"Browser {action} failed: {exc}. Use /browser stop to retry cleanup."
