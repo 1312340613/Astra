@@ -4,12 +4,14 @@ import { eventTraceIds } from "./runtime-timing.js";
 type TextEvent = Extract<PyEvent, { type: "chunk" | "reasoning" }>;
 type Schedule = (callback: () => void) => () => void;
 
+export const textPreviewInterval = (terminal = process.env.TERM_PROGRAM) => terminal === "Apple_Terminal" ? 80 : 32;
+
 /** Merge token bursts before parsing Markdown; controls are synchronous barriers. */
 export function createTextEventBatcher(
   handle: (event: PyEvent) => void,
   failed: (event: TextEvent, error: unknown) => void,
   schedule: Schedule = (callback) => {
-    const timer = setTimeout(callback, 32);
+    const timer = setTimeout(callback, textPreviewInterval());
     return () => clearTimeout(timer);
   },
 ) {

@@ -1,10 +1,40 @@
 import asyncio
 import threading
+import time
 
 import pytest
 
 from agent.runtime.event_stream import RuntimeEventStream
 from agent.runtime.event_writer import OrderedEventWriter, EventQueueFull
+
+
+def test_blocked_output_close_is_bounded_and_wakes_producers():
+    async def scenario():
+        started, release = threading.Event(), threading.Event()
+
+        def blocked(_event):
+            started.set()
+            release.wait(2)
+
+        writer = OrderedEventWriter(None, blocked, max_items=1)
+        writer.send({"type": "done"})
+        assert await asyncio.to_thread(started.wait, 1)
+        writer.send({"type": "done"})
+        waiting = asyncio.create_task(writer.send_async({"type": "done"}))
+        await asyncio.sleep(0)
+        began = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="did not drain"):
+                await writer.close(timeout=0.02)
+            assert time.monotonic() - began < 0.5
+            with pytest.raises((TimeoutError, RuntimeError)):
+                await waiting
+        finally:
+            release.set()
+            await asyncio.to_thread(writer._thread.join, 1)
+        assert not writer.alive
+
+    asyncio.run(scenario())
 
 
 def test_slow_event_persistence_does_not_block_loop_and_replay_stays_ordered(tmp_path):
@@ -129,4 +159,3 @@ def test_failed_persistence_does_not_invent_cursor_or_block_later_live_events(tm
         assert [event["type"] for event in stream.replay(0)] == ["done"]
 
     asyncio.run(scenario())
-

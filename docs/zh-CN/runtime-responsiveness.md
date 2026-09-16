@@ -2,7 +2,7 @@
 
 [首页](../../README.zh-CN.md) · [文档导航](README.md) · [English](../runtime-responsiveness.md)
 
-[分析文件](#profile-files) · [如何读结果](#reading-the-results) · [运行时如何处理慢存储](#runtime-behavior) · [可复现的测量](#repeatable-measurements)
+[分析文件](#profile-files) · [如何读结果](#reading-the-results) · [运行时如何处理慢存储](#runtime-behavior) · [终端输出失效时](#terminal-output-failures) · [可复现的测量](#repeatable-measurements)
 
 Astra 可选记录阶段耗时，帮助区分模型等待、工具执行、存储和界面更新。设置 `ASTRA_PROFILE_QUERY=1` 后重启 Astra，复现问题，再正常退出，让已接收的记录写完。
 
@@ -44,6 +44,18 @@ python scripts/benchmark_runtime_responsiveness.py --samples 50 --lock-ms 0
 任务和审批写入、会话保存、Session Recall 持久化都在事件循环之外运行。有界、有序的事件写入器保持交付顺序并施加背压。工具仍须在派发前取得持久化执行声明。取消时会排空已接收的写入，并保留未知结果，避免因记录不完整而自动重放动作。
 
 这样可以让慢存储不阻塞其他控制操作，但不会让被锁住的数据库更快写完，也不会减少模型的推理预算。正常退出会等待已接收写入及 worker 清理完成。
+
+<a id="terminal-output-failures"></a>
+
+## 终端输出失效时
+
+动态预览按菜单、输入框和面板实际占用的空间收缩，长输入只改变显示视口，提交原文和已保存历史保持完整。Apple Terminal 的连续文本预览按 80 ms 合并，控制事件仍按原顺序立即处理。
+
+终端写入交给 Astra 自己启动的小进程，避免坏掉的终端阻塞 TUI 的输入和退出。积压上限为 4 MiB；有数据待写且连续五秒没有写入进展时，停止绘制并请求后端取消任务、保存会话。正常等待模型或用户不会触发此超时。
+
+后端有十秒完成退出，之后才尝试终止；事件写线程最多等待两秒排空。任务记录为中断，重新打开会话不会自动重放工具。若被迫终止，正在执行的外部操作及其最新结果仍可能不完整，需要按恢复后的中断记录核对。
+
+`.logs/tui-terminal.jsonl` 仅记录字节数、最高积压、写入耗时、清屏请求、故障码和退出是否被迫终止，不记录对话内容或终端原始输出。更新后重启 Astra 生效。这些措施降低渲染压力并隔离输出故障，尚不能认定解决了 Terminal.app 或输入法本身的崩溃。
 
 <a id="repeatable-measurements"></a>
 

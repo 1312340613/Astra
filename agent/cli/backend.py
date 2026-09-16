@@ -723,6 +723,7 @@ async def _main(startup_started: float):
     wakeup_context: contextvars.ContextVar[dict | None] = contextvars.ContextVar("session_wakeup", default=None)
     latest_user_request = ""
     exit_code = 0
+    terminal_output_failed = False
     from agent.runtime.native_startup import prepare_native_dependencies
 
     prepare_native_dependencies()
@@ -1649,7 +1650,10 @@ async def _main(startup_started: float):
             if task_id and task_store is not None:
                 if was_cancelled:
                     await durable_io(task_store.request_cancel, task_id)
-                    await durable_io(task_store.finish_run, task_id, "cancelled", failed_message or "Cancelled by user")
+                    await durable_io(task_store.finish_run, task_id,
+                                     "interrupted" if terminal_output_failed else "cancelled",
+                                     "Terminal output unavailable; session saved without replaying tools"
+                                     if terminal_output_failed else failed_message or "Cancelled by user")
                 elif time_budget_exhausted:
                     await durable_io(task_store.finish_run, task_id, "interrupted", failed_message or "Turn budget exhausted; continue or /resume to resume")
                 elif failed_message:
@@ -2189,6 +2193,7 @@ async def _main(startup_started: float):
                 continue
 
             if cmd.get("type") == "exit":
+                terminal_output_failed = cmd.get("reason") == "terminal_output_failure"
                 break
 
             elif cmd.get("type") == "restart_ack":
@@ -3607,7 +3612,7 @@ async def _main(startup_started: float):
         if pending_resolutions:
             await asyncio.gather(*pending_resolutions, return_exceptions=True)
         await delegate_mailbox.cancel_all()
-        agent.end_session("shutdown")
+        agent.end_session("terminal_output_failure" if terminal_output_failed else "shutdown")
         try:
             if computer_runtime is not None:
                 await computer_runtime.shutdown()
@@ -3633,8 +3638,22 @@ async def _main(startup_started: float):
 
 
 def _write_event(event: dict) -> None:
-    sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    payload = json.dumps(event, ensure_ascii=False) + "\n"
+    try:
+        fd = sys.stdout.fileno()
+    except (AttributeError, OSError):
+        # Embedded/test streams may not have a descriptor.
+        sys.stdout.write(payload)
+        sys.stdout.flush()
+        return
+    # No TextIOWrapper lock is held by the daemon writer when a vanished TUI
+    # leaves a blocked pipe behind. Shutdown can time out its join safely.
+    data = payload.encode("utf-8")
+    while data:
+        written = os.write(fd, data)
+        if written <= 0:
+            raise BrokenPipeError("Backend event pipe made no progress")
+        data = data[written:]
 
 
 async def _start_channel_manager(channel_manager: ChannelManager) -> OSError | None:

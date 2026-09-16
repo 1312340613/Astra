@@ -148,7 +148,12 @@ class OrderedEventWriter:
 
     def _wake_producers(self) -> None:
         if not self._space.is_set():
-            self._loop.call_soon_threadsafe(self._space.set)
+            try:
+                self._loop.call_soon_threadsafe(self._space.set)
+            except RuntimeError:
+                # A timed-out daemon writer may finish after its owner exits.
+                if not self._loop.is_closed():
+                    raise
 
     def _run(self) -> None:
         try:
@@ -169,11 +174,19 @@ class OrderedEventWriter:
                 self._bytes = 0
                 self._wake_producers()
 
-    async def close(self) -> None:
+    async def close(self, *, timeout: float = 2.0) -> None:
         with self._condition:
             self._closing = True
             self._condition.notify()
             self._wake_producers()
-        await durable_io(self._thread.join)
+        # Bound the join itself. Cancelling an unbounded to_thread(join) would
+        # still leave asyncio.run waiting for that executor thread at exit.
+        await durable_io(self._thread.join, max(0.0, timeout))
+        if self.alive:
+            with self._condition:
+                self._error = TimeoutError("Backend event output did not drain before shutdown")
+                self._queue.clear()
+                self._bytes = 0
+                self._wake_producers()
         if self._error is not None:
             raise self._error

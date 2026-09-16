@@ -8,14 +8,18 @@ import React from "react";
 import { render } from "ink";
 import stripAnsi from "strip-ansi";
 import { StreamingMarkdownCoordinator } from "./streaming-markdown.js";
+import { TuiLifecycle } from "./tui-lifecycle.js";
 
 class FakeChild extends EventEmitter {
+  exitCode: number | null = null;
+  signalCode: string | null = null;
+  kills = 0;
   stdin = new PassThrough();
   stdout = new PassThrough();
   stderr = new PassThrough();
   commands: any[] = [];
   constructor() { super(); this.stdin.on("data", (data) => this.commands.push(JSON.parse(String(data)))); }
-  kill() { return true; }
+  kill() { this.kills++; return true; }
   event(event: object) { this.stdout.write(JSON.stringify(event) + "\n"); }
 }
 const children: FakeChild[] = [];
@@ -34,14 +38,47 @@ class Output extends Writable {
   _write(data: Buffer, _: BufferEncoding, done: () => void) { this.chunks.push(String(data)); done(); }
 }
 const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
-async function setup(columns = 90, rows = 30, appshotClientFactory?: (consumer:any) => any, appshotManifestReader?: (path:string)=>string) {
+async function setup(columns = 90, rows = 30, appshotClientFactory?: (consumer:any) => any, appshotManifestReader?: (path:string)=>string, lifecycle?: TuiLifecycle) {
   const stdin = new Input(); const stdout = new Output();
   stdout.columns = columns; stdout.rows = rows;
-  const app = render(<App appshotClientFactory={appshotClientFactory} appshotManifestReader={appshotManifestReader} />, { stdin: stdin as any, stdout: stdout as any, stderr: stdout as any, debug: true, patchConsole: false, exitOnCtrlC: false });
+  const app = render(<App appshotClientFactory={appshotClientFactory} appshotManifestReader={appshotManifestReader} lifecycle={lifecycle} />, { stdin: stdin as any, stdout: stdout as any, stderr: stdout as any, debug: true, patchConsole: false, exitOnCtrlC: false });
   await settle();
   return { app, stdin, stdout, child: children.at(-1)!, frame: () => stdout.chunks.map(stripAnsi).filter((chunk) => chunk.trim()).at(-1) ?? "", async key(value: string) { stdin.write(value); await settle(); }, async submit(value: string) { stdin.write(value); await settle(); stdin.write("\r"); await settle(); } };
 }
 async function tool(h: Awaited<ReturnType<typeof setup>>) { h.child.event({ type: "tool_result", name: "read_file", output: "detail line\n".repeat(20), error: "" }); await settle(); await h.key("\x0f"); assert.match(h.frame(), /Tool #1/); }
+
+test("terminal shutdown drains late events without restart acknowledgements, UI updates or premature kill", async () => {
+  let finished = false;
+  const lifecycle = new TuiLifecycle(async () => { finished = true; });
+  const h = await setup(90, 30, undefined, undefined, lifecycle);
+  try {
+    await h.submit("first");
+    h.child.event({ type: "restart_status", state: "draining", request_id: "a".repeat(32), message: "Waiting" });
+    await settle();
+    const before = children.length;
+    const shutdown = lifecycle.requestExit("terminal_output_failure");
+    const commands = h.child.commands.slice();
+    h.child.event({ type: "reasoning", content: "LATE OUTPUT ".repeat(8192) });
+    h.child.event({ type: "restart_ready", request_id: "a".repeat(32), session: "same_session" });
+    h.child.event({ type: "wakeup_status", plan: { state: "cancelled" }, message: "LATE WAKEUP" });
+    h.child.stderr.write("LATE ERROR\n");
+    await settle();
+    assert.deepEqual(h.child.commands, commands);
+    assert.doesNotMatch(h.stdout.chunks.join(""), /LATE OUTPUT|LATE WAKEUP|LATE ERROR/);
+    assert.equal(h.child.stdout.readableLength, 0, "backend output stays drained during persistence");
+    h.child.stdin.emit("error", new Error("EPIPE"));
+    assert.equal(h.child.kills, 0, "a closed command pipe must not interrupt saving");
+    h.child.exitCode = 0;
+    h.child.emit("exit", 0);
+    await shutdown;
+    assert.equal(finished, true);
+    assert.equal(children.length, before);
+  } finally {
+    h.child.exitCode = 0; h.child.emit("exit", 0);
+    h.app.unmount();
+    await lifecycle.requestExit("ui_exit");
+  }
+});
 
 test("hidden composer never submits detail navigation input", async () => {
   const h = await setup(); try {

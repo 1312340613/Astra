@@ -11,6 +11,8 @@ import { RuntimeTiming } from "./runtime-timing.js";
 import { ControlledBackendRestart } from "./controlled-restart.js";
 import { randomUUID } from "node:crypto";
 import { createTextEventBatcher } from "./text-event-batcher.js";
+import { useTerminalSize } from "./terminal-size.js";
+import type { TuiLifecycle } from "./tui-lifecycle.js";
 import { createBackendHandshake } from "./backend-handshake.js";
 import { AppshotClient } from "./appshot-client.js";
 import { productionWindowsAppshotDependencies } from "./appshot-windows.js";
@@ -555,7 +557,7 @@ export function formatVisionPreprocessMessage(event: VisionPreprocessEvent): str
   return event.message ? `[vision] ${event.message}` : null;
 }
 
-export default function App({ appshotClientFactory, appshotManifestReader }: { appshotClientFactory?: (consumer:AppshotConsumer) => AppshotClient; appshotManifestReader?:AppshotManifestReader } = {}) {
+export default function App({ appshotClientFactory, appshotManifestReader, lifecycle }: { appshotClientFactory?: (consumer:AppshotConsumer) => AppshotClient; appshotManifestReader?:AppshotManifestReader; lifecycle?: TuiLifecycle } = {}) {
   const appshotInputRef = useRef<AppshotInputHandle>(null);
   const appshotStatusTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const appshotClientRef = useRef<AppshotClient>();
@@ -654,14 +656,13 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
   const [startupVisible, setStartupVisible] = useState(startupAnimationEnabled);
 
   const { stdout } = useStdout();
-  const terminalColumns = stdout.columns || process.stderr.columns || process.stdout.columns || 100;
+  const { columns: terminalColumns, rows } = useTerminalSize(stdout);
   // Keep every rendered line at least one cell away from the right edge.
   // Windows consoles scroll the buffer as soon as the bottom-right cell is
   // written; with scrollback-first output the live full-width border rows can
   // then land on that cell and desynchronize Ink's incremental erase pass,
   // leaking stale border lines into the scrollback.
   const columns = Math.max(20, terminalColumns - 1);
-  const rows = stdout.rows || process.stderr.rows || process.stdout.rows || 30;
   const toolDetailPageSize = Math.max(5, Math.min(40, rows - 5));
   const approvalPageSize = Math.max(4, Math.min(12, rows - 12));
   const layoutMode = responsiveMode(columns);
@@ -685,6 +686,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
   });
 
   const compactQuestion = questionRequest !== null && approvalRequests.length === 0 && rows < 20;
+  const interactionActive = approvalRequests.length > 0 || questionRequest !== null || connectionOpen;
   const pendingApproval = approvalRequests[0];
   const queuedApprovalCallIds = approvalRequests.map((request) => request.call_id);
   const pendingApprovalSummary: PendingApprovalSummary | undefined = pendingApproval
@@ -763,7 +765,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
     if (!approvalTransition) {
       setToolClock(Date.now());
     }
-    const timer = setInterval(() => setToolClock(Date.now()), 200);
+    const timer = setInterval(() => { if (!lifecycle?.closing) setToolClock(Date.now()); }, 200);
     return () => clearInterval(timer);
   }, [activeProcesses.length, activeTools.length, approvalRequests.length]);
 
@@ -1387,7 +1389,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
     let restartSession: string | undefined;
 
     const startBackend = () => {
-      if (procRef.current || disposed) return;
+      if (procRef.current || disposed || lifecycle?.closing) return;
       setBackendStatus("connecting");
       const python = process.env.AGENT_PYTHON || "python";
       const backendCwd = process.env.AGENT_PROJECT_ROOT || process.cwd();
@@ -1402,9 +1404,10 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       proc.stdout?.setEncoding("utf-8");
       proc.stderr?.setEncoding("utf-8");
       procRef.current = proc;
+      lifecycle?.attachBackend(proc);
       const runtimeTiming = new RuntimeTiming(samples => {
         const stdin = proc.stdin;
-        if (!stdin || stdin.destroyed || stdin.writableEnded || stdin.writableLength > 65536) {
+        if (lifecycle?.closing || !stdin || stdin.destroyed || stdin.writableEnded || stdin.writableLength > 65536) {
           throw new Error("Timing receipt backpressure");
         }
         stdin.write(JSON.stringify({ type: "performance_ack", samples }) + "\n");
@@ -1425,9 +1428,11 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       let protocolNoticeShown = false;
       const handshake = createBackendHandshake(
         () => {
+          if (lifecycle?.closing) return;
           try { addMessageRef.current("system", "Waiting for the backend to connect…"); } catch { /* Diagnostic only. */ }
         },
         () => {
+          if (lifecycle?.closing) return;
           try { terminate("Backend sent no valid response within 15 seconds."); }
           finally { proc.kill(); }
         },
@@ -1437,7 +1442,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       // Lifecycle events remain synchronous. Only volatile text is batched,
       // before Markdown parsing, so terminal state cannot wait behind a timer.
       const textBatcher = createTextEventBatcher(
-        (event) => runtimeTiming.handle(event, () => handleEventRef.current(event)),
+        (event) => { if (!lifecycle?.closing) runtimeTiming.handle(event, () => handleEventRef.current(event)); },
         (event) => {
           deliveryFailed = true;
           void writeProtocolDiagnostic(backendCwd, {
@@ -1450,6 +1455,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       const receiveEvent = createBackendEventReceiver(
         (event) => {
           handshake();
+          if (lifecycle?.closing) { textBatcher.discard(); return; }
           textBatcher.accept(event);
           if (event.type === "wakeup_status") {
             if (event.message) addMessageRef.current("system", event.message);
@@ -1470,6 +1476,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
           }
         },
         (diagnostic) => {
+          if (lifecycle?.closing) return;
           deliveryFailed = true;
           void writeProtocolDiagnostic(backendCwd, diagnostic).catch(() => {});
           if (protocolNoticeShown) return;
@@ -1482,8 +1489,9 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
         },
         {
           delivery: eventDeliveryRef.current,
-          onAccepted: (event, parseMs) => runtimeTiming.received(event, parseMs),
+          onAccepted: (event, parseMs) => { if (!lifecycle?.closing) runtimeTiming.received(event, parseMs); },
           onGap: (afterCursor) => {
+            if (lifecycle?.closing) return;
             proc.stdin?.write(JSON.stringify({ type: "event_replay", after_cursor: afterCursor, limit: 500 }) + "\n");
           },
         },
@@ -1492,6 +1500,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
 
       const errRl = createInterface({ input: proc.stderr! });
       errRl.on("line", (line: string) => {
+        if (lifecycle?.closing) return;
         // Model download bars must not add history and dismiss the welcome screen.
         if (!line.trim() || isBenignMacOSAllocatorDiagnostic(line) || isBackendModelProgress(line)) return;
         addMessageRef.current("error", `[backend] ${line}`);
@@ -1509,7 +1518,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
         runtimeTiming.clear();
         runtimeTimingRef.current = null;
         procRef.current = null;
-        if (disposed) return;
+        if (disposed || lifecycle?.closing) return;
         receiveEvent('{"type":"done"}');
         clearStreamingDisplayRef.current();
         const pendingAppshot=appshotInputRef.current?.snapshot().pending;
@@ -1530,6 +1539,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       proc.on("exit", (code) => terminate(`Backend exited (code ${code ?? "unknown"}).`, code));
       proc.on("error", (error) => terminate(`Backend failed: ${error.message}.`));
       proc.stdin?.on("error", (error) => {
+        if (lifecycle?.closing) return;
         terminate(`Backend input failed: ${error.message}.`);
         proc.kill();
       });
@@ -1545,13 +1555,15 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       runtimeTimingRef.current?.clear();
       runtimeTimingRef.current = null;
       clearTimeout(appshotStatusTimerRef.current);
-      procRef.current?.kill();
+      if (lifecycle) void lifecycle.requestExit("ui_exit");
+      else procRef.current?.kill();
       procRef.current = null;
       clearStreamingDisplayRef.current();
     };
   }, []);
 
   const send = useCallback((cmd: TuiCommand) => {
+    if (lifecycle?.closing) return false;
     const proc = procRef.current;
     const stdin = proc?.stdin;
     if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) {
@@ -1936,6 +1948,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
     : 0;
 
   useInput((input, key) => {
+    if (lifecycle?.closing) return;
     appshotClientRef.current?.recordInput();
     if (connectionOpenRef.current) return;
     if (key.ctrl && input === "y") {
@@ -1950,9 +1963,12 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
         send({ type: "command", cmd: "/cancel" });
         return;
       }
-      procRef.current?.kill();
-      if (detailOpenRef.current) stdout.write(LEAVE_ALTERNATE_SCREEN);
-      process.exit(0);
+      if (lifecycle) void lifecycle.requestExit("user_exit");
+      else {
+        procRef.current?.kill();
+        if (detailOpenRef.current) stdout.write(LEAVE_ALTERNATE_SCREEN);
+        process.exit(0);
+      }
     }
     if (approvalRequests.length > 0) {
       const transition = transitionApprovalInput(
@@ -2033,7 +2049,9 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
       <HistoryOutput generation={`${themeName}:${historyGeneration}`} lines={historyLines} runtimeMode={runtimeMode} />
 
       <StreamingControlLayout
-        dynamic={compactQuestion ? null : visibleDynamicDisplayLines(displayState, Math.max(4, rows - 16)).map((line) => (
+        rows={rows}
+        interactionActive={interactionActive}
+        dynamic={compactQuestion ? null : visibleDynamicDisplayLines(displayState, Math.max(1, rows - 2)).map((line) => (
           <MessageLine key={line.key} line={line} runtimeMode={runtimeMode} />
         ))}
         header={compactQuestion ? null : runtimeMode === "bar"
@@ -2111,15 +2129,15 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
           contextPct={info.ctxPct}
         />}
         auxiliary={<>
-          {connectionOpen && <ConnectionPanel routes={connectionRoutes} pending={connectionPending} error={connectionError}
+          {connectionOpen && <Box flexDirection="column" display={approvalRequests.length || questionRequest ? "none" : "flex"}><ConnectionPanel routes={connectionRoutes} pending={connectionPending} error={connectionError}
             onCancel={() => { setConnectionOpen(false); connectionOpenRef.current = false; }}
             onSave={(request) => {
               connectionRequestRef.current = request.request_id;
               setConnectionError("");
               if (send(request)) setConnectionPending(true);
               else setConnectionError("Backend disconnected. Reconnect before saving.");
-            }} />}
-          {!compactQuestion && runtimeMode === "bar" && <BarShelf drink={barDrink} columns={columns} />}
+            }} /></Box>}
+          {!interactionActive && runtimeMode === "bar" && <BarShelf drink={barDrink} columns={columns} />}
 
           {approvalRequests[0] && (
             <ToolApprovalPanel
@@ -2130,19 +2148,20 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
               expanded={approvalDetailOpen}
               offset={approvalDetailOffset}
               pageSize={approvalPageSize}
+              maxHeight={rows < 20 ? Math.max(6, rows - 2) : undefined}
             />
           )}
 
           {questionRequest && (
-            <QuestionCard
+            <Box flexDirection="column" display={approvalRequests.length ? "none" : "flex"}><QuestionCard
               request={questionRequest}
               active={!openToolResult && approvalRequests.length === 0}
               width={columns}
-              maxHeight={Math.max(8, rows - (compactQuestion ? 1 : 7))}
+              maxHeight={Math.max(6, rows - 2)}
               onAnswer={submitQuestionAnswer}
               onCancel={cancelQuestion}
               submissionRejection={questionProtocol.rejection}
-            />
+            /></Box>
           )}
         </>}
         input={<Box flexDirection="column" display={compactQuestion ? "none" : "flex"}><InputBarMemo

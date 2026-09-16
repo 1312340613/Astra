@@ -3,6 +3,8 @@ import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } f
 import { Text, Box, useInput } from "ink";
 import stringWidth from "string-width";
 import { graphemeBoundary } from "../grapheme-editing.js";
+import { inputViewport } from "../input-viewport.js";
+import { useLiveRows } from "./streaming-control-layout.js";
 import { useTheme } from "../theme-context.js";
 import { randomUUID } from "node:crypto";
 import { emptyDraft, appendAppshot, reconcileAppshotInput, mapAppshotOrdinaryText, projectAppshotText, appshotSubmission, freezeAppshotSubmission, settleAppshotSubmission, revokeAppshots, appshotCount, validateAppshotOffer, type AppshotInputState, type AppshotInputOffer, type AppshotManifestReader } from "../appshot-input.js";
@@ -143,6 +145,7 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
   runtimeMode = "work",
   columns = process.stdout.columns || 100,
 }: Props, ref) {
+  const liveRows = useLiveRows();
   const theme = useTheme();
   const chrome = theme.chrome;
   const isBar = runtimeMode === "bar";
@@ -342,7 +345,7 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
   const visibleSuggestions = visibleGroupedSuggestionWindow(
     commandSuggestions,
     normalizedSelectedCommandIndex,
-    menuRows,
+    Math.max(1, Math.min(menuRows, liveRows - 10)),
   );
   const commandWidth = suggestionCommandWidth(visibleSuggestions, columns, mode);
 
@@ -569,6 +572,10 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
     insertText(rawInput);
   });
 
+  const prompt = isBar ? "say" : isMinimal || isLocal ? "you" : chrome?.promptLabel ?? "you";
+  const viewport = inputViewport(input, cursorOffset, Math.max(1,
+    columns - 4 - stringWidth(prompt) - 1 - (yolo && !isBar && !isLocal ? 5 : 0)));
+
   return (
     <Box flexDirection="column">
       {renderMenu && (
@@ -580,7 +587,7 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
             return (
               <React.Fragment key={`${item.group ?? "command"}-${item.command}`}>
                 {showGroup && <Text bold color={theme.subtle}>{`  ${item.group}`}</Text>}
-                <Text>
+                <Text wrap="truncate-end">
                   <Text
                     color={selected ? theme.accent : item.current ? theme.success : theme.muted}
                     backgroundColor={selected ? theme.menuSelectedBackground : theme.menuBackground}
@@ -604,40 +611,40 @@ export const InputBar = forwardRef<AppshotInputHandle, Props>(function InputBar(
               </React.Fragment>
             );
           })}
-          <Text dimColor color={theme.subtle}>  ↑↓ select  Enter run  Tab complete  Esc close</Text>
+          <Text dimColor color={theme.subtle} wrap="truncate-end">  ↑↓ select  Enter run  Tab complete  Esc close</Text>
         </Box>
       )}
       <Box borderStyle={chrome?.inputFrameStyle ?? chrome?.frameStyle ?? "single"} borderColor={disabled ? theme.subtle : theme.accentAlt} paddingX={1}>
         {yolo && !isBar && !isLocal && <Text bold color={theme.warning}>YOLO </Text>}
         <Text bold={theme.prefixBold} color={theme.accent}>
-          {isBar ? "say" : isMinimal || isLocal ? "you" : chrome?.promptLabel ?? "you"}{" "}
+          {prompt}{" "}
         </Text>
         {disabled ? (
           <Text color={theme.muted}>waiting for model...</Text>
         ) : (
           <CursorText
-            value={input}
-            cursor={cursorOffset}
+            value={viewport.value}
+            cursor={viewport.cursor}
             placeholder={isBar ? "talk over the rain..." : isMinimal ? "type a request" : isLocal ? localMode?.ui.placeholder ?? "type a message" : chrome?.promptPlaceholder ?? "type a message"}
             muted={theme.muted}
           />
         )}
       </Box>
-      {pendingHint && <Box paddingX={1}><Text color={theme.warning}>{pendingHint}</Text></Box>}
+      {pendingHint && <Box paddingX={1}><Text wrap="truncate-end" color={theme.warning}>{pendingHint}</Text></Box>}
       {submissionHint && (
         <Box paddingX={1}>
-          <Text color={theme.warning}>{submissionHint}</Text>
+          <Text wrap="truncate-end" color={theme.warning}>{submissionHint}</Text>
         </Box>
       )}
       {pastedText.length > 0 && (
         <Box paddingX={1} flexDirection="column">
-          {pastedText.map((attachment) => (
-            <Text key={attachment.label} color={theme.muted}>
+          {pastedText.slice(-1).map((attachment) => (
+            <Text wrap="truncate-end" key={attachment.label} color={theme.muted}>
               <Text color={theme.accentAlt}>PASTE </Text>
               {attachment.label}  {pastedTextPreview(attachment.content)}
             </Text>
           ))}
-          <Text dimColor color={theme.subtle}>  preserved exactly · full text is sent on Enter</Text>
+          <Text dimColor color={theme.subtle} wrap="truncate-end">  {pastedText.length} paste(s) preserved · full text sent on Enter</Text>
         </Box>
       )}
     </Box>

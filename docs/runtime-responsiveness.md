@@ -54,6 +54,32 @@ This keeps slow storage from blocking unrelated controls. It does not make a
 locked database finish its write sooner or reduce a model's reasoning budget.
 Normal shutdown waits for accepted writes and worker cleanup.
 
+## Terminal output failures
+
+The live preview shares a bounded viewport with menus and input. Long drafts use
+a cursor-following view; the submitted text and saved history remain complete.
+Apple Terminal text previews are batched at 80 ms, with control events flushed
+immediately in order.
+
+Terminal writes run in an owned helper process so a blocked TTY cannot stop the
+TUI control loop or hang its final exit. Pending output is limited to 4 MiB; five
+seconds without write progress while bytes are pending marks the output failed.
+Waiting for a model or user with no pending bytes does not trigger that timeout.
+
+On failure, Astra stops rendering, requests backend shutdown and keeps draining
+backend events while the active task is cancelled and the session saved. The
+task records an interruption; reopening the session does not replay tools.
+The backend has ten seconds to exit before termination is attempted. An event
+writer that cannot drain stops waiting after two seconds. Forced shutdown cannot
+guarantee that an in-flight external operation completed or that its latest
+result was saved; check the restored interruption boundary before continuing.
+
+`.logs/tui-terminal.jsonl` records output byte counts, peak backlog, write latency,
+clear-screen requests, fault codes and whether shutdown needed termination. It
+contains no conversation text or raw terminal stream. Restart Astra to load a
+new TUI build. These safeguards do not establish or fix a native Terminal.app
+or input-method crash cause; that still requires separate real-machine checks.
+
 ## Repeatable measurements
 
 The benchmark uses temporary SQLite stores and controlled local workloads; it

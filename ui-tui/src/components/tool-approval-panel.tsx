@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import stringWidth from "string-width";
 import { buildApprovalCompactView, type ApprovalFactItem } from "../approval-preview.js";
 import { clampToolDetailOffset } from "../tool-results.js";
+import { wrapToolResult } from "../tool-results.js";
 import type { ToolApprovalRequest } from "../types.js";
 import { useTheme } from "../theme-context.js";
 
@@ -14,6 +15,7 @@ export interface ToolApprovalPanelProps {
   queueTotal: number;
   offset: number;
   pageSize: number;
+  maxHeight?: number;
 }
 
 function truncateDisplay(value: string, maxWidth: number): string {
@@ -62,6 +64,7 @@ export function ToolApprovalPanel({
   queueTotal,
   offset,
   pageSize,
+  maxHeight,
 }: ToolApprovalPanelProps) {
   const theme = useTheme();
   const panelWidth = Math.max(20, width);
@@ -93,6 +96,9 @@ export function ToolApprovalPanel({
         contentWidth,
       )
     : "";
+  const shortcuts = (expanded ? view.shortcutHint : collapsedShortcutHint(view.shortcutHint)) + "   [Ctrl+Y] YOLO";
+  const shortcutRows = wrapToolResult(shortcuts, contentWidth).length;
+  const bodyHeight = maxHeight === undefined ? undefined : Math.max(1, maxHeight - 3 - shortcutRows - (expanded ? 1 : 0));
   return (
     <Box
       width={panelWidth}
@@ -104,6 +110,7 @@ export function ToolApprovalPanel({
       <Text bold color={theme.warning} wrap="truncate-end">
         {header}{expanded ? ` · 详情 ${safeOffset + 1}-${end}/${view.detailLines.length}` : ""}
       </Text>
+      <Box flexDirection="column" height={bodyHeight} overflowY="hidden">
       {expanded ? visibleDetailLines.map((line, index) => (
         <Text key={`${request.request_id}-${safeOffset + index}`} color={theme.text}>
           {line || " "}
@@ -123,14 +130,12 @@ export function ToolApprovalPanel({
           )}
         </>
       )}
+      </Box>
       {expanded && (
-        <Text dimColor color={theme.muted}>↑/↓ 滚动 · PgUp/PgDn 翻页 · V/Esc 折叠</Text>
+        <Text dimColor color={theme.muted} wrap="truncate-end">↑/↓ 滚动 · PgUp/PgDn 翻页 · V/Esc 折叠</Text>
       )}
       <Text color={theme.accentAlt}>
-        {expanded
-          ? view.shortcutHint
-          : collapsedShortcutHint(view.shortcutHint)}
-        {"   [Ctrl+Y] YOLO"}
+        {shortcuts}
       </Text>
     </Box>
   );
