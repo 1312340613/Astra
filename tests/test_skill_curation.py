@@ -366,7 +366,7 @@ def test_default_batch_leaves_room_for_rewrites_and_resumes_after_restart(learne
     assert record["source"]["review"]["remaining"] == 0
 
 
-def test_off_disables_saving_but_explicit_review_works(learned):
+def test_off_disables_saving_and_direct_dispatch_cannot_bypass_conversational_review(learned):
     save(learned)
     store = LearningStore(learned.root.parent / "learning.db")
     store.set_mode("off")
@@ -377,7 +377,7 @@ def test_off_disables_saving_but_explicit_review_works(learned):
     output, error = asyncio.run(execute_learning_command(store, SimpleNamespace(llm=Model([action("keep", "debug-one")])),
                                                         MemoryStore(learned.root.parent / "memory.db"), learned.skills,
                                                         ["review"], session_id="test", messages=[]))
-    assert not error and "checked 1" in output
+    assert not output and "Review now starts a conversation" in error
 
 
 def test_background_and_candidate_hooks_removed_from_runtime():

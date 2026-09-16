@@ -161,8 +161,14 @@ class SkillCurator:
             state["skills"][target] = {**state["skills"][target], "digest": _digest(files), "sources": sources}
         if seen != set(batch["items"]):
             raise ValueError("Review omitted skills; no changes applied")
-        state["cursor"] = batch["cursor"]
-        state["last_review"] = {"time": _now(), "checked": len(seen), "remaining": batch["remaining"],
+        remaining = batch["remaining"]
+        if state.get("cursor", "") == batch["state"].get("cursor", ""):
+            state["cursor"] = batch["cursor"]
+        else:
+            # A conversation can wait while another session finishes a batch.
+            # Its later apply must not rewind that session's coverage.
+            remaining = len([name for name in automatic_names(state) if name > state.get("cursor", "")])
+        state["last_review"] = {"time": _now(), "checked": len(seen), "remaining": remaining,
                                 "counts": dict(Counter(item["action"] for item in actions)), "skipped": batch["skipped"]}
         return self.learned.commit(kind="review", state=state, after=after,
                                    actions=actions, source={"review": state["last_review"]},
@@ -208,13 +214,14 @@ class SkillCurator:
             return await durable_io(self.apply, batch, parsed)
 
 
-def format_curation(record: dict) -> str:
+def format_curation(record: dict, *, separate_verification: bool = False) -> str:
     review = record["source"].get("review", {})
     lines = [f"Skill review complete: checked {review.get('checked', 0)}, remaining in this pass {review.get('remaining', 0)}."]
     for item in record["actions"]:
         lines.append(f"{item['action']}: {', '.join(item['names'])} — {item['reason']}")
     for item in review.get("skipped", []):
         lines.append(f"Not checked: {item['name']} — {item['reason']}")
-    lines.extend(["Content review only; procedures were not executed.",
+    lines.extend([("This operation saved content only; execution evidence is reported separately in the conversation."
+                   if separate_verification else "Content review only; procedures were not executed."),
                   f"Record: /learn history {record['id']}", f"Undo changes: /learn undo {record['id']}"])
     return "\n".join(lines)

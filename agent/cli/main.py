@@ -82,6 +82,9 @@ from .computer_commands import execute_computer_command
 from .memory_commands import execute_memory_command
 from .skill_commands import execute_skill_command
 from .learning_commands import execute_learning_command
+from .conversation_commands import register_conversation_tools
+from ..runtime.command_workflows import workflow_message, raw_command as normalize_direct_command
+from ..runtime.tools.conclave import register_conclave_tools
 from ..runtime.prompts import get_prompt_profile, prompt_profiles
 from .render import render_text, render_tool_block, StreamRenderer, ReasoningRenderer, render_status_bar
 from .search_preferences import SEARCH_PROVIDERS, resolve_startup_search_provider, save_selected_search_provider
@@ -363,6 +366,13 @@ async def handle_event(
 
 async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
     try:
+        workflow = workflow_message(cmd)
+        if workflow is not None:
+            if getattr(agent, "tool_allowlist", None) is not None:
+                print("  Return to the work session before starting a command workflow.")
+                return None
+            return workflow
+        cmd = normalize_direct_command(cmd)
         parts = shlex.split(cmd.strip())
     except ValueError as e:
         print(f"  \033[33mInvalid command: {e}\033[0m\n")
@@ -599,6 +609,12 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
         ))
         print()
 
+    elif command == "/diagnostics":
+        from .diagnostics import build_runtime_diagnostics
+        print(build_runtime_diagnostics(agent, mcp_manager=getattr(agent, "_mcp_manager", None),
+                                        task_store=agent.task_store, section=arg))
+        print()
+
     elif command == "/sandbox":
         router = getattr(agent, "_sandbox", None)
         if not isinstance(router, SandboxRouter):
@@ -777,13 +793,16 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
     /search [provider]  — Show / switch search provider (auto, exa, searxng)
     /memory             — Inspect or update working/core memory
     /skills             — List, inspect, or create local procedural skills
-    /learn              — Save skills directly; manually review and undo learning
+    /learn              — Save skills; discuss /learn review before applying changes
     /connect <n> <url>  — Probe, save and switch a model connection
     /tools              — List available tools
     /browser [status|stop] — Inspect or release this session’s browser control
     /computer [status|setup|stop] — Inspect, set up, or stop local macOS Computer Use
     /health             — Show harness diagnostics
-    /doctor             — Run endpoint, policy, MCP and tracing diagnostics
+    /doctor             — Discuss diagnosis and repairs; --raw for a direct report
+    /diagnostics        — Explain a runtime snapshot; --raw or json for direct output
+    /memory review      — Discuss memory evidence and proposed corrections
+    /conclave <question> — Research and continue discussing the findings
     /sandbox [on|off]   — Show or switch Docker isolation at runtime
     /vision-tiles [on|off]  Show or switch DeepSeek original-pixel tiling
     /context-index [on|off|session|all|status|why]  Configure proactive local context suggestions
@@ -791,7 +810,7 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
     /permissions        — Inspect or change process-local tool policy
     /tasks [id]         — List per-request TaskRuns or inspect steps/checkpoint
     /today              — Dashboard: blocked, scheduled, and recent tasks
-    /handoff [notes]    — Generate session handoff document (also auto-saved on exit)
+    /handoff [notes]    — Compose and save a handoff; --raw for a direct snapshot
     /resume <id>        — Resume an interrupted/failed/cancelled task
     /cancel <id>        — Mark a saved task cancelled
     /help               — Show this help
@@ -962,6 +981,8 @@ async def _async_init(llm_config: LLMConfig, sandbox_timeout: int, workdir: str)
     agent._mcp_manager = mcp_manager
     agent._learning_store = learning_store
     agent._learning_reviewer = learning_reviewer
+    register_conversation_tools(agent, sandbox=sandbox, mcp_manager=mcp_manager)
+    register_conclave_tools(tools, llm_getter=lambda: agent.llm)
     setattr(agent, "_search_provider_state", search_provider_state)
     limit = _resolve_context_limit_simple(llm_config.model, llm_config.context_limit)
     agent.context.max_prompt_tokens = prompt_token_budget(limit, llm_config.max_tokens)

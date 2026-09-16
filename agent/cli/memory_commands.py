@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 MEMORY_USAGE = (
     "Usage:\n"
     "  /memory\n"
+    "  /memory review [query]   # discuss evidence and proposed corrections\n"
     "  /memory remember <text>\n"
     "  /memory remember-user <text>\n"
     "  /memory working <goal|plan|progress|constraints|open_items|artifacts|notes> <text>\n"

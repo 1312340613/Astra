@@ -93,9 +93,8 @@ bounded expansion and stale-evidence handling.
 
 Reusable procedures use the skill library. Only its catalog is injected;
 `skill_view` reads full instructions on demand. The model's own summaries and
-user-added skills have separate ownership. `/learn review` manually checks the
-next batch of automatic skills; it excludes user skills and does not execute
-their procedures. See [skill learning](skill-learning.md) for migration,
+user-added skills have separate ownership. `/learn review` starts a read-only discussion of the next automatic-skill batch;
+user-selected edits and optional execution checks happen on a subsequent turn. See [skill learning](skill-learning.md) for migration,
 cursor progress, protections and undo.
 
 ## Memory commands

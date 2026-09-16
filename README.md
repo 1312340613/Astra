@@ -90,7 +90,7 @@ Enter these **inside Astra**:
 | `/help` · `/doctor` | Find commands and check runtime connections. |
 | `/model` · `/mode high` | Select a model and adjust supported reasoning effort. |
 | `/memory` · `/skills` | Inspect memory and the skill library. |
-| `/learn review` | Review the next batch of automatic skills; repeat to continue. |
+| `/learn review` | Discuss improvements to automatic skills, then choose edits and verification. |
 | `/tasks` · `/resume <task-id>` | Inspect task history or resume an eligible task. |
 | `/restart` · `/restart cancel` | Restart this backend after the current work finishes, or cancel the wait. |
 | `/wakeup` · `/wakeup cancel` | Inspect or stop a [session wakeup](docs/session-lifecycle.md). |

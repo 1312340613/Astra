@@ -6,6 +6,31 @@ Choose a model, adjust the interface and manage work in the terminal.
 
 [Model connections](#model-connections) · [Model time context](#model-time-context) · [Reasoning intensity](#reasoning-intensity) · [Structured clarification](#structured-clarification) · [TUI themes](#tui-themes) · [Durable tasks](#durable-tasks)
 
+## Conversational commands
+
+These commands start normal model turns, keeping their evidence available for
+follow-up questions and selected actions:
+
+| Command | Conversation |
+| --- | --- |
+| `/learn review [skill-name]` | Read-only skill review, then user-selected edits and verification. |
+| `/doctor [section or symptom]` | Explain fresh diagnostic evidence and propose checks or repairs. |
+| `/diagnostics [section]` | Explain the current runtime snapshot. |
+| `/conclave <question>` | Research using the existing tool and discuss its findings. |
+| `/skills create [name] [description]` | Draft a useful user skill before saving. |
+| `/memory review [query]` | Review current memory IDs and sources, then apply selected corrections. |
+| `/handoff [notes]` | Prepare and save a redacted handoff; follow up to refine it. |
+
+Review, skill drafting, memory review and diagnosis begin with read-only turns.
+Once the proposal is complete, reply to choose the changes or execution checks.
+Prepared handoffs use a distinct filename so an automatic exit snapshot cannot
+overwrite them. Commands require a connected model in the work conversation.
+
+Use `/doctor --raw [section]`, `/diagnostics --raw [section]`, `/diagnostics json`,
+or `/handoff --raw [notes]` for direct output. `/skills create --template <name>
+<description>` creates an empty template. Status, settings, history, undo and
+cancellation commands still execute directly.
+
 ## Model connections
 
 Run `/connect` to choose a provider, its API route, and an API key or environment

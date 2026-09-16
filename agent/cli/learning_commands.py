@@ -7,14 +7,13 @@ from collections.abc import Callable
 from agent.runtime.async_io import durable_io
 from agent.runtime.learning import LearningReviewer, LearningStore
 from agent.runtime.memory import MemoryStore
-from agent.runtime.skill_curation import SkillCurator, format_curation
 from agent.runtime.skill_learning import LearnedSkills
 from agent.runtime.skill_provenance import automatic_names
 from agent.runtime.skills import SkillStore
 
 LEARN_USAGE = """Usage:
   /learn                       # direct-learning status
-  /learn review                # manually check and organize learned skills
+  /learn review [skill-name]   # discuss improvements, then choose edits and verification
   /learn migrate               # import old automatic summaries; retain observations as history
   /learn history [run-id]       # changes and reasons
   /learn undo <run-id>          # restore a change if files are unchanged
@@ -40,7 +39,7 @@ async def execute_learning_command(
             return (f"Direct skill learning: {store.mode()}\n"
                     f"Learned skills: {len(automatic_names(state))}\n"
                     "Review scope: automatic summaries only; user-added and built-in skills are excluded.\n"
-                    "Quality review: manual only (/learn review); no timer or background review.\n"
+                    "Quality review: conversational and user-triggered (/learn review); proposals first, no background review.\n"
                     f"Last review: {json.dumps(state['last_review'], ensure_ascii=False)}\n"
                     f"Historical pending candidates: {store.count('pending')} (/learn legacy pending). "
                     "These are preserved history, not a required learning queue.\n"
@@ -53,8 +52,7 @@ async def execute_learning_command(
             result = await durable_io(migrate_legacy, store, learned)
             return format_migration(result), ""
         if action == "review" and len(args) == 1:
-            result = await SkillCurator(reviewer.llm, learned).review(on_progress)
-            return format_curation(result), ""
+            return "", "Review now starts a conversation. Use /learn review in the active chat; no changes applied."
         if action == "history" and len(args) <= 2:
             records = await durable_io(learned.history, args[1] if len(args) == 2 else "")
             public = [{key: item[key] for key in ("id", "time", "kind", "status", "actions", "source")}

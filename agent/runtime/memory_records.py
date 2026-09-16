@@ -545,27 +545,40 @@ class MemoryRecordRepository:
         salience: float | None = None,
         tags: Iterable[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expected_content: str | None = None,
     ) -> MemoryRecord:
-        old = self.get(record_id)
-        if old is None or old.status != "active":
-            raise ValueError(f"Active memory record not found: {record_id}")
-        replacement = self.add(
-            kind=old.kind,
-            content=content,
-            source_session_id=source_session_id,
-            source_message_id=source_message_id,
-            confidence=confidence,
-            salience=old.salience if salience is None else salience,
-            tags=old.tags if tags is None else tags,
-            metadata=metadata or {},
-            supersedes_id=old.record_id,
-        )
+        replacement_id = uuid.uuid4().hex
         now = _now()
         with self._lock, self._connection() as db:
+            # A proposal may wait while another process corrects this record.
+            # Check and replace under one SQLite write lock, with no orphaned
+            # replacement if validation or the old-record update fails.
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM memory_records WHERE id=? AND status='active'", (record_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Active memory record not found: {record_id}")
+            old = self._from_row(row)
+            if expected_content is not None and old.content != expected_content:
+                raise ValueError("Memory changed; inspect it before correcting")
+            db.execute(
+                """INSERT INTO memory_records(
+                    id, kind, content, source_session_id, source_message_id,
+                    created_at, last_confirmed_at, valid_from, valid_until,
+                    confidence, salience, status, supersedes_id, tags_json, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'active', ?, ?, ?)""",
+                (replacement_id, old.kind, str(content), str(source_session_id), str(source_message_id),
+                 now, now, now, self._score(confidence, "confidence"),
+                 old.salience if salience is None else self._score(salience, "salience"), old.record_id,
+                 json.dumps(self._tags(old.tags if tags is None else tags), ensure_ascii=False),
+                 json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)),
+            )
             db.execute(
                 "UPDATE memory_records SET status='superseded', valid_until=? WHERE id=? AND status='active'",
                 (now, old.record_id),
             )
+        replacement = self.get(replacement_id)
+        if replacement is None:
+            raise RuntimeError("Memory correction was not persisted")
         return replacement
 
     def forget(self, record_id: str) -> bool:

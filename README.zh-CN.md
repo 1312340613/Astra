@@ -81,7 +81,7 @@ astra
 | `/help` · `/doctor` | 查看命令和运行时连接状态。 |
 | `/model` · `/mode high` | 选择模型，调整受支持的推理强度。 |
 | `/memory` · `/skills` | 查看记忆和技能库。 |
-| `/learn review` | 检查下一批自动总结的技能，再次运行即可继续。 |
+| `/learn review` | 讨论自动技能的改进建议，再选择修改和验证范围。 |
 | `/tasks` · `/resume <task-id>` | 查看任务记录，或恢复符合条件的任务。 |
 | `/restart` · `/restart cancel` | 等当前工作完成后重启本次后端，或取消等待。 |
 | `/wakeup` · `/wakeup cancel` | 查看或停止[会话内唤醒](docs/zh-CN/session-lifecycle.md)。 |

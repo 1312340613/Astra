@@ -225,7 +225,7 @@ assert.equal(themesWithCurrent.every((item) => item.group === "THEMES"), true);
 assert.deepEqual(
   slashCommandSuggestions("/memory ").map((item) => item.command),
   [
-    "status", "remember", "remember-user", "working", "inspect", "timeline",
+    "review", "status", "remember", "remember-user", "working", "inspect", "timeline",
     "why", "correct", "forget", "import-core", "clear-working",
   ],
 );

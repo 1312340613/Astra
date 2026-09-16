@@ -50,11 +50,11 @@ const SLASH_COMMANDS: SlashCommandSuggestion[] = [
   { command: "/gallery", description: "open latest or numbered image search gallery", takesArgs: true, group: "TOOLS" },
   { command: "/memory", description: "inspect or update working/core memory", takesArgs: true, group: "TOOLS" },
   { command: "/skills", description: "list, inspect, or create local skills", takesArgs: true, group: "TOOLS" },
-  { command: "/learn", description: "save skills, manually review, and undo changes", takesArgs: true, group: "TOOLS" },
+  { command: "/learn", description: "discuss skill improvements, save, and undo changes", takesArgs: true, group: "TOOLS" },
   { command: "/tools", description: "list available tools", group: "TOOLS" },
   { command: "/browser", description: "show or release this session’s browser control", takesArgs: true, group: "TOOLS" },
   { command: "/computer", description: "show, set up, or stop local macOS Computer Use", takesArgs: true, group: "TOOLS" },
-  { command: "/conclave", description: "run multi-expert research panel", takesArgs: true, group: "TOOLS" },
+  { command: "/conclave", description: "research with experts and discuss the findings", takesArgs: true, group: "TOOLS" },
   { command: "/appshot", description: "status · shortcut · enable · disable", takesArgs: true, group: "CAPTURE" },
   { command: "/tasks", description: "list or inspect per-request task runs", takesArgs: true, group: "SESSION" },
   { command: "/budget", description: "set turn time limit in seconds, or off", takesArgs: true, group: "SESSION" },
@@ -63,12 +63,12 @@ const SLASH_COMMANDS: SlashCommandSuggestion[] = [
   { command: "/goal", description: "set/show/pause/resume the session goal (long-horizon verification mode)", takesArgs: true, group: "SESSION" },
   { command: "/today", description: "list today's task runs", group: "SESSION" },
   { command: "/session", description: "list or switch sessions", takesArgs: true, group: "SESSION" },
-  { command: "/handoff", description: "save a redacted continuation brief", takesArgs: true, group: "SESSION" },
+  { command: "/handoff", description: "compose, save, and revise a continuation brief", takesArgs: true, group: "SESSION" },
   { command: "/theme", description: "show or switch terminal color theme", takesArgs: true, group: "DISPLAY" },
   { command: "/timeline", description: "toggle conversation timeline display", takesArgs: true, group: "DISPLAY" },
   { command: "/health", description: "show harness diagnostics", group: "SYSTEM" },
-  { command: "/doctor", description: "run deep endpoint and runtime diagnostics", group: "SYSTEM" },
-  { command: "/diagnostics", description: "show fast local runtime snapshot", takesArgs: true, group: "SYSTEM" },
+  { command: "/doctor", description: "discuss diagnosis and repairs; --raw for report", takesArgs: true, group: "SYSTEM" },
+  { command: "/diagnostics", description: "explain runtime state; --raw for snapshot", takesArgs: true, group: "SYSTEM" },
   { command: "/maintenance", description: "preview or apply bounded runtime cleanup", takesArgs: true, group: "SYSTEM" },
   { command: "/sandbox", description: "show or toggle Docker isolation", takesArgs: true, group: "SYSTEM" },
   { command: "/vision-tiles", description: "show or toggle DeepSeek original-pixel image tiling", takesArgs: true, group: "SYSTEM" },
@@ -112,6 +112,7 @@ const SEARCH_PROVIDERS: SlashCommandSuggestion[] = [
 ];
 
 const MEMORY_SUBCOMMANDS: SlashCommandSuggestion[] = [
+  { command: "review", description: "discuss memory evidence and proposed corrections", completion: "/memory review ", submitValue: "/memory review", kind: "command" },
   { command: "status", description: "show current working and core memory", completion: "/memory status", submitValue: "/memory status", kind: "command" },
   { command: "remember", description: "store a stable agent or environment fact in MEMORY.md", completion: "/memory remember ", kind: "command" },
   { command: "remember-user", description: "store a user profile or preference in USER.md", completion: "/memory remember-user ", kind: "command" },
@@ -261,12 +262,12 @@ function fuzzyMatch(value: string, query: string): boolean {
 const SKILL_SUBCOMMANDS: SlashCommandSuggestion[] = [
   { command: "list", description: "list local skills", completion: "/skills list", submitValue: "/skills list", kind: "command" },
   { command: "show", description: "show a skill or supporting file", completion: "/skills show ", kind: "command" },
-  { command: "create", description: "create a local skill skeleton", completion: "/skills create ", kind: "command" },
+  { command: "create", description: "draft a skill together before saving", completion: "/skills create ", submitValue: "/skills create", kind: "command" },
 ];
 
 const LEARN_SUBCOMMANDS: SlashCommandSuggestion[] = [
   { command: "status", description: "show direct skill learning status", completion: "/learn status", submitValue: "/learn status", kind: "command" },
-  { command: "review", description: "manually check and organize learned skills", completion: "/learn review", submitValue: "/learn review", kind: "command" },
+  { command: "review", description: "discuss skill improvements and choose changes", completion: "/learn review", submitValue: "/learn review", kind: "command" },
   { command: "migrate", description: "import historical automatic summaries; preserve user skills", completion: "/learn migrate", submitValue: "/learn migrate", kind: "command" },
   { command: "history", description: "show changes and reasons", completion: "/learn history", submitValue: "/learn history", kind: "command" },
   { command: "undo", description: "restore a learning change by run ID", completion: "/learn undo ", kind: "command" },

@@ -12,8 +12,12 @@ one after every conversation.
 ```text
 /skills
 /skills show <name> [file]
-/skills create <name> <description>
+/skills create [name] [description]
+/skills create --template <name> <description>
 ```
+
+`/skills create` drafts a complete skill in conversation before saving. Use
+`--template` for the original empty template operation.
 
 Skills contain `SKILL.md` and optional `references/`, `templates/`, `scripts/`
 or `assets/`. The model saves its own summaries with `skill_manage(origin="auto")`
@@ -50,34 +54,34 @@ on another machine or version.
 /learn undo <run-id>
 ```
 
-`/learn review` checks only automatic skills and may keep, rewrite, merge or
-archive them. User skill content and descriptions are excluded from its review
-request. It reviews text and supplied source material; it does not run commands
-from the skills or claim that their procedures passed a live test.
+`/learn review [skill-name]` starts an ordinary conversation using the current
+model and reasoning effort. The first turn reads automatic skills and their
+sources, proposes concrete changes, and describes useful verification. It is
+read-only: the model cannot save edits or execute procedures in that turn.
+User-owned skills remain protected review targets.
 
-Each invocation sends one bounded model request: at most four skills and 24,000
-input content/source characters, with a 90-second timeout and 4,096 output-token
-limit. A saved cursor tracks coverage in stable order. Run the same command
-again to inspect the remaining skills, even in another session; after a complete
-pass, later reviews can revisit the library. Oversized entries are reported as
-not checked rather than silently counted as reviewed.
+Reply with a question, a correction, “only change the second item”, or “continue”.
+The selected changes use the existing skill journal and undo mechanism. “Continue”
+covers the concrete editing and verification plan just presented. Content review,
+saved edits, actual execution, and successful verification are reported separately.
 
-Pinned, other-workspace, other-platform and externally edited skills are
-protected. Only fully included automatic skills can be modified or merged. Invalid,
-incomplete or truncated model output leaves the batch unchanged and does not
-advance its cursor. Empty libraries do not call the model. There is no automatic
-retry, timer, idle review or catch-up job on startup.
+Each snapshot includes at most four skills and 24,000 content/source characters.
+The model may make multiple normal tool calls; the former separate 90-second,
+4,096-token reviewer request is no longer used by the command. A successful apply
+advances the shared batch cursor. Oversized and protected entries are reported as
+not checked. A named review targets that skill without moving the batch cursor.
 
-Changes keep their previous versions and reasons under `.astra/skills-learning/`,
-outside the catalog. Archived skills remain available in that history. A journal
-recovers interrupted multi-file writes. If records cannot be read, `/learn`
-reports the error and the LEARN row shows `? / CHECK`; ordinary chat continues
-without replacing damaged records. A library lock prevents
-concurrent review writes; content checks protect files changed after review
-started. Undo refuses to overwrite later edits. Closing the terminal stops
-unfinished maintenance, while already committed changes remain in history.
-Ctrl+C or a new message cancels review. A short file commit already in progress
-settles before cancellation returns; inspect history for its outcome.
+Snapshots are session-bound and kept in memory while you discuss the proposal.
+A restart requires a fresh snapshot and reconciliation with the earlier proposal.
+Changed files, invalid actions, and incomplete batch decisions are rejected. The
+library is not locked while waiting for your reply. Applied versions and reasons
+remain in `.astra/skills-learning/`; `/learn history` and `/learn undo` still work.
+Undo refuses to overwrite subsequent edits. There is no background review.
+
+Ctrl+C cancels the active conversation turn. A message sent during generation
+steers that same turn and does not lift its read-only restriction; finish the
+proposal before authorizing execution in a later turn. Already committed changes
+remain in history when a turn is interrupted.
 
 `/learn mode off` disables direct automatic saving. `/learn mode review` enables
 it; the legacy name `review` does not turn on scheduled maintenance. Explicit
@@ -103,7 +107,9 @@ therefore need not equal the automatic-skill count or the review batch size.
 
 ## Maintenance references
 
-The implementation is in `agent/runtime/skill_learning.py`, `skill_curation.py`,
+The conversation entry is in `agent/runtime/command_workflows.py` and its
+operation adapters in `agent/cli/conversation_commands.py`. Storage, migration,
+history and undo remain in `skill_learning.py`, `skill_curation.py`,
 `skill_provenance.py`, `skill_migration.py` and `agent/cli/learning_commands.py`.
 Tests cover ownership, cursor progress, invalid output, concurrent changes,
 migration and undo. The optional `scripts/skill_curation_acceptance.py` exercises

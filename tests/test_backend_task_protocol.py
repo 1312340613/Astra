@@ -80,7 +80,7 @@ def test_backend_exposes_tasks_command_without_blocking_protocol(tmp_path: Path)
         json.dumps({"type": "command", "cmd": "/budget"}),
         json.dumps({"type": "command", "cmd": "/budget invalid"}),
         json.dumps({"type": "command", "cmd": "/budget off"}),
-        json.dumps({"type": "command", "cmd": "/diagnostics"}),
+        json.dumps({"type": "command", "cmd": "/diagnostics --raw"}),
         json.dumps({"type": "command", "cmd": "/diagnostics json"}),
         json.dumps({"type": "command", "cmd": "/maintenance"}),
         json.dumps({"type": "exit"}),

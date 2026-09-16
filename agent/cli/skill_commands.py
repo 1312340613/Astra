@@ -7,7 +7,8 @@ SKILLS_USAGE = (
     "Usage:\n"
     "  /skills\n"
     "  /skills show <name> [file]\n"
-    "  /skills create <name> <description>"
+    "  /skills create [name] [description]   # draft together before saving\n"
+    "  /skills create --template <name> <description>   # create an empty template"
 )
 
 

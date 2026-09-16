@@ -656,6 +656,7 @@ class AgentContext:
         # Never replay it: current user and assistant messages are canonical.
         model_message.pop("api_content", None)
         model_message.pop("provenance", None)
+        model_message.pop("display_command", None)
         if content_override is not _NO_OVERRIDE:
             model_message["content"] = copy.deepcopy(content_override)
         from .appshot_media import hydrate_content

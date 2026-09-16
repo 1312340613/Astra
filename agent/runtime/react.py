@@ -1540,8 +1540,11 @@ class ReActAgent(AgentBase):
             }
         canonical_content = storage_content if storage_content != chat_content else chat_content
         self.context.add_user(canonical_content, provenance=(
-            "session_wakeup" if msg.metadata.get("source") == "session_wakeup" else ""
+            str(msg.metadata["source"]) if msg.metadata.get("source") in {"session_wakeup", "command_workflow"}
+            else "goal_continuation" if msg.metadata.get("goal_round") else ""
         ))
+        if msg.metadata.get("source") == "command_workflow":
+            self.context.messages[user_index]["display_command"] = msg.metadata["display_command"]
         if storage_content == chat_content:
             storage_content = None
         if storage_content is not None:
@@ -3159,6 +3162,9 @@ class ReActAgent(AgentBase):
         self._active_vision_attachment_occurrences = set()
         self._request_local_image_overlay_messages = []
         self._context_index_request_id = context_index_request_id
+        from .command_workflows import workflow_allowlist
+        previous_allowlist = getattr(self, "tool_allowlist", None)
+        self.tool_allowlist = workflow_allowlist(str(msg.metadata.get("command_workflow", "")), previous_allowlist)
         try:
             try:
                 active_events = self._run_react_loop_active(msg, emit_events)
@@ -3186,6 +3192,7 @@ class ReActAgent(AgentBase):
                 }
                 yield {"type": "done", "content": "", "request_id": request_id}
         finally:
+            self.tool_allowlist = previous_allowlist
             context_index_broker = getattr(self, "context_index_broker", None)
             if context_index_broker is not None:
                 try:

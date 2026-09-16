@@ -42,6 +42,7 @@ import { StreamingControlLayout } from "./components/streaming-control-layout.js
 import { formatImageInputDisplay, parseImageInput } from "./image-command.js";
 import { isBenignMacOSAllocatorDiagnostic, isBackendModelProgress } from "./backend-stderr.js";
 import type { ModelMenuItem, SessionMenuItem } from "./command-menu.js";
+import { startsConversationCommand } from "./conversation-commands.js";
 import type {
   BarAmbianceState,
   BarDrinkState,
@@ -1856,9 +1857,15 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
         } else if (text === "/reload") {
           addMessage("system", "Reloading agent runtime...");
           send({ type: "command", cmd: "/reload" });
-        } else if (/^\/learn\s+(review|migrate)(?:\s|$)/i.test(text)) {
-          addMessage("system", /^\/learn\s+migrate/i.test(text)
-            ? "Migrating historical automatic summaries…" : "Checking automatically learned skills…");
+        } else if (startsConversationCommand(text)) {
+          if (send({ type: "command", cmd: text })) {
+            busyRef.current = true;
+            setBusy(true);
+            setActiveTools([]);
+            setActiveProcesses([]);
+          }
+        } else if (/^\/learn\s+migrate(?:\s|$)/i.test(text)) {
+          addMessage("system", "Migrating historical automatic summaries…");
           if (send({ type: "command", cmd: text })) {
             busyRef.current = true;
             setBusy(true);

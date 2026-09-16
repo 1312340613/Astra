@@ -159,6 +159,8 @@ from agent.cli.computer_commands import ComputerStateEmitter, approval_choices, 
 from agent.cli.memory_commands import execute_memory_command
 from agent.cli.skill_commands import execute_skill_command
 from agent.cli.learning_commands import execute_learning_command
+from agent.cli.conversation_commands import register_conversation_tools
+from agent.runtime.command_workflows import workflow_message, raw_command as normalize_direct_command
 from agent.channels import ChannelManager, load_channels_config
 from agent.channels.manager import is_address_in_use
 from agent.channels.router import AgentChannelRouter, active_channel
@@ -1100,6 +1102,8 @@ async def _main(startup_started: float):
     agent._mcp_manager = mcp_manager
     agent._learning_store = learning_store
     agent._learning_reviewer = learning_reviewer
+    register_conversation_tools(agent, sandbox=sandbox, mcp_manager=mcp_manager,
+                                startup_profile=lambda: startup_profile_report, process_manager=process_manager)
     computer_state_emitter = ComputerStateEmitter(computer_runtime, _send)
     tools.hooks.on_tool_result(computer_state_emitter.observe_tool_result)
     tools.hooks.on_tool_error(computer_state_emitter.observe_tool_error)
@@ -1665,7 +1669,7 @@ async def _main(startup_started: float):
                 _send({"type": "task_status", "task": {"id": runtime_task_id, "status": status}})
             await _send_model_info()
             _send_startup_status()
-            if tick is None and should_verify_goal_turn(
+            if tick is None and not msg.metadata.get("command_workflow") and should_verify_goal_turn(
                 turn_completed=turn_completed,
                 was_cancelled=was_cancelled,
                 failed_message=failed_message,
@@ -1787,7 +1791,7 @@ async def _main(startup_started: float):
                 continue
             item = {
                 "role": message["role"],
-                "content": message_display_text(message.get("content", "")),
+                "content": message_display_text(message.get("display_command", message.get("content", ""))),
             }
             timestamp = _valid_message_timestamp(message.get("timestamp"))
             if timestamp is not None:
@@ -2340,6 +2344,20 @@ async def _main(startup_started: float):
                     _send({"type": "done"})
                     continue
                 c = raw_command.strip()
+                try:
+                    workflow = workflow_message(c)
+                    if workflow is not None:
+                        _require_local_work_session()
+                        if active_task is not None and not active_task.done() and not _reply_done:
+                            _send({"type": "error", "message": "Finish or cancel the active task before starting a command workflow."})
+                        else:
+                            await _launch_message(workflow, c)
+                        continue
+                    c = normalize_direct_command(c)
+                except (ValueError, RuntimeError) as exc:
+                    _send({"type": "error", "message": str(exc)})
+                    _send({"type": "done"})
+                    continue
                 if c == "/wakeup" or c.startswith("/wakeup "):
                     try:
                         _require_local_work_session()

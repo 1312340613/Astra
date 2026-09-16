@@ -276,6 +276,18 @@ class MemoryStore:
             self._write_core_entries(scope, candidate)
         return self._core_item(scope, text)
 
+    def replace_core(self, memory_id: str, *, expected_content: str, content: str) -> dict:
+        """Replace a reviewed entry in one validated write, preserving other entries."""
+        text = _safe_memory_text(content, max_chars=600)
+        with self._lock:
+            match = self.resolve_core(memory_id)
+            if match is None or match["content"] != expected_content:
+                raise ValueError("Core memory changed; inspect it before correcting")
+            scope = str(match["scope"])
+            entries = [text if item["id"] == match["id"] else item["content"] for item in self.list_core(scope)]
+            self._write_core_entries(scope, list(dict.fromkeys(entries)))
+            return self._core_item(scope, text)
+
     def remove_core(self, memory_id: str) -> bool:
         try:
             match = self.resolve_core(memory_id)
@@ -368,6 +380,7 @@ class MemoryStore:
         salience: float | None = None,
         tags: Iterable[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expected_content: str | None = None,
     ) -> MemoryRecord:
         text = _safe_memory_text(content, max_chars=4000)
         replacement = self.record_store.supersede(
@@ -379,6 +392,7 @@ class MemoryStore:
             salience=salience,
             tags=tags,
             metadata=metadata,
+            expected_content=expected_content,
         )
         return replacement
 
