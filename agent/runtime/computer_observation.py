@@ -191,6 +191,35 @@ def observe_action_effect(before, after, actions):
     }
 
 
+def _catalog_windows_may_overlap(first, second):
+    def bounds(window) -> tuple[float, float, float, float] | None:
+        value = window.get("bounds")
+        if not isinstance(value, Mapping):
+            return None
+        coordinates: list[float] = []
+        for key in ("x", "y", "width", "height"):
+            component = value.get(key)
+            if not isinstance(component, (int, float)) or isinstance(component, bool):
+                return None
+            try:
+                number = float(component)
+            except OverflowError:
+                return None
+            if not math.isfinite(number):
+                return None
+            coordinates.append(number)
+        x, y, width, height = coordinates
+        return (x, y, width, height) if width > 0 and height > 0 else None
+
+    left, right = bounds(first), bounds(second)
+    if left is None or right is None:
+        return True
+    return (
+        left[0] < right[0] + right[2] and right[0] < left[0] + left[2]
+        and left[1] < right[1] + right[3] and right[1] < left[1] + left[3]
+    )
+
+
 def window_transition(apps, bundle_id, old_identity, prior_identities):
     """Return catalog evidence and an observation suggestion, never a selected target."""
     matches = [a for a in apps[:100] if isinstance(a, Mapping) and bundle_id and a.get("bundle_id") == bundle_id]
@@ -226,6 +255,15 @@ def window_transition(apps, bundle_id, old_identity, prior_identities):
             candidate = previous[0]
             result["observation_reason"] = "exact_previous_target"
     if old_identity and candidate and app.get("app_ref") and candidate.get("window_ref"):
+        blockers = [
+            w for w in windows
+            if w.get("bindable") is False and _catalog_windows_may_overlap(candidate, w)
+        ]
+        if blockers:
+            result["status"] = "unmatched_window_observed"
+            result["observation_reason"] = "unmatched_window_blocks_target"
+            result["unmatched_window_refs"] = [w["window_ref"] for w in blockers[:20] if w.get("window_ref")]
+            return result
         result["next_observation"] = {
             "tool": "computer_get_app_state",
             "arguments": {"app_ref": app["app_ref"], "window_ref": candidate["window_ref"]},

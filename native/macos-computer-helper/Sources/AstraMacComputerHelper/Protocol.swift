@@ -809,6 +809,8 @@ final class Dispatcher {
             pair = ("target_gone", "target application or window is no longer available")
         case WindowObservationError.overlayBlocked:
             pair = ("overlay_blocked", "an overlay or uncertain occluding window prevents exact target binding")
+        case WindowObservationError.axWindowUnmatched:
+            pair = ("ax_window_unmatched", "the window is present but has no unique matching Accessibility window")
         case WindowObservationError.windowContentUnavailable:
             pair = ("window_content_unavailable", "exact target-window capture returned no readable pixels (fully transparent)")
         case WindowObservationError.targetNotFrontmost:
@@ -850,6 +852,8 @@ final class Dispatcher {
             pair = ("target_gone", "target application or window is no longer available")
         case WindowObservationError.overlayBlocked:
             pair = ("overlay_blocked", "an overlay or uncertain occluding window prevents exact target binding")
+        case WindowObservationError.axWindowUnmatched:
+            pair = ("ax_window_unmatched", "the window is present but has no unique matching Accessibility window")
         case WindowObservationError.windowContentUnavailable:
             pair = ("window_content_unavailable", "exact target-window capture returned no readable pixels (fully transparent)")
         default:

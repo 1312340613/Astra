@@ -90,6 +90,7 @@ private func recorderQualityFixture(_ run: (RecorderDaemon, Date, RecorderApplic
 @Test func recorderDaemonBurstContractAndBottomText() throws {
     let events = try recorderQualityFixture { daemon, now, app in
         let key = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true))
+        key.flags = [] // Fixture text must not inherit live desktop shortcut state.
         daemon.handleCGEvent(type: .keyDown, event: key, at: now)
         for i in 0..<14 {
             daemon.recordFocusedValue(String(repeating: "screen", count: 500) + "牛逼 \(i)", role: "AXTextArea", subrole: nil,
@@ -130,6 +131,7 @@ private func recorderQualityFixture(_ run: (RecorderDaemon, Date, RecorderApplic
 @Test func recorderDaemonAllowedContextSwitchFlushesOriginalContext() throws {
     let events = try recorderQualityFixture { daemon, now, app in
         let key = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true))
+        key.flags = [] // Fixture text must not inherit live desktop shortcut state.
         daemon.handleCGEvent(type: .keyDown, event: key, at: now)
         daemon.recordFocusedValue("typed", role: "AXTextArea", subrole: nil,
             application: app, window: ["title": .string("old")], contextChanged: false, at: now)
@@ -146,6 +148,7 @@ private func recorderQualityFixture(_ run: (RecorderDaemon, Date, RecorderApplic
     for blocked in [true, false] {
         let events = try recorderQualityFixture { daemon, now, app in
             let key = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true))
+            key.flags = [] // Fixture text must not inherit live desktop shortcut state.
             daemon.handleCGEvent(type: .keyDown, event: key, at: now)
             daemon.recordFocusedValue("typed", role: "AXTextArea", subrole: nil,
                 application: app, window: nil, contextChanged: false, at: now)
@@ -163,6 +166,7 @@ private func recorderQualityFixture(_ run: (RecorderDaemon, Date, RecorderApplic
         daemon.recordFocusedValue("old window", role: "AXTextArea", subrole: nil,
             application: app, window: nil, contextChanged: false, at: now)
         let key = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true))
+        key.flags = [] // Fixture text must not inherit live desktop shortcut state.
         daemon.handleCGEvent(type: .keyDown, event: key, at: now.addingTimeInterval(1))
         daemon.recordFocusedValue("new typed value", role: "AXTextArea", subrole: nil,
             application: app, window: ["title": .string("new")], contextChanged: true, at: now.addingTimeInterval(1.1))
@@ -184,6 +188,7 @@ private func recorderQualityFixture(_ run: (RecorderDaemon, Date, RecorderApplic
     daemon.recordFocusedValue("baseline", role: "AXTextArea", subrole: nil, application: allowed,
         window: nil, contextChanged: false, at: now)
     let key = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true))
+    key.flags = [] // Fixture text must not inherit live desktop shortcut state.
     daemon.handleCGEvent(type: .keyDown, event: key, at: now.addingTimeInterval(1))
     current = RecorderApplication(pid: 43, bundleIdentifier: "com.apple.Passwords", name: "Passwords")
     daemon.handleCGEvent(type: .keyDown, event: key, at: now.addingTimeInterval(1.1))

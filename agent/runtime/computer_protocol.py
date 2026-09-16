@@ -52,6 +52,7 @@ class ComputerErrorCode(str, Enum):
     PROTOCOL_MISMATCH = "protocol_mismatch"
     TARGET_GONE = "target_gone"
     OVERLAY_BLOCKED = "overlay_blocked"
+    AX_WINDOW_UNMATCHED = "ax_window_unmatched"
     TARGET_NOT_FRONTMOST = "target_not_frontmost"
     STALE_TARGET = "stale_target"
     STALE_SNAPSHOT = "stale_snapshot"

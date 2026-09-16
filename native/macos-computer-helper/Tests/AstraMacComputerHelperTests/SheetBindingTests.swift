@@ -29,3 +29,58 @@ import Testing
         isSheet: { $0 == 3 }, contained: { _, _ in true })
     #expect(nested == nil)
 }
+
+@Test func nestedSheetsRequireEveryOwnedDirectLinkAndContainment() {
+    func chain(windows: [Int] = [1], foreign: Int = -1, missingRole: Int = -1,
+               outside: Int = -1, maximum: Int = 8) -> [Int] {
+        focusedSheetChain(windows: windows, focused: 4, maximumSheets: maximum,
+            same: ==, isOwned: { $0 != foreign }, parent: { [4: 3, 3: 2, 2: 1][$0] },
+            isSheet: { [2, 3].contains($0) && $0 != missingRole },
+            contained: { _, child in child != outside })
+    }
+    #expect(chain() == [2, 3])
+    #expect(chain(windows: [1, 1]).isEmpty)
+    #expect(chain(foreign: 3).isEmpty)
+    #expect(chain(missingRole: 2).isEmpty)
+    #expect(chain(missingRole: 3) == [2])
+    #expect(chain(outside: 3) == [2])
+    #expect(chain(maximum: 1) == [2])
+    #expect(chain(maximum: 0).isEmpty)
+}
+
+@Test func sheetButtonsPrecedeLargeColumnTreesWithoutDroppingOrDuplicatingChildren() {
+    let children = ["sidebar", "columns", "toolbar", "Cancel", "Open", "footer"]
+    var visited: [String] = []
+    let ordered = prioritizeSheetChildren(children, isButton: {
+        visited.append($0)
+        return ["Cancel", "Open"].contains($0)
+    }, isFocusedBranch: { _ in false })
+    #expect(visited == children)
+    #expect(ordered == ["Cancel", "Open", "sidebar", "columns", "toolbar", "footer"])
+    #expect(prioritizeSheetChildren(children, isButton: { _ in false },
+        isFocusedBranch: { _ in false }) == children)
+}
+
+@Test func currentColumnPrecedesOffscreenAncestorsWithoutAddingAuthority() {
+    let children = ["old-column", "current-column", "other-column", "Open", "Cancel"]
+    let ordered = prioritizeSheetChildren(children,
+        isButton: { ["Open", "Cancel"].contains($0) },
+        isFocusedBranch: { $0 == "current-column" })
+    #expect(ordered == ["Open", "Cancel", "current-column", "old-column", "other-column"])
+    #expect(prioritizeSheetChildren(children, isButton: { _ in false },
+        isFocusedBranch: { $0 == "missing-child" }) == children)
+}
+
+@Test func focusedSheetPathRequiresCompleteBoundedOwnedAncestry() {
+    let parents = [4: 3, 3: 2, 2: 1]
+    #expect(focusedAncestorPath(root: 1, focused: 4, same: ==,
+        isOwned: { _ in true }, parent: { parents[$0] }) == [4, 3, 2])
+    #expect(focusedAncestorPath(root: 1, focused: 4, same: ==,
+        isOwned: { $0 != 3 }, parent: { parents[$0] }).isEmpty)
+    #expect(focusedAncestorPath(root: 1, focused: 4, same: ==,
+        isOwned: { _ in true }, parent: { $0 == 4 ? 3 : 4 }).isEmpty)
+    #expect(focusedAncestorPath(root: 1, focused: 4, same: ==,
+        isOwned: { _ in true }, parent: { _ in nil }).isEmpty)
+    #expect(focusedAncestorPath(root: 1, focused: 100, same: ==,
+        isOwned: { _ in true }, parent: { $0 - 1 }).isEmpty)
+}

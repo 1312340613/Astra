@@ -131,6 +131,7 @@ _SAFE_ACTION_ERRORS = {
     ComputerErrorCode.PROTOCOL_MISMATCH: "The native helper returned an invalid action response.",
     ComputerErrorCode.TARGET_GONE: "The selected application or window is no longer available.",
     ComputerErrorCode.OVERLAY_BLOCKED: "An overlay or uncertain occluding window blocks exact target binding. This is not evidence of expired references.",
+    ComputerErrorCode.AX_WINDOW_UNMATCHED: "The window is present, but its Accessibility identity could not be matched uniquely. This is not evidence of expired references or a system prohibition on interaction.",
     ComputerErrorCode.TARGET_NOT_FRONTMOST: "The selected window is no longer frontmost.",
     ComputerErrorCode.STALE_SNAPSHOT: "The action snapshot is stale.",
     ComputerErrorCode.OUT_OF_BOUNDS: "The action target is outside the current window.",
@@ -540,6 +541,17 @@ def _application_failure(error) -> ToolFailure:
                 "After the overlay changes, refresh computer_apps and observe the intended window."
             ),
             details={"retry_requires": "overlay_state_changed"},
+        )
+    if code is ComputerErrorCode.AX_WINDOW_UNMATCHED:
+        return _failure(
+            code.value, message, retryable=False,
+            recovery_hint=(
+                "Stop repeating catalog/bind calls while the window is unchanged. "
+                "Do not target its obscured parent or bypass identity checks with guessed input. "
+                "After the panel changes, refresh computer_apps and choose only bindable=true windows; "
+                "if it remains unmatched, report a compatibility failure and hand this step to the user."
+            ),
+            details={"retry_requires": "window_identity_or_state_changed"},
         )
     if code is ComputerErrorCode.WINDOW_CONTENT_UNAVAILABLE:
         return _failure(
@@ -3064,6 +3076,13 @@ def register_computer_tools(
             return None
 
         def recovery_hint(recovery):
+            if recovery is not None and recovery.get("status") == "unmatched_window_observed":
+                return (
+                    "Do not repeat this action batch. An unmatched window may obscure the target. "
+                    "Do not bind its parent or repeatedly refresh the unchanged catalog. "
+                    "Wait for the panel state to change or hand this step to the user; "
+                    "then obtain fresh bindable refs through normal observation approval."
+                )
             if recovery is not None:
                 return (
                     "Do not repeat this action batch. Use the fresh window_transition refs "

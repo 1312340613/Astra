@@ -216,9 +216,8 @@ final class BackgroundTargetController: TargetSelecting {
             )
         }
         guard exact.count == 1, let selected = exact.first, selected.identity != 0 else {
-            throw observationFailure(
-                "filter left \(exact.count) candidates (wanted 1, identity!=0): windowID=\(windowID) axWindows=\(record.axWindows.map { "id\($0.identity)@\($0.bounds)" })"
-            )
+            logActionRejected("observation_validation=ax_window_unmatched candidates=\(exact.count)")
+            throw WindowObservationError.axWindowUnmatched
         }
 
         // Only the exact selected window ID plus retained AX element is exempt.

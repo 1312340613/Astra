@@ -3246,3 +3246,22 @@ final class BundleTestArtifactSyscalls: ArtifactSyscalls {
         #expect(response.snapshot == nil)
     }
 }
+
+@Test func unmatchedWindowErrorSurvivesObservationWireContracts() {
+    let observer = StaticWindows()
+    observer.getAppStateError = WindowObservationError.axWindowUnmatched
+    observer.snapshotError = WindowObservationError.axWindowUnmatched
+    let dispatcher = Dispatcher(permissions: StaticPermissions(), windows: observer)
+    let state = dispatcher.handle(
+        #"{"protocol_version":4,"request_id":"unmatched-state","operation":"get_app_state","payload":{"app_ref":"app_1","window_ref":"win_1","catalog_generation":7,"scope":"target_window","artifact_name":"snapshot-0123456789abcdef0123456789abcdef.png"}}"#
+    )
+    let snapshot = dispatcher.handle(
+        #"{"protocol_version":4,"request_id":"unmatched-snapshot","operation":"snapshot","payload":{"app_ref":"app_1","window_ref":"win_1","scope":"target_window","artifact_name":"snapshot-0123456789abcdef0123456789abcdef.png"}}"#
+    )
+    for response in [state, snapshot] {
+        #expect(!response.ok)
+        #expect(response.error?.code == "ax_window_unmatched")
+        #expect(response.snapshot == nil)
+        #expect(response.result == nil)
+    }
+}

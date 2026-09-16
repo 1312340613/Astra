@@ -16,6 +16,24 @@ func focusedSheetCandidate<Element>(
     return matches.count == 1 ? matches[0] : nil
 }
 
+func focusedSheetChain<Element>(
+    windows: [Element], focused: Element, maximumSheets: Int = 8,
+    same: (Element, Element) -> Bool, isOwned: (Element) -> Bool,
+    parent: (Element) -> Element?, isSheet: (Element) -> Bool,
+    contained: (Element, Element) -> Bool
+) -> [Element] {
+    var result: [Element] = []
+    var parents = windows
+    for _ in 0..<max(0, min(maximumSheets, 8)) {
+        guard let sheet = focusedSheetCandidate(windows: parents, focused: focused,
+            same: same, isOwned: isOwned, parent: parent, isSheet: isSheet, contained: contained),
+            !result.contains(where: { same($0, sheet) }) else { break }
+        result.append(sheet)
+        parents = [sheet]
+    }
+    return result
+}
+
 func observedAXPID(_ element: AXUIElement) -> pid_t? {
     observationAXCall(element: element, fallback: nil as pid_t?) {
         var pid: pid_t = 0
@@ -45,17 +63,29 @@ func completeObservedAXWindows(_ app: AXUIElement) -> [AXUIElement]? {
     guard windows.count < maximumObservedWindows, let owner = observedAXPID(app) else { return windows }
     let (error, value) = observationAXAttribute(app, kAXFocusedUIElementAttribute)
     guard error == .success, let focused = decodeAXElement(value) else { return windows }
-    let sheet = focusedSheetCandidate(windows: windows, focused: focused,
+    var result = windows
+    // Recover a chain, never an arbitrary descendant. Each level must be a
+    // direct owned sheet of the uniquely proven previous window/sheet.
+    let parents = windows.filter {
+        let role = AXNodeReader.stringAttribute($0, kAXRoleAttribute)
+        return role.status == .complete && role.value == kAXWindowRole
+    }
+    let sheets = focusedSheetChain(windows: parents, focused: focused,
+        maximumSheets: maximumObservedWindows - windows.count,
         same: { CFEqual($0, $1) }, isOwned: { observedAXPID($0) == owner },
         parent: observedAXParent,
-        isSheet: { AXNodeReader.stringAttribute($0, kAXRoleAttribute).value == kAXSheetRole },
+        isSheet: {
+            let role = AXNodeReader.stringAttribute($0, kAXRoleAttribute)
+            return role.status == .complete && role.value == kAXSheetRole
+        },
         contained: { window, child in
-            guard AXNodeReader.stringAttribute(window, kAXRoleAttribute).value == kAXWindowRole,
-                  let outer = AXNodeReader.frameAttribute(window),
+            guard let outer = AXNodeReader.frameAttribute(window),
                   let inner = AXNodeReader.frameAttribute(child) else { return false }
             return trustedFocusedWindow(expectedIdentity: 1, targetBounds: outer,
                 focusedIdentity: 2, focusedBounds: inner)
         })
-    guard let sheet, !windows.contains(where: { CFEqual($0, sheet) }) else { return windows }
-    return windows + [sheet]
+    for sheet in sheets {
+        if !result.contains(where: { CFEqual($0, sheet) }) { result.append(sheet) }
+    }
+    return result
 }

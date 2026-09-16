@@ -6893,6 +6893,39 @@ def test_unknown_native_action_returns_observation_candidates_without_claiming_a
     assert manager.target is None and not manager.grants
 
 
+def test_unmatched_modal_recovery_does_not_suggest_parent_or_replay(registry, manager, backend, monkeypatch):
+    register(registry, manager)
+    registry.set_approval_handler(lambda _request: asyncio.sleep(0, result="once"))
+    focus(registry)
+    initial = json.loads(run(registry.execute("computer_snapshot", {"scope": "target_window"}))["fresh_output"])
+    original_apps = backend.apps
+
+    async def blocked_catalog():
+        catalog = await original_apps()
+        catalog.apps[0]["windows"].append({
+            "window_ref": "unmatched-panel", "bindable": False,
+            "binding_reason": "ax_window_unmatched",
+        })
+        return catalog
+
+    monkeypatch.setattr(backend, "apps", blocked_catalog)
+    backend.act_result = ComputerActionResult(
+        result={"last_acknowledged_action": -1, "outcomes": []},
+        error=ComputerError(ComputerErrorCode.UNKNOWN_OUTCOME, "uncertain"),
+    )
+    result = run(registry.execute("computer_act", {
+        "snapshot_id": initial["snapshot_id"], "actions": [{"type": "wait", "duration_ms": 0}],
+    }))
+    transition = result["details"]["window_transition"]
+    assert result["code"] == "unknown_outcome"
+    assert transition["status"] == "unmatched_window_observed"
+    assert "next_observation" not in transition
+    assert "Do not bind its parent" in result["recovery_hint"]
+    assert sum(name == "act" for name, _ in backend.calls) == 1
+    assert sum(name == "snapshot" for name, _ in backend.calls) == 1
+    assert manager.target is None and not manager.grants
+
+
 def test_transition_rechecks_transient_unmatched_windows_once(registry, manager, backend, monkeypatch):
     register(registry, manager)
     registry.set_approval_handler(lambda _request: asyncio.sleep(0, result="once"))
@@ -7363,3 +7396,18 @@ def test_overlay_failure_is_not_reported_as_expired_refs():
         assert failure.details == {'retry_requires': 'overlay_state_changed'}
         assert 'private native details' not in failure.message
         assert 'Stop repeating' in failure.recovery_hint
+
+
+def test_unmatched_window_failure_does_not_invent_expiration_or_system_prohibition():
+    from agent.runtime.tools.computer import _app_state_identity_failure, _application_failure
+
+    error = ComputerError(ComputerErrorCode.AX_WINDOW_UNMATCHED, 'private native title')
+    for convert in (_app_state_identity_failure, _application_failure):
+        failure = convert(error)
+        assert failure.code == 'ax_window_unmatched'
+        assert failure.retryable is False
+        assert failure.details == {'retry_requires': 'window_identity_or_state_changed'}
+        assert 'private native title' not in failure.message
+        assert 'window is present' in failure.message
+        assert 'Stop repeating' in failure.recovery_hint
+        assert 'obscured parent' in failure.recovery_hint

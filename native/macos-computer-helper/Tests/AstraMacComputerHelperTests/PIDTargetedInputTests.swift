@@ -145,6 +145,10 @@ import Testing
     #expect(delivered[1].event.type == .keyUp)
     #expect(delivered[1].event.getIntegerValueField(.keyboardEventKeycode) == 9)
     #expect(delivered[1].event.flags.contains(.maskCommand))
+    try poster.post(.unicodeKeyDown(unicode), to: 777, marker: marker)
+    try poster.post(.unicodeKeyUp(unicode), to: 777, marker: marker)
+    #expect(delivered[2].event.flags.isEmpty)
+    #expect(delivered[3].event.flags.isEmpty)
 }
 
 @Test func sharedPIDPointerGuardDoesNotBindKeyboardFocusAcrossAFocusChangingClick() throws {

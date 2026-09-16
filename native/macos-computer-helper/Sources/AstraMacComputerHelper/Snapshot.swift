@@ -1479,17 +1479,27 @@ func focusedAncestorBranch<Element>(
     isOwned: (Element) -> Bool,
     parent: (Element) -> Element?
 ) -> Element? {
-    guard isOwned(root), isOwned(focused), !same(root, focused) else { return nil }
+    focusedAncestorPath(root: root, focused: focused, same: same,
+        isOwned: isOwned, parent: parent).last
+}
+
+func focusedAncestorPath<Element>(
+    root: Element, focused: Element,
+    same: (Element, Element) -> Bool,
+    isOwned: (Element) -> Bool,
+    parent: (Element) -> Element?
+) -> [Element] {
+    guard isOwned(root), isOwned(focused), !same(root, focused) else { return [] }
     var current = focused
     var visited: [Element] = []
     for _ in 0..<32 {
-        guard !visited.contains(where: { same($0, current) }) else { return nil }
+        guard !visited.contains(where: { same($0, current) }) else { return [] }
         visited.append(current)
-        guard let next = parent(current), isOwned(next) else { return nil }
-        if same(next, root) { return current }
+        guard let next = parent(current), isOwned(next) else { return [] }
+        if same(next, root) { return visited }
         current = next
     }
-    return nil
+    return []
 }
 
 func insertingFocusedBranch<Element>(
@@ -1822,14 +1832,34 @@ func truncateUTF8WithStatus(
     return (result, false)
 }
 
+func prioritizeSheetChildren<Element>(
+    _ children: [Element], isButton: (Element) -> Bool,
+    isFocusedBranch: (Element) -> Bool
+) -> [Element] {
+    var buttons: [Element] = []
+    var focused: [Element] = []
+    var others: [Element] = []
+    for child in children {
+        if isButton(child) { buttons.append(child) }
+        else if isFocusedBranch(child) { focused.append(child) }
+        else { others.append(child) }
+    }
+    return buttons + focused + others
+}
+
 private final class SystemAXNodeAttributeProvider: AXNodeAttributeProvider {
     private let element: AXUIElement
 
     private let recoverFocusedBranch: Bool
+    private let inSheet: Bool
+    private let sheetFocusedPath: [AXUIElement]?
 
-    init(element: AXUIElement, recoverFocusedBranch: Bool = false) {
+    init(element: AXUIElement, recoverFocusedBranch: Bool = false, inSheet: Bool = false,
+         sheetFocusedPath: [AXUIElement]? = nil) {
         self.element = element
         self.recoverFocusedBranch = recoverFocusedBranch
+        self.inSheet = inSheet
+        self.sheetFocusedPath = sheetFocusedPath
     }
 
     func stringValue(for attribute: String) -> BoundedAXStringResult {
@@ -1854,22 +1884,39 @@ private final class SystemAXNodeAttributeProvider: AXNodeAttributeProvider {
             children: children, remaining: remaining, same: { CFEqual($0, $1) },
             recover: missingFocusedBranch
         ) : children
-        return complete.map { SystemAXNodeAttributeProvider(element: $0) }
+        let role = AXNodeReader.stringAttribute(element, kAXRoleAttribute)
+        let sheet = inSheet || (role.status == .complete && role.value == kAXSheetRole)
+        // Resolve the same-process ancestry once per sheet observation. It only
+        // changes read order for children already returned by AXChildren.
+        let focusedPath = sheetFocusedPath ?? (sheet ? ownedFocusedPath() : [])
+        // File-column trees can exhaust the AX deadline before later Open/Cancel
+        // siblings. Read those immediate controls first without expanding the
+        // budget or inventing descendants; preserve order within both groups.
+        let ordered = sheet ? prioritizeSheetChildren(complete, isButton: {
+            let role = AXNodeReader.stringAttribute($0, kAXRoleAttribute)
+            return role.status == .complete && role.value == kAXButtonRole
+        }, isFocusedBranch: { child in focusedPath.contains { CFEqual($0, child) } }) : complete
+        return ordered.map { SystemAXNodeAttributeProvider(element: $0, inSheet: sheet,
+            sheetFocusedPath: sheet ? focusedPath : nil) }
     }
 
     private func missingFocusedBranch() -> AXUIElement? {
         guard AXNodeReader.stringAttribute(element, kAXRoleAttribute).value == kAXWindowRole else { return nil }
+        return ownedFocusedPath().last
+    }
+
+    private func ownedFocusedPath() -> [AXUIElement] {
         func pid(_ node: AXUIElement) -> pid_t? {
             observationAXCall(element: node, fallback: nil as pid_t?) {
                 var result: pid_t = 0
                 return AXUIElementGetPid(node, &result) == .success && result > 0 ? result : nil
             }
         }
-        guard let owner = pid(element) else { return nil }
+        guard let owner = pid(element) else { return [] }
         let app = AXUIElementCreateApplication(owner)
         let (error, value) = observationAXAttribute(app, kAXFocusedUIElementAttribute)
-        guard error == .success, let focused = decodeAXElement(value) else { return nil }
-        return focusedAncestorBranch(root: element, focused: focused, same: { CFEqual($0, $1) },
+        guard error == .success, let focused = decodeAXElement(value) else { return [] }
+        return focusedAncestorPath(root: element, focused: focused, same: { CFEqual($0, $1) },
             isOwned: { pid($0) == owner }, parent: { node in
                 let (error, value) = observationAXAttribute(node, kAXParentAttribute)
                 return error == .success ? decodeAXElement(value) : nil

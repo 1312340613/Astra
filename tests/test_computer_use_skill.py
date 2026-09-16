@@ -320,10 +320,10 @@ def test_catalog_binding_guidance_requires_a_current_bindable_ref():
             content,
         )
         assert "`ax_window_unmatched`" in content
-        assert re.search(
-            r"ax_window_unmatched.*refresh (?:the )?catalog.*(?:obtain |get |new )refs",
-            content,
-        )
+        assert ("stop repeated catalog/bind calls while it is unchanged" in content
+                or "状态未变时停止重复绑定" in content)
+        assert ("after the panel state changes, refresh the catalog and obtain new refs" in content
+                or "面板状态改变后刷新目录获取新引用" in content)
         assert "never reuse" in content
         assert "rebind" in content
         assert "old ref" in content
@@ -334,7 +334,9 @@ def test_current_tree_documents_catalog_and_acknowledgement_safety_boundaries():
     for required in (
         "exact refs from the latest catalog",
         "choose only `bindable=true` catalog windows",
-        "on `ax_window_unmatched`, refresh the catalog and obtain new refs",
+        "`ax_window_unmatched` 表示窗口仍在但缺少唯一 ax 匹配",
+        "状态未变时停止重复绑定",
+        "面板状态改变后刷新目录获取新引用",
         "never reuse or implicitly rebind an old ref",
         "one snapshot permits one act",
         "after `unknown_outcome`, timeout, cancellation, or helper loss, never retry or replay",

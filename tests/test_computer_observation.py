@@ -86,6 +86,42 @@ def test_ambiguous_apps_or_windows_do_not_auto_select():
     assert window_transition([], "test", "old", {"old"})["status"] == "application_not_observed"
 
 
+def test_unmatched_panel_does_not_suggest_its_obscured_parent():
+    apps = catalog(identities=("old",))
+    parent = apps[0]["windows"][0]
+    parent["bounds"] = {"x": 0, "y": 30, "width": 1352, "height": 768}
+    panel = {"window_ref": "unmatched-panel", "title": "Open", "bindable": False,
+             "binding_status": "ax_window_unmatched",
+             "bounds": {"x": 236, "y": 190, "width": 880, "height": 448}}
+    apps[0]["windows"].append(panel)
+    result = window_transition(apps, "test", "old", {"old"})
+    assert result["status"] == "unmatched_window_observed"
+    assert result["unmatched_window_refs"] == ["unmatched-panel"]
+    assert "next_observation" not in result
+    panel.pop("bounds")
+    assert "next_observation" not in window_transition(apps, "test", "old", {"old"})
+
+
+def test_unrelated_unmatched_window_does_not_block_exact_previous_target():
+    apps = catalog(identities=("old",))
+    apps[0]["windows"][0]["bounds"] = {"x": 0, "y": 0, "width": 500, "height": 400}
+    apps[0]["windows"].append({"window_ref": "other", "bindable": False,
+        "bounds": {"x": 600, "y": 0, "width": 300, "height": 200}})
+    result = window_transition(apps, "test", "old", {"old"})
+    assert result["observation_reason"] == "exact_previous_target"
+    assert result["next_observation"]["arguments"]["window_ref"] == "ref-old"
+
+
+def test_new_bindable_panel_can_be_suggested_but_not_if_it_is_also_obscured():
+    apps = catalog(identities=("old", "new"))
+    for window in apps[0]["windows"]:
+        window["bounds"] = {"x": 0, "y": 0, "width": 500, "height": 400}
+    assert window_transition(apps, "test", "old", {"old"})["next_observation"]["arguments"]["window_ref"] == "ref-new"
+    apps[0]["windows"].append({"window_ref": "unmatched", "bindable": False,
+        "bounds": {"x": 20, "y": 20, "width": 300, "height": 200}})
+    assert "next_observation" not in window_transition(apps, "test", "old", {"old"})
+
+
 def test_duplicate_tab_titles_never_claim_requested_tab_still_present():
     tab = {
         "role": "AXRadioButton",

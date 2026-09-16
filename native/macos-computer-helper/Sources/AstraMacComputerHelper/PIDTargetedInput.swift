@@ -86,6 +86,9 @@ final class CGPIDTargetedInputPoster: PIDTargetedInputPosting {
             guard !units.isEmpty,
                   let keyboard = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: isDown)
             else { throw SyntheticInputFailure(error: .invalidAction, inputStarted: false) }
+            // Plain text must not inherit a preceding shortcut's modifier state
+            // (e.g. Command-A turning subsequent Unicode into more shortcuts).
+            keyboard.flags = []
             keyboard.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
             value = keyboard
         case let .virtualKeyDown(keyCode, flags), let .virtualKeyUp(keyCode, flags):

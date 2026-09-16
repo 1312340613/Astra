@@ -243,6 +243,7 @@ enum WindowObservationError: Error {
     case permissionDenied(String)
     case staleTarget
     case overlayBlocked
+    case axWindowUnmatched
     case targetGone
     case targetNotFrontmost
     case invalidScope
@@ -1595,6 +1596,7 @@ final class SystemWindowObserver: WindowObserving {
             )
         try verifyCaptureIdentity(target: targetIdentity, before: beforeIdentity, after: beforeIdentity)
         let captureBounds: CGRect
+        var sheetImageRoot: SCWindow?
         let pixelSize: CGSize
         let backingScale: CGFloat
         let observationBounds: CGRect
@@ -1627,25 +1629,43 @@ final class SystemWindowObserver: WindowObserving {
             )
             captureBounds = CGRect(origin: .zero, size: window.frame.size)
             observationBounds = window.frame
+            let role = AXNodeReader.stringAttribute(expectedAXWindow, kAXRoleAttribute)
+            if role.status == .complete && role.value == kAXSheetRole {
+                guard let root = sheetCaptureWindow(element: expectedAXWindow, pid: target.pid,
+                    windows: shareableBefore.windows) else { throw WindowObservationError.axWindowUnmatched }
+                sheetImageRoot = root
+            }
+            let imageWindow = sheetImageRoot ?? window
+            let imageGeometry = WindowGeometry(bounds: imageWindow.frame, backingScale: geometry.backingScale)
+            let captured: CGImage
             if let backgroundSession {
-                image = try backgroundSession.capture { selectedWindowID in
+                captured = try backgroundSession.capture { selectedWindowID in
                     guard selectedWindowID == window.windowID else {
                         throw WindowObservationError.targetGone
                     }
                     return try waitForImage(
-                        window: window,
-                        geometry: geometry,
+                        window: imageWindow,
+                        geometry: imageGeometry,
                         focusedTransientActive: false
                     )
                 }
             } else {
-                image = try waitForImage(
-                    window: window,
-                    geometry: geometry,
-                    focusedTransientActive: CFHash(focusedBefore) != CFHash(expectedAXWindow)
-                        || appOwnedOverlayActive
+                captured = try waitForImage(
+                    window: imageWindow,
+                    geometry: imageGeometry,
+                    focusedTransientActive: sheetImageRoot == nil && (CFHash(focusedBefore) != CFHash(expectedAXWindow)
+                        || appOwnedOverlayActive)
                 )
             }
+            if sheetImageRoot != nil {
+                // SCK may render the whole parent composite for a sheet ID,
+                // scaled into the sheet's requested dimensions. Capture the
+                // proven owned root at its own size, then publish ONLY the sheet.
+                let crop = try sheetImageCropRect(source: imageGeometry, target: window.frame,
+                    imageWidth: captured.width, imageHeight: captured.height)
+                guard let cropped = captured.cropping(to: crop) else { throw WindowObservationError.axSerializationFailed }
+                image = cropped
+            } else { image = captured }
             let capturedGeometry = try resolvedWindowImageGeometry(
                 requested: geometry,
                 imageWidth: image.width,
@@ -1657,6 +1677,11 @@ final class SystemWindowObserver: WindowObserving {
         }
         metrics.record(.image, startedAt: imageStart)
         let shareableAfter = try metrics.measure(.inventory) { try waitForShareableContent() }
+        if let root = sheetImageRoot {
+            guard let current = sheetCaptureWindow(element: expectedAXWindow, pid: target.pid,
+                windows: shareableAfter.windows), current.windowID == root.windowID,
+                current.frame == root.frame else { throw WindowObservationError.targetGone }
+        }
         guard let windowAfter = matchingCurrentWindow(for: target, in: shareableAfter.windows) else {
             throw WindowObservationError.targetGone
         }
@@ -2072,7 +2097,7 @@ final class SystemWindowObserver: WindowObserving {
         }
         let mapped: [TargetAXWindowRecord]? = mapCompleteAXElements(elements) { element in
             guard let bounds = AXNodeReader.frameAttribute(element) else { return nil }
-            let title = AXNodeReader.stringAttribute(element, kAXTitleAttribute)
+            let title = accessibilityWindowName(element)
             guard title.status == .complete else { return nil }
             let role = AXNodeReader.stringAttribute(element, kAXRoleAttribute)
             let subrole = AXNodeReader.stringAttribute(element, kAXSubroleAttribute)
@@ -3246,7 +3271,7 @@ final class SystemWindowObserver: WindowObserving {
                 // when no retained object is available.
                 return CFEqual(element, expectedElement)
             }
-            let titleResult = AXNodeReader.stringAttribute(element, kAXTitleAttribute)
+            let titleResult = accessibilityWindowName(element)
             guard titleResult.status == .complete else { return false }
             let title = titleResult.value ?? ""
             return windowTitlesMatch(screenCaptureTitle: target.title, accessibilityTitle: title)
@@ -3328,12 +3353,16 @@ final class SystemWindowObserver: WindowObserving {
         else { return nil }
         var focusedPID = pid_t()
         guard AXUIElementGetPid(focused, &focusedPID) == .success else { return nil }
-        let title = AXNodeReader.stringAttribute(focused, kAXTitleAttribute)
+        let title = accessibilityWindowName(focused)
+        let role = AXNodeReader.stringAttribute(focused, kAXRoleAttribute)
+        let provenSheet = role.status == .complete && role.value == kAXSheetRole &&
+            (completeObservedAXWindows(app) ?? []).filter { CFEqual($0, focused) }.count == 1
         return PIDAXFocusedWindowObservation(
             pid: focusedPID,
             bounds: focusedBounds,
             axIdentity: CFHash(focused),
-            title: title.status == .complete ? title.value : nil
+            title: title.status == .complete ? (title.value ?? "") : nil,
+            isProvenSheet: provenSheet
         )
     }
 
@@ -3498,6 +3527,7 @@ struct PIDAXFocusedWindowObservation: Equatable {
     let bounds: CGRect
     let axIdentity: CFHashCode
     let title: String?
+    var isProvenSheet: Bool = false
 }
 
 struct PIDScreenCaptureWindowObservation: Equatable {
@@ -3556,20 +3586,28 @@ struct ForegroundPIDActionStateFactory {
     private func mappedFocusedWindow(targetPID: pid_t) -> PIDFocusedWindowObservation? {
         guard let focused = focusedAXWindow(),
               focused.pid == targetPID,
-              let focusedTitle = focused.title,
-              !focusedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              let focusedTitle = focused.title
         else { return nil }
         let candidates = screenCaptureWindows().filter { candidate in
             candidate.pid == focused.pid &&
                 candidate.isOnScreen &&
                 approximatelyEqual(candidate.bounds, focused.bounds)
         }
+        // An unnamed nested sheet still has a retained AX identity and an owned
+        // parent chain. It may map only to a sole, also explicitly unnamed CG
+        // candidate. make() additionally checks the exact window ID and identity.
+        let unnamedSheet = focused.isProvenSheet && focused.axIdentity != 0 &&
+            focusedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         // Stacked browser windows often have identical bounds. Require complete
         // title evidence before disambiguating them; an unnamed sibling may be
         // the focused window. make() still checks native ID, bounds and AX identity.
         guard candidates.allSatisfy({ candidate in
             guard let title = candidate.title else { return false }
-            return !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if unnamedSheet {
+                return candidates.count == 1 && title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            return !focusedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }) else { return nil }
         let matchingTitles = candidates.filter { candidate in
             guard let title = candidate.title else { return false }

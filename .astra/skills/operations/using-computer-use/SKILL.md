@@ -22,8 +22,7 @@ description: Use when controlling macOS interfaces with computer_* tools.
    `computer_focus` is explicit advanced; `computer_snapshot` refreshes the bound target.
    `/computer status` is cached and nonactivating; `computer_status` queries the helper and refreshes that cache.
    Neither status path prompts nor opens System Settings. 仅应用户要求运行 `/computer setup`。
-   Choose only `bindable=true` catalog windows. On `ax_window_unmatched`, refresh
-   the catalog and obtain new refs; never reuse or implicitly rebind an old ref.
+   Choose only `bindable=true` catalog windows. `ax_window_unmatched` 表示窗口仍在但缺少唯一 AX 匹配，不代表引用过期或系统禁令。状态未变时停止重复绑定；面板状态改变后刷新目录获取新引用。Never reuse or implicitly rebind an old ref. 不把被遮挡父窗口当替代目标。
 2. Target-window capture/element refs default. Display needs explicit once approval.
    Latest snapshot: one snapshot permits one act. 成功的 `computer_get_app_state`、
    `computer_act`、`computer_resume` 返回的新 snapshot_id 和 element refs 可用于下一步；

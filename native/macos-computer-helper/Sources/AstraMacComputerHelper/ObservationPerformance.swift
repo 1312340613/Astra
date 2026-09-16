@@ -172,7 +172,7 @@ struct CatalogAXWindowRecord {
 func catalogAXWindowRecords(pid: pid_t) -> [CatalogAXWindowRecord] {
     (completeObservedAXWindows(AXUIElementCreateApplication(pid)) ?? []).compactMap {
         guard let bounds = AXNodeReader.frameAttribute($0) else { return nil }
-        return CatalogAXWindowRecord(element: $0, bounds: bounds, title: AXNodeReader.stringAttribute($0, kAXTitleAttribute))
+        return CatalogAXWindowRecord(element: $0, bounds: bounds, title: accessibilityWindowName($0))
     }
 }
 
