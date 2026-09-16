@@ -171,6 +171,15 @@ class BrowserBackendRouter:
         if first_error:
             raise first_error
 
+    async def release_session(self):
+        """Rearm only after both transports have definitely released ownership."""
+        await self.close_connection()
+        self.extension = None
+        self.default = self.primary
+        self._startup_error = ''
+        self._ownership_error = False
+        self._closed = False
+
     # Explicit protocol methods retain the same bound-tab dispatch as the
     # optional interactive operations handled by __getattr__ below.
     async def interactive_click(self, *args, **kwargs) -> str:

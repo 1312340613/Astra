@@ -345,7 +345,8 @@ class BrowserSessionManager:
     """Durable browser session state.
 
     Persists sessions and tabs in SQLite (WAL) so a page-access workflow
-    survives restarts, model switches, and session switches. The manager
+    retains history across restarts and session switches. Live tool handles
+    are scoped separately to each conversation activation. The manager
     enforces the execution ladder and the takeover/resume lifecycle, and
     sanitizes every snapshot before it touches disk.
     """

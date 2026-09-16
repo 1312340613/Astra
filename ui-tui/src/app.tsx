@@ -1869,7 +1869,7 @@ export default function App({ appshotClientFactory, appshotManifestReader }: { a
             "YOLO: /yolo [on|off|status] works during replies. Ctrl+Y also works in approval panels.",
             `CHAT     /image  /bar  /minimal${localMode ? `  ${localMode.command}` : ""}  /reset  /compress  /undo  /retry  /think`,
             "MODEL    /model  /connect  /persona",
-            "TOOLS    /search  /tool  /memory  /skills  /learn  /tools  /computer  /conclave",
+            "TOOLS    /search  /tool  /memory  /skills  /learn  /tools  /browser  /computer  /conclave",
             "SESSION  /tasks  /resume  /cancel  /session  /handoff",
             "CAPTURE  /appshot status · shortcut · enable · disable",
             "DISPLAY  /theme  /timeline",

@@ -132,14 +132,17 @@ first browser operation enters the serialized readiness/connection path.
 The extension endpoint has one runtime owner. `already owned` reports an advisory
 owner PID; verify the process, start time, terminal and listener before identifying
 the instance. A quiet CPU sample does not mean its session can be discarded.
-Continue in the owning instance, or let the user normally exit the instance they
-no longer need. Disconnecting the extension does not release the process lock;
+Continue in the owning instance, or run `/browser stop` there to release control
+without exiting Astra. `/browser status` inspects without acquiring the endpoint.
+Switching or resetting conversations also releases old connections and logical
+handles; persisted rows remain history only. Release drains dispatched operations.
+If cleanup fails, new work stays blocked until `/browser stop` succeeds. Disconnecting the extension does not release the process lock;
 do not delete `owner.lock` or terminate another session to seize control. Diagnostic
 output should select only necessary PID/port fields, never dump `endpoint.json`
 with its connection token. A browser debugger banner does not identify this lock's
 owner.
 
-After the owner exits, retry tab discovery and bind with fresh handles. A successful
+After the owner releases control or exits, retry tab discovery and bind with fresh handles. A successful
 empty list means no authorized tabs are discoverable, not that the lock is still
 held. For an existing user page, restore **Allow current tab** and attach it; do not
 silently open a substitute form. A pre-attachment failure cannot be recovered with

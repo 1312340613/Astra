@@ -4,7 +4,38 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
+
+
+# Browser children need OS/GUI configuration, not the agent's model/mail tokens
+# or Python/Node/dynamic-library injection settings. Compare case-insensitively
+# for Windows, preserving original spellings and values.
+_BROWSER_ENV_KEYS = frozenset("""
+PATH HOME USER LOGNAME USERNAME USERPROFILE SYSTEMROOT WINDIR SYSTEMDRIVE COMSPEC
+PATHEXT PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 PROGRAMDATA ALLUSERSPROFILE
+APPDATA LOCALAPPDATA HOMEDRIVE HOMEPATH TEMP TMP TMPDIR LANG LANGUAGE TZ
+LC_ALL LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES
+LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT LC_IDENTIFICATION
+DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_CACHE_HOME
+XDG_DATA_HOME XDG_DATA_DIRS DBUS_SESSION_BUS_ADDRESS DESKTOP_SESSION
+XDG_CURRENT_DESKTOP XDG_SESSION_TYPE SESSIONNAME __CF_USER_TEXT_ENCODING
+WSL_DISTRO_NAME WSL_INTEROP WSLENV HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+SSL_CERT_FILE SSL_CERT_DIR SYSTEM_CERTIFICATE_PATH
+""".split())
+
+
+def browser_child_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Copy the bounded platform environment used by browser/relay children."""
+    source = os.environ if environ is None else environ
+    result = {key: value for key, value in source.items()
+              if key.upper() in _BROWSER_ENV_KEYS}
+    for key in list(result):
+        if key.upper() == "WSLENV":
+            # WSLENV can explicitly export variables across the Windows boundary.
+            allowed = {name.upper() for name in result} - {"WSLENV"}
+            result[key] = ":".join(item for item in result[key].split(":")
+                                   if item.split("/", 1)[0].upper() in allowed)
+    return result
 
 
 def mark_agent_environment(

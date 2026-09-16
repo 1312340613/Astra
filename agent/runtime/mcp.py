@@ -721,30 +721,63 @@ class MCPManager:
             schema = getattr(remote, "inputSchema", None) or {"type": "object", "properties": {}}
             description = str(getattr(remote, "description", "") or f"MCP tool {remote_name} from {server}")
             risk = str(risk_overrides.get(remote_name, default_risk)) if isinstance(risk_overrides, dict) else default_risk
+            annotations = getattr(remote, "annotations", None)
+            read_hint = (annotations.get("readOnlyHint") if isinstance(annotations, dict)
+                         else getattr(annotations, "readOnlyHint", None))
+            read_only = risk == "read" or (risk == "network" and read_hint is True)
+            call_timeout = float(config.get("timeout", 60))
 
             async def invoke(
                 _remote_name=remote_name,
                 _local_name=local_name,
                 _server=server,
                 _artifact_dir=registry.artifact_dir,
+                _session=session,
+                _read_only=read_only,
+                _timeout=call_timeout,
                 **kwargs,
             ):
-                current_session = self._sessions.get(_server, session)
+                current_session = self._sessions.get(_server)
+                if current_session is None or current_session is not _session:
+                    return ToolFailure(
+                        code="mcp_stale_connection" if current_session is not None else "mcp_unavailable",
+                        message=f"MCP connection for {_server} changed or is unavailable; this call was not dispatched.",
+                        retryable=True,
+                        recovery_hint="Wait for reconnection, rediscover tools and obtain fresh observations/references. Do not replay an earlier uncertain action.",
+                        tool_name=_local_name,
+                        details={"mcp_server": _server, "mcp_tool": _remote_name, "dispatch_state": "not_dispatched"},
+                    )
+
+                def disconnected(error: str) -> str:
+                    state = "auth_required" if self._auth_failure(error) else "error"
+                    # An older call must never discard a replacement connection.
+                    if self._sessions.get(_server) is _session:
+                        self._sessions.pop(_server, None)
+                        instruction = "" if _read_only else " Outcome unknown; observe before any further action. Do not replay."
+                        self._set_status(_server, state, error=error + instruction)
+                        self._reconnect_event.set()
+                    return state
+
                 try:
-                    result = await current_session.call_tool(_remote_name, arguments=kwargs)
+                    # Own the deadline so an expired mutating call cannot become
+                    # a generic timeout that suggests repeating the operation.
+                    async with asyncio.timeout(_timeout):
+                        result = await current_session.call_tool(_remote_name, arguments=kwargs)
+                except asyncio.CancelledError:
+                    disconnected("MCP call cancelled after dispatch")
+                    raise
                 except Exception as exc:
                     error = f"{type(exc).__name__}: {exc}"
-                    state = "auth_required" if self._auth_failure(error) else "error"
-                    self._sessions.pop(_server, None)
-                    self._set_status(_server, state, error=error)
-                    self._reconnect_event.set()
+                    state = disconnected(error)
                     return ToolFailure(
-                        code="mcp_auth_required" if state == "auth_required" else "mcp_unavailable",
-                        message=f"MCP server {_server} is reconnecting: {error}",
-                        retryable=True,
-                        recovery_hint="Retry after the MCP server reconnects; re-authenticate first if required.",
+                        code=("mcp_auth_required" if state == "auth_required" else "mcp_unavailable") if _read_only else "mcp_unknown_outcome",
+                        message=f"MCP server {_server} lost the call result: {error}" + ("" if _read_only else " The action may already have happened."),
+                        retryable=_read_only,
+                        recovery_hint=("Retry the read after reconnection; re-authenticate first if required. Obtain fresh references."
+                                       if _read_only else "Do not repeat this action. After reconnection, observe the target to establish what happened before deciding the next step. Cancellation or timeout does not roll back remote effects."),
                         tool_name=_local_name,
-                        details={"mcp_server": _server, "mcp_tool": _remote_name},
+                        partial=not _read_only,
+                        details={"mcp_server": _server, "mcp_tool": _remote_name, "dispatch_state": "unknown"},
                     )
                 content = list(getattr(result, "content", []) or [])
                 structured = getattr(result, "structuredContent", None)
@@ -772,10 +805,11 @@ class MCPManager:
                     return ToolFailure(
                         code="mcp_tool_error",
                         message=f"[MCPToolError] {_server}/{_remote_name}: {detail}",
-                        retryable=bool(_MCP_RETRYABLE_ERROR.search(detail)),
+                        retryable=_read_only and bool(_MCP_RETRYABLE_ERROR.search(detail)),
                         recovery_hint=(
                             "Check the MCP server configuration and logs. Retry only for a transient "
-                            "network, timeout, rate-limit, or server error."
+                            "network, timeout, rate-limit, or server error." if _read_only else
+                            "The server reported an error, which does not prove the action had no effect. Observe the target before deciding the next step; do not repeat automatically."
                         ),
                         tool_name=_local_name,
                         details={
@@ -841,14 +875,16 @@ class MCPManager:
                 description=description,
                 parameters=schema,
                 fn=invoke,
-                timeout=float(config.get("timeout", 60)),
+                timeout=None,  # invoke owns the configured, dispatch-aware deadline
                 risk=risk,
+                cache_results=False,
                 approval="on_risk",
                 group=f"mcp:{_SAFE_NAME.sub('_', server).strip('_') or 'server'}",
                 permission_check=permission_check,
                 permission_grant=side_effect_approvals.grant,
             ))
         registry.replace_owned_tools(f"mcp:{server}", definitions)
+        self._sessions[server] = session
         return len(definitions)
 
     @staticmethod

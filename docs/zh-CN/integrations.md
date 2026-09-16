@@ -76,6 +76,9 @@ QQ 图片经公开 URL 检查与大小限制后下载，再作为原生多模态
 
 <a id="web-search"></a>
 
+
+MCP 派发后的失败会区分读取与动作：可能有副作用的调用在超时或应答丢失时返回 `mcp_unknown_outcome`，不得自动重放。重连后先观察目标、取得新引用，再决定下一步。配置 `tool_risks` / `risk` 为 `read`，或 network 工具声明 `readOnlyHint=true`，才提供读取恢复提示；没有声明时保守处理。这些提示不会降低原有审批要求，旧连接的工具定义不能在替换后的连接上派发。
+
 ## 网页搜索
 
 `search_web` 支持 `provider=auto|exa|searxng`。`/search` 查看默认值，`/search auto|exa|searxng` 持久切换。auto 对新闻、研究、模型发布和基准问题优先 Exa，普通问题先用 SearXNG；结果为空或失败时，同一次工具调用内相互回退。不设固定每轮搜索次数，但重复调用和 ReAct 上限仍防止无限循环。不使用 DuckDuckGo。

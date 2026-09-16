@@ -49,6 +49,12 @@ class ExtensionBrowserBackend:
                   'effective checked-state routes are reported by snapshots; screenshots require CDP')
         return self.transport.connected, (detail if self.transport.connected else 'Start control in the Astra browser control extension popup')
 
+    async def release_session(self):
+        transport = self.transport
+        await self.close_connection()
+        if isinstance(transport, BrowserControlTransport):
+            self.transport = BrowserControlTransport(transport.directory, timeout=transport.timeout)
+
     def _operation_support(self, operation):
         probe = getattr(self.transport, 'operation_support', None)
         return probe(operation) if callable(probe) else None

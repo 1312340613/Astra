@@ -568,7 +568,7 @@ class FakeErrorSession:
 def test_mcp_is_error_becomes_structured_tool_failure():
     registry = ToolRegistry(ToolPolicy(mode="permissive"))
     manager = MCPManager(max_output_chars=100)
-    manager._register_tools(registry, "demo server", FakeErrorSession(), [FakeRemoteTool()], {})
+    manager._register_tools(registry, "demo server", FakeErrorSession(), [FakeRemoteTool()], {"risk": "read"})
 
     result = run(registry.execute("mcp__demo_server__lookup_item", {"query": "hello"}))
 

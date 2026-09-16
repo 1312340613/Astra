@@ -35,7 +35,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from .process_env import hidden_process_creationflags
+from .process_env import browser_child_environment, hidden_process_creationflags
 from .browser_session import BackendCapabilities
 
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ def _to_windows_path(path: str) -> str:
     try:
         result = subprocess.run(
             ["wslpath", "-w", path],
-            capture_output=True, text=True, timeout=5,
+            env=browser_child_environment(), capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
@@ -223,6 +223,7 @@ async def _force_kill_process_tree(proc: asyncio.subprocess.Process) -> None:
             str(proc.pid),
             "/T",
             "/F",
+            env=browser_child_environment(),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             creationflags=hidden_process_creationflags(),
@@ -288,7 +289,7 @@ def _get_windows_gateway() -> str:
         import subprocess
         result = subprocess.run(
             ["ip", "route", "show", "default"],
-            capture_output=True, text=True, timeout=5,
+            env=browser_child_environment(), capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
             parts = result.stdout.strip().split()
@@ -325,7 +326,7 @@ def _find_windows_python() -> str:
     try:
         proc = subprocess.run(
             ["cmd.exe", "/c", "where", "python"],
-            capture_output=True, text=True, timeout=5,
+            env=browser_child_environment(), capture_output=True, text=True, timeout=5,
         )
         if proc.returncode == 0:
             for line in proc.stdout.strip().splitlines():
@@ -353,14 +354,14 @@ def _get_windows_temp() -> str:
         import subprocess
         proc = subprocess.run(
             ["cmd.exe", "/c", "echo", "%TEMP%"],
-            capture_output=True, text=True, timeout=5,
+            env=browser_child_environment(), capture_output=True, text=True, timeout=5,
         )
         win_temp = proc.stdout.strip()
         if win_temp and proc.returncode == 0:
             # Convert to WSL path: C:\Users\... -> /mnt/c/Users/...
             conv = subprocess.run(
                 ["wslpath", "-u", win_temp],
-                capture_output=True, text=True, timeout=3,
+                env=browser_child_environment(), capture_output=True, text=True, timeout=3,
             )
             if conv.returncode == 0 and conv.stdout.strip():
                 result = conv.stdout.strip()
@@ -509,6 +510,7 @@ class CdpConnection:
 
         self._process = await asyncio.create_subprocess_exec(
             *args,
+            env=browser_child_environment(),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=(
                 asyncio.subprocess.DEVNULL
@@ -830,13 +832,14 @@ class CdpConnection:
         if "\\" in win_python:
             # D:\Python\python.exe -> /mnt/d/Python/python.exe
             try:
-                r = _sp.run(["wslpath", "-u", win_python], capture_output=True, text=True, timeout=3)
+                r = _sp.run(["wslpath", "-u", win_python], env=browser_child_environment(), capture_output=True, text=True, timeout=3)
                 if r.returncode == 0 and r.stdout.strip():
                     launch_python = r.stdout.strip()
             except Exception:
                 pass
         self._relay_process = _sp.Popen(
             [launch_python, win_relay],
+            env=browser_child_environment(),
             stdout=_sp.PIPE,
             stderr=_sp.DEVNULL,
         )
@@ -1207,6 +1210,7 @@ class CdpBrowserBackend:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._chrome_path, "--version",
+                env=browser_child_environment(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -1288,6 +1292,7 @@ class CdpBrowserBackend:
             import subprocess
             subprocess.Popen(
                 args,
+                env=browser_child_environment(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -1652,6 +1657,7 @@ class CdpBrowserBackend:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *run_args,
+                env=browser_child_environment(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=hidden_process_creationflags(),
@@ -1709,7 +1715,7 @@ async def discover_chrome_debug_ports(
                 import subprocess as _sp
                 gw = _sp.run(
                     ["ip", "route", "show", "default"],
-                    capture_output=True, text=True, timeout=3,
+                    env=browser_child_environment(), capture_output=True, text=True, timeout=3,
                 )
                 if gw.returncode == 0:
                     parts = gw.stdout.strip().split()

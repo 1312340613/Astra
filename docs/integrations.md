@@ -103,6 +103,15 @@ Both stdio and streamable HTTP transports are supported; servers can be disabled
 individually. `${ENV_NAME}` placeholders resolve environment variables without
 storing credentials in JSON. See [the complete example](../config/mcp.example.json).
 
+
+MCP failures after dispatch distinguish reads from actions: a lost response or timeout
+from a potentially mutating tool returns `mcp_unknown_outcome` and forbids automatic
+replay. Reconnect, observe the target, and obtain fresh references before deciding
+what to do next. Explicit `tool_risks` / `risk` set to `read`, or `readOnlyHint=true`
+on a network tool, allow read recovery hints; unannotated tools are conservative.
+These hints do not reduce configured approval requirements. Old tool definitions
+cannot dispatch on a replacement connection.
+
 ## Web search
 
 `search_web` supports `provider=auto|exa|searxng`. Use `/search` to inspect the

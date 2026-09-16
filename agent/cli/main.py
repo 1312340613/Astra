@@ -77,6 +77,7 @@ from .vision_tile_preferences import (
 )
 from .context_index_commands import execute_context_index_command
 from .context_index_preferences import load_context_index_preferences
+from agent.cli.browser_commands import execute_browser_command
 from .computer_commands import execute_computer_command
 from .memory_commands import execute_memory_command
 from .skill_commands import execute_skill_command
@@ -402,6 +403,10 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
         agent.context.show_reasoning = not agent.context.show_reasoning
         state = "ON" if agent.context.show_reasoning else "OFF"
         print(f"  \033[90mThinking display: {state}\033[0m\n")
+
+    elif command == "/browser":
+        output, error = await execute_browser_command(parts[1:], agent.tools)
+        print(f"  {error or output}\n")
 
     elif command == "/computer":
         computer_runtime = getattr(agent, "_computer_runtime", None)
@@ -775,6 +780,7 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
     /learn              — Save skills directly; manually review and undo learning
     /connect <n> <url>  — Probe, save and switch a model connection
     /tools              — List available tools
+    /browser [status|stop] — Inspect or release this session’s browser control
     /computer [status|setup|stop] — Inspect, set up, or stop local macOS Computer Use
     /health             — Show harness diagnostics
     /doctor             — Run endpoint, policy, MCP and tracing diagnostics
@@ -986,7 +992,9 @@ async def _async_init(llm_config: LLMConfig, sandbox_timeout: int, workdir: str)
         finally:
             agent.context.save()
             if browser_backend is not None:
-                await browser_backend.close_connection()
+                stop_browser = tools.get("browser_stop")
+                if stop_browser is not None:
+                    await stop_browser.fn()
             await agent.close_external_memory()
             await mcp_manager.close()
             close = getattr(sandbox, "close", None)

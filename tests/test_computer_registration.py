@@ -512,8 +512,8 @@ def test_local_surfaces_register_after_image_tools_and_api_surface_does_not():
 def test_local_shutdown_paths_await_computer_teardown():
     root = Path(__file__).resolve().parents[1] / "agent" / "cli"
     expected_followups = {
-        "main.py": ("agent.context.save()", "browser_backend.close_connection()", "agent.close_external_memory()", "mcp_manager.close()", "await close()"),
-        "backend.py": ("await agent.context.save_async()", "browser_backend.close_connection()", "agent.close_external_memory()", "mcp_manager.close()", "await close()"),
+        "main.py": ("agent.context.save()", "await stop_browser.fn()", "agent.close_external_memory()", "mcp_manager.close()", "await close()"),
+        "backend.py": ("await agent.context.save_async()", "await stop_browser.fn()", "agent.close_external_memory()", "mcp_manager.close()", "await close()"),
         "tui_app.py": ("self.agent.context.save()", "self.agent.close_external_memory()", "await close()"),
     }
     for filename, followups in expected_followups.items():

@@ -154,6 +154,7 @@ from agent.cli.vision_tile_preferences import (
 )
 from agent.cli.context_index_commands import execute_context_index_command
 from agent.cli.context_index_preferences import load_context_index_preferences
+from agent.cli.browser_commands import execute_browser_command
 from agent.cli.computer_commands import ComputerStateEmitter, approval_choices, execute_computer_command
 from agent.cli.memory_commands import execute_memory_command
 from agent.cli.skill_commands import execute_skill_command
@@ -3097,6 +3098,10 @@ async def _main(startup_started: float):
                         _send({"type": "tool_result", "name": "learn", "output": output, "error": error, "code": ""})
                         if not any(not task.done() for task in manual_reviews):
                             _send({"type": "done"})
+                elif c == "/browser" or c.startswith("/browser "):
+                    output, error = await execute_browser_command(c.split()[1:], tools)
+                    _send({"type": "tool_result", "name": "browser", "output": output, "error": error, "code": ""})
+                    _send({"type": "done"})
                 elif c == "/computer" or c.startswith("/computer "):
                     try:
                         computer_args = shlex.split(c)[1:]
@@ -3596,7 +3601,9 @@ async def _main(startup_started: float):
                 _save_handoff(agent, task_store)
                 _run_memory_consolidation(memory_store)
             if browser_backend is not None:
-                await browser_backend.close_connection()
+                stop_browser = tools.get("browser_stop")
+                if stop_browser is not None:
+                    await stop_browser.fn()
             await agent.close_external_memory()
             await mcp_manager.close()
             close = getattr(sandbox, "close", None)

@@ -52,6 +52,7 @@ const SLASH_COMMANDS: SlashCommandSuggestion[] = [
   { command: "/skills", description: "list, inspect, or create local skills", takesArgs: true, group: "TOOLS" },
   { command: "/learn", description: "save skills, manually review, and undo changes", takesArgs: true, group: "TOOLS" },
   { command: "/tools", description: "list available tools", group: "TOOLS" },
+  { command: "/browser", description: "show or release this session’s browser control", takesArgs: true, group: "TOOLS" },
   { command: "/computer", description: "show, set up, or stop local macOS Computer Use", takesArgs: true, group: "TOOLS" },
   { command: "/conclave", description: "run multi-expert research panel", takesArgs: true, group: "TOOLS" },
   { command: "/appshot", description: "status · shortcut · enable · disable", takesArgs: true, group: "CAPTURE" },
@@ -280,6 +281,11 @@ const SESSION_SUBCOMMANDS: SlashCommandSuggestion[] = [
   { command: "export", description: "export a session to Markdown", completion: "/session export ", kind: "session" },
 ];
 
+const BROWSER_SUBCOMMANDS: SlashCommandSuggestion[] = [
+  { command: "status", description: "inspect browser control without acquiring it", completion: "/browser status", submitValue: "/browser status", kind: "command" },
+  { command: "stop", description: "release browser control; keep the user browser open", completion: "/browser stop", submitValue: "/browser stop", kind: "command" },
+];
+
 const COMPUTER_SUBCOMMANDS: SlashCommandSuggestion[] = [
   { command: "status", description: "show bounded Computer Use readiness without opening settings", completion: "/computer status", submitValue: "/computer status", kind: "command" },
   { command: "setup", description: "open only missing macOS privacy settings", completion: "/computer setup", submitValue: "/computer setup", kind: "command" },
@@ -298,6 +304,11 @@ export function slashCommandSuggestions(
   if (diagnosticsMatch) {
     const query = (diagnosticsMatch[1] ?? "").trim().toLowerCase();
     return DIAGNOSTIC_SECTIONS.filter((item) => fuzzyMatch(item.command, query));
+  }
+  const browserMatch = trimmed.match(/^\/browser(?:\s+([\s\S]*))?$/i);
+  if (browserMatch) {
+    const query = (browserMatch[1] ?? "").trim().toLowerCase();
+    return BROWSER_SUBCOMMANDS.filter((item) => item.command.startsWith(query));
   }
   const computerMatch = trimmed.match(/^\/computer(?:\s+([\s\S]*))?$/i);
   if (computerMatch && (trimmed.toLowerCase() === "/computer" || trimmed === "/computer " || computerMatch[1] !== undefined)) {

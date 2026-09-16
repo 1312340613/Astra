@@ -38,6 +38,7 @@ from ..browser_session import (
     sanitize_snapshot,
 )
 from ..tool_failure import ToolFailure
+from ..browser_lifecycle import BrowserLifecycle
 from .approval import ScopedApprovalStore, normalized_origin
 from .registry import ToolDef, ToolRegistry
 
@@ -80,9 +81,17 @@ def register_browser_tools(
         from ..browser_autoconnect import auto_browser_options
         manager.backend = BrowserBackendRouter(manager.backend, ExtensionBrowserBackend, **auto_browser_options())
 
-    # Module-scoped active session handle. Mirrors the closure pattern used
-    # by web.py — the agent works on one active browser session at a time.
-    active: dict[str, str] = {}
+    lifecycle = BrowserLifecycle(manager)
+    active = lifecycle.active
+    registry.hooks.on_session_end(lifecycle.end_session)
+    registry.hooks.on_before_tool(lifecycle.before_tool)
+
+    def register(tool: ToolDef) -> None:
+        tool.fn = lifecycle.wrap(tool.fn)
+        # Cached results cannot establish ownership or fresh remote references.
+        tool.cache_results = False
+        registry.register(tool)
+
     browser_approvals = ScopedApprovalStore(
         enabled=lambda: registry.approval_handler is not None,
         approved_scopes=registry.approved_permission_scopes,
@@ -102,6 +111,9 @@ def register_browser_tools(
         Returns (tab, error). On error, tab is None.
         """
         if tab_id:
+            owner = manager.get_session(active.get("session_id", ""))
+            if owner is None or tab_id not in owner.tabs:
+                return None, "[Browser Error] Unknown tab or expired handle for this session. Call browser_open/browser_connect and observe again."
             tab = manager.get_tab(tab_id)
             if tab is None:
                 return None, f"[Browser Error] Unknown tab: {tab_id}"
@@ -816,6 +828,8 @@ def register_browser_tools(
     # ── browser_status (diagnostic) ─────────────────────────────────
 
     async def _browser_status() -> str:
+        if lifecycle.release_state in {"releasing", "release_failed"}:
+            return f"Backend: unavailable ({lifecycle.release_state}); use /browser stop to finish release."
         ok, detail = await manager.backend_status()
         availability = "available" if ok else "idle" if "auto-connect: idle" in detail.lower() else "unavailable"
         backend_line = f"Backend: {availability} ({detail})"
@@ -832,7 +846,7 @@ def register_browser_tools(
 
     # ── Register ────────────────────────────────────────────────────
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_open",
         description=(
             "在持久浏览器会话中打开一个标签页（起始为 read_only 档）。"
@@ -862,7 +876,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_snapshot",
         description=(
             "读取当前标签页已存储快照；refresh=true 观察当前页面，不重新导航。"
@@ -891,7 +905,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_extract",
         description="对指定 URL 做一次只读正文提取（静态/无头），返回脱敏文本。",
         parameters={
@@ -907,7 +921,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_click",
         description=(
             "点击最新快照的 ref:<id> 或唯一 CSS 元素；返回观测结果和新快照，不能把派发成功当作任务成功。"
@@ -928,7 +942,7 @@ def register_browser_tools(
         permission_grant=browser_approvals.grant,
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_type",
         description=(
             "兼容填写接口：替换唯一目标输入框的内容并读回核对；新表单操作优先 browser_fill。"
@@ -950,7 +964,7 @@ def register_browser_tools(
         permission_grant=browser_approvals.grant,
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_fill",
         description=("替换指定输入框/同源 iframe 富文本框的全部文本，并读回该目标验证。"
             "先用 scope=editable 快照，根据题目/框架上下文选择最新 ref:<id>；同名框不能用模糊选择器。"
@@ -965,7 +979,7 @@ def register_browser_tools(
         permission_check=_browser_write_permission_check("Fill page field", "text"),
         permission_grant=browser_approvals.grant,
     ))
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_read",
         description="读取指定 ref:<id> 或唯一 CSS 元素的实际值、frameRef 和选择控件的 checked 状态；value 不代表勾选状态。不点击、不改变焦点、不使现有引用过期。",
         parameters={"type": "object", "properties": {
@@ -976,7 +990,7 @@ def register_browser_tools(
         trace_context=_browser_trace_context, group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_check",
         description=("设置 checkbox/radio 的 checked 状态并逐项回读。表单优先使用此工具："
             "可传 selector 单项或 checks 批量 1..20 项，使用同一最新快照的 ref:<id> 或唯一 CSS。"
@@ -997,7 +1011,7 @@ def register_browser_tools(
         permission_grant=browser_approvals.grant,
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_select",
         description="在当前标签页的原生 select 元素中按 value 选择选项。",
         parameters={
@@ -1016,7 +1030,7 @@ def register_browser_tools(
         permission_grant=browser_approvals.grant,
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_wait",
         description="等待已观察到或明确已知的 selector、页面文本或 URL 条件；多个条件需同时满足，不猜通用成功文案。timeout 只说明条件未满足，先检查 after 的当前结果；extension 最多等待 10000ms，回执包含实际时间上限。",
         parameters={
@@ -1035,7 +1049,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_screenshot",
         description="CDP 后端截取已绑定标签页并返回 PNG 路径；extension 后端不支持截图。",
         parameters={
@@ -1051,7 +1065,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_handoff",
         description=(
             "把当前标签页升级为 human takeover：遇到验证码、2FA、支付、登录或难以判断的弹窗时调用，"
@@ -1074,7 +1088,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_resume",
         description="用户在 human takeover 完成后调用，把标签页恢复到接管前的执行档位继续自动化。",
         parameters={
@@ -1098,7 +1112,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_close",
         description="关闭当前或指定的真实浏览器标签页，并清理其 CDP 进程。",
         parameters={
@@ -1110,7 +1124,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_connect",
         description=(
             "连接现有浏览器：transport=extension 使用独立控制扩展授权的 Edge/Chrome 标签，"
@@ -1131,7 +1145,7 @@ def register_browser_tools(
         group="browser",
     ))
 
-    registry.register(ToolDef(
+    register(ToolDef(
         name="browser_tabs",
         description="列出独立控制扩展明确授权的标签；不枚举未授权的日常标签。未连接时返回安装/连接提示。",
         parameters={"type": "object", "properties": {
@@ -1139,5 +1153,12 @@ def register_browser_tools(
         fn=_browser_tabs, risk="read", approval="never", idempotent=True,
         cache_results=False, repeat_guard=False, max_calls_per_turn=20,
         trace_context=_browser_trace_context, group="browser",
+    ))
+    registry.register(ToolDef(
+        name="browser_stop",
+        description="Release this session's browser control after in-flight work finishes. Keep the user's browser open; old logical tabs/refs expire. Connect/open and observe again before further actions.",
+        parameters={"type": "object", "properties": {}},
+        fn=lifecycle.stop, risk="read", idempotent=True,
+        cache_results=False, repeat_guard=False, group="browser",
     ))
     return manager

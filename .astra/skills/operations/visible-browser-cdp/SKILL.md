@@ -56,9 +56,9 @@ description: Use when the user asks to operate a visible Edge or Chrome browser,
 
 只有用户专门要求诊断占用时，才核对进程、启动时间、TTY 和监听端口。PID 元数据是线索，不能仅凭旧文件认定当前持锁者；CPU 为 0 也不能证明会话可关闭。不要凭 ChatGPT 调试横幅或审批焦点变化认定占用来源。
 
-向用户指出具体实例，优先继续使用持锁实例，或由用户正常退出确认不再使用的实例。扩展 Disconnect 不释放进程锁；不要删除 owner.lock、擅自 kill 或把不同 Astra 会话当成同一个会话。诊断只输出必要的 PID/端口等字段，不 cat 整个 endpoint.json，其中含有连接 token。
+向用户指出具体实例，优先继续使用持锁实例，或在该实例用 `/browser stop`（模型可用 `browser_stop`）释放控制，不必退出 Astra。切换/重置会话也释放连接；旧逻辑 tab/ref 失效。清理失败时新调用保持禁止，用 `/browser status` 检查、`/browser stop` 重试。扩展 Disconnect 不释放进程锁；不要删除 owner.lock、擅自 kill 或把不同 Astra 会话当成同一个会话。诊断只输出必要的 PID/端口等字段，不 cat 整个 endpoint.json，其中含有连接 token。
 
-持锁实例退出后，重新 tabs → 按需 connect → fresh snapshot。成功返回 `[]` 表示当前没有可发现的授权标签，不能再诊断为占锁；若目标是用户现有页面，按 **Allow current tab** 流程恢复，不擅自以新标签替代原表单。
+持锁实例释放控制或退出后，重新 tabs → 按需 connect → fresh snapshot。成功返回 `[]` 表示当前没有可发现的授权标签，不能再诊断为占锁；若目标是用户现有页面，按 **Allow current tab** 流程恢复，不擅自以新标签替代原表单。
 
 ## 快照 → 串行操作 → 验证
 

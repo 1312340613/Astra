@@ -12,7 +12,7 @@ import {
 
 assert.deepEqual(
   slashCommandSuggestions("/").map((item) => item.command),
-  ["/image", "/bar", "/minimal", "/sip", "/reset", "/compress", "/undo", "/retry", "/think", "/model", "/mode", "/connect", "/persona", "/search", "/tool", "/gallery", "/memory", "/skills", "/learn", "/tools", "/computer", "/conclave", "/appshot", "/tasks", "/budget", "/resume", "/cancel", "/goal", "/today", "/session", "/handoff", "/theme", "/timeline", "/health", "/doctor", "/diagnostics", "/maintenance", "/sandbox", "/vision-tiles", "/context-index", "/mcp", "/yolo", "/permissions", "/reload", "/reconnect", "/restart", "/wakeup", "/help"],
+  ["/image", "/bar", "/minimal", "/sip", "/reset", "/compress", "/undo", "/retry", "/think", "/model", "/mode", "/connect", "/persona", "/search", "/tool", "/gallery", "/memory", "/skills", "/learn", "/tools", "/browser", "/computer", "/conclave", "/appshot", "/tasks", "/budget", "/resume", "/cancel", "/goal", "/today", "/session", "/handoff", "/theme", "/timeline", "/health", "/doctor", "/diagnostics", "/maintenance", "/sandbox", "/vision-tiles", "/context-index", "/mcp", "/yolo", "/permissions", "/reload", "/reconnect", "/restart", "/wakeup", "/help"],
 );
 
 assert.deepEqual(
@@ -340,3 +340,6 @@ assert.deepEqual(slashCommandSuggestions("/mode chat"), []);
 assert.equal(submitSlashCommand("/budget", 0), "/budget");
 assert.equal(submitSlashCommand("/budget 60", 0), "/budget 60");
 assert.equal(submitSlashCommand("/budget off", 0), "/budget off");
+
+assert.deepEqual(slashCommandSuggestions("/browser ").map((item) => item.command), ["status", "stop"]);
+assert.equal(completeSlashCommand("/browser st", 1), "/browser stop");

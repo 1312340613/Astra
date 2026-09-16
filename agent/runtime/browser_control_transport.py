@@ -35,7 +35,7 @@ BROWSER_ENDPOINT_RECOVERY = (
     'No browser input was dispatched. This runtime cannot use the extension endpoint now. '
     'For an ordinary UI task, if the user has not required the browser channel and native '
     'computer tools are available, call computer_apps and bind the same visible target. '
-    'Otherwise use the owning runtime or let the user exit it normally. '
+    'Otherwise use the owning runtime, or run /browser stop there to release control. '
     'Do not repeat browser reads, run shell diagnostics, delete the lock, or kill the owner '
     'just to complete a form; diagnose processes only when that is the user task.'
 )
@@ -51,7 +51,7 @@ class BrowserEndpointOwnedError(RuntimeError):
         super().__init__(
             f'Browser control endpoint is already owned{owner}. '
             'Another Astra runtime holds the local endpoint lock before browser attachment. '
-            'Use that runtime, or exit it normally and retry here. '
+            'Use that runtime, or run /browser stop there and retry here. '
             'The extension Disconnect button does not release this process lock; '
             'do not delete owner.lock or attribute this error to a browser debugger.'
         )

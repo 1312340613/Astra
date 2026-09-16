@@ -36,6 +36,7 @@ from ..runtime.tools.web import register_web_tools
 from ..sandbox.docker import DockerSandbox
 from ..sandbox.local import LocalSandbox
 from ..sandbox.router import SandboxRouter
+from agent.cli.browser_commands import execute_browser_command
 from .computer_commands import execute_computer_command
 from .context_index_commands import execute_context_index_command
 from .context_index_preferences import load_context_index_preferences
@@ -408,6 +409,14 @@ class AgentTUI(App):
             args = parts[1].split() if len(parts) > 1 else []
             output, error = execute_context_index_command(self.agent, args)
             self._write_rich(error or output, kind="error" if error else "system")
+        elif command == "/browser":
+            args = parts[1].split() if len(parts) > 1 else []
+
+            async def run_browser_command() -> None:
+                output, error = await execute_browser_command(args, self.agent.tools)
+                self._write_rich(error or output, kind="error" if error else "system")
+
+            asyncio.create_task(run_browser_command())
         elif command == "/computer":
             args = parts[1].split() if len(parts) > 1 else []
 
@@ -424,7 +433,7 @@ class AgentTUI(App):
             self._write_rich(
                 "Commands:\n  /reset  /think  /tools  /sandbox [on|off]  "
                 "/vision-tiles [on|off]  /context-index [on|off|session|all|status|why]  "
-                "/computer [status|setup|stop]  /help  exit",
+                "/browser [status|stop]  /computer [status|setup|stop]  /help  exit",
                 kind="system",
             )
         else:

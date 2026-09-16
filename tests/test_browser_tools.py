@@ -133,9 +133,9 @@ def checked_registry(tmp_path):
     reg = ToolRegistry()
     reg.yolo = True
     register_browser_tools(reg, manager=manager, backend=backend)
-    session = manager.create_session()
-    tab = manager.open_tab(session.session_id, "https://example.test/form")
-    return reg, backend, manager, tab.tab_id
+    run(reg.execute("browser_open", {"url": "https://example.test/form", "extract": False}))
+    session = manager.list_sessions()[0]
+    return reg, backend, manager, session.current_tab_id
 
 
 def test_browser_check_batch_preserves_exact_after_snapshot(checked_registry):

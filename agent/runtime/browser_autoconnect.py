@@ -9,6 +9,8 @@ import re
 import shlex
 import sys
 
+from .process_env import browser_child_environment
+
 HOST = 'com.astra.browser_control'
 BROWSERS = {'edge': ('Microsoft Edge', 'Microsoft Edge.app'),
             'chrome': ('Google/Chrome', 'Google Chrome.app')}
@@ -60,6 +62,7 @@ async def launch_browser(browser: str, *, home: Path | None = None) -> None:
         raise RuntimeError(f'Install {app_name} before using browser auto-connect')
     proc = await asyncio.create_subprocess_exec(
         '/usr/bin/open', '-g', '-a', str(app),
+        env=browser_child_environment(),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )
     try:
