@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING, cast
 
 from .session_store import SessionStore
 from .async_io import durable_io
@@ -283,6 +283,7 @@ class AgentContext:
     compaction_enabled: bool = True
     compressor: "ContextCompressor | None" = field(default=None, init=False, repr=False)
     compaction_observer: Callable[[dict], None] | None = field(default=None, init=False, repr=False)
+    _last_compaction_report: dict | None = field(default=None, init=False, repr=False)
     # Resolves a tool name to its risk tier ("read"/"network"/"write"/"execute"/
     # "secret") for the deterministic compaction layers. None treats every tool
     # as read. Installed by the owning agent, which knows the tool registry.
@@ -758,6 +759,14 @@ class AgentContext:
             "role_messages": role_messages,
         }
 
+    def estimate_compaction_tokens(self) -> int:
+        """Fresh estimate; never compare old API usage with a cheaper fallback."""
+        estimate = getattr(getattr(self.compressor, "llm", None), "estimate_tokens", None)
+        if callable(estimate):
+            return max(1, cast(Callable[[list[dict]], int], estimate)(self.get_prompt()))
+        self._ensure_token_cache()
+        return max(1, self._system_token_cost + self._tools_token_cost + sum(self._message_token_costs))
+
     def reset(self):
         self.system_projection.reset()
         self.messages.clear()
@@ -768,42 +777,68 @@ class AgentContext:
         self.last_prompt_tokens = 0
         self._saved_message_count = 0
         self._message_token_costs.clear()
+        self._last_compaction_report = None
         if self.compressor is not None:
             self.compressor.reset()
         # system + tools token costs are preserved (tied to agent config, not conversation)
 
-    def report_compaction(self, status: str, messages_before: int) -> None:
-        """Report counts and lifecycle only; observers cannot alter compaction."""
+    def report_compaction(self, status: str, messages_before: int, *, details: dict | None = None) -> None:
+        """Report lifecycle and estimates without exposing conversation content."""
         if self.compaction_observer is not None:
             try:
                 self.compaction_observer({
+                    **(details or {}),
                     "type": "context_compaction", "status": status,
                     "messages_before": messages_before, "messages_after": len(self.messages),
                 })
             except Exception:
                 logger.warning("compaction observer failed")
 
-    async def compress_if_needed(self, force: bool = False, *, preserve_on_failure: bool = False):
+    async def compress_if_needed(
+        self, force: bool = False, *, preserve_on_failure: bool = False,
+        measure_tokens: Callable[[], int] | None = None,
+    ):
         """Compact history when enabled and the token budget requires it."""
         if not self.compaction_enabled:
             return
-        token_excess = max(0, self.estimate_prompt_tokens() - self.max_prompt_tokens)
-        if not force and token_excess <= 0:
+        measure = measure_tokens or self.estimate_compaction_tokens
+        tokens_before = measure()
+        if not force and max(tokens_before, self.last_prompt_tokens) < self.max_prompt_tokens:
             return
         before = len(self.messages)
-        self.report_compaction("started", before)
+        # Leave room for the next tool results instead of stopping just below
+        # the trigger and immediately compacting again on the next iteration.
+        target = max(1, int(self.max_prompt_tokens * (1.0 if force else 0.9)))
+        report: dict[str, Any] = {
+            "tokens_before": tokens_before, "target_tokens": target,
+            "method": "none", "dropped_steps": 0, "cleared_results": 0,
+        }
+        self.report_compaction("started", before, details=report)
         outcome = "failed"
         try:
-            changed = await self._compress_history(force, preserve_on_failure=preserve_on_failure)
+            changed = await self._compress_history(
+                force, preserve_on_failure=preserve_on_failure,
+                measure_tokens=measure, target_tokens=target, report=report,
+            )
             outcome = "completed" if changed else "failed"
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
         finally:
-            self.report_compaction(outcome, before)
+            try:
+                report["tokens_after"] = measure()
+                if report["method"] != "none":
+                    self.last_prompt_tokens = report["tokens_after"]
+            except Exception:
+                # Optional diagnostics must never mask cancellation or failure.
+                logger.warning("compaction token readback failed")
+            self._last_compaction_report = dict(report)
+            self.report_compaction(outcome, before, details=report)
 
-    async def _compress_history(self, force: bool, *, preserve_on_failure: bool):
-        token_excess = max(0, self.estimate_prompt_tokens() - self.max_prompt_tokens)
+    async def _compress_history(
+        self, force: bool, *, preserve_on_failure: bool,
+        measure_tokens: Callable[[], int], target_tokens: int, report: dict,
+    ):
 
         # Cheapest-first: deterministic layers before the expensive LLM summary.
         # Drop completed read/network tool steps (side-effecting and current-turn
@@ -821,11 +856,15 @@ class AgentContext:
             keep_recent=self.compact_keep_recent,
         )
         self.messages, micro_stats = micro_compact_tool_results(self.messages, tool_risk=risk)
+        report.update(dropped_steps=drop_stats.dropped_steps, cleared_results=micro_stats.cleared_results)
         changed = bool(drop_stats.dropped_steps or micro_stats.cleared_results)
         if changed:
             self._message_token_costs.clear()
             self.last_prompt_tokens = 0
-        if not force and self.estimate_prompt_tokens() <= self.max_prompt_tokens:
+            self._saved_message_count = 0
+            report["method"] = "cleanup"
+        remaining = measure_tokens()
+        if not force and remaining <= target_tokens:
             return changed
 
         if self.compressor is not None:
@@ -833,7 +872,7 @@ class AgentContext:
             options = {"force": force}
             if preserve_on_failure:
                 options["preserve_on_failure"] = True
-            compressed = await self.compressor.compress(prompt, self.max_prompt_tokens, **options)
+            compressed = await self.compressor.compress(prompt, target_tokens, **options)
             if compressed is prompt:
                 # Compressor declined (nothing safely compressible, or the
                 # summary failed on a non-forced pass). Keep history and save
@@ -848,12 +887,14 @@ class AgentContext:
             self._message_token_costs.clear()  # invalidate cache
             self.last_prompt_tokens = 0
             self._saved_message_count = 0
+            report["method"] = "summary"
             return True
 
         if preserve_on_failure:
             return changed
 
         # ── Legacy fallback: hard truncation ──
+        token_excess = max(0, remaining - target_tokens)
         self._ensure_token_cache()
         spans: list[tuple[int, int, str, int]] = []
         idx = 0
@@ -919,4 +960,7 @@ class AgentContext:
             summary_msg = {"role": "assistant", "content": text}
             self.messages.insert(0, summary_msg)
             self._message_token_costs.insert(0, self._message_cost(summary_msg))
+        if selected:
+            self._saved_message_count = 0
+            report["method"] = "truncate"
         return changed or bool(selected)

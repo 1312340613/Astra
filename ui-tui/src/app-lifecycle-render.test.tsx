@@ -81,6 +81,18 @@ for (const outcome of ["completed", "failed", "cancelled", "disconnect"] as cons
   });
 }
 
+test("compaction token feedback is rendered in the conversation", async () => {
+  const h = await setup(143, 30);
+  try {
+    h.child.event({ type: "context_compaction", status: "completed", method: "cleanup", messages_before: 108, messages_after: 106, tokens_before: 468256, tokens_after: 445137, target_tokens: 450000 });
+    await settle();
+    const rendered = h.stdout.chunks.map(stripAnsi).join("");
+    assert.match(rendered, /上下文轻量清理完成/);
+    assert.match(rendered, /468,256 → 445,137 tokens，释放 4.9%/);
+    assert.match(rendered, /消息 108 → 106/);
+  } finally { h.app.unmount(); }
+});
+
 test("terminal shutdown drains late events without restart acknowledgements, UI updates or premature kill", async () => {
   let finished = false;
   const lifecycle = new TuiLifecycle(async () => { finished = true; });

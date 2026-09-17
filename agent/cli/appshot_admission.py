@@ -222,7 +222,9 @@ class _PreparedAppshotCompaction:
             "appshot_compaction_committed messages_before=%d messages_after=%d",
             self.messages_before, len(self.context.messages),
         )
-        self.context.report_compaction("completed", self.messages_before)
+        self.context.report_compaction(
+            "completed", self.messages_before, details=self.candidate._last_compaction_report,
+        )
 
 
 async def _prepare_appshot_message(agent, msg, cache):

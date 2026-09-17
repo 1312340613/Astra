@@ -1324,7 +1324,9 @@ class OpenAICompatibleProvider:
     def record_prompt_usage(self, estimated: int | None, actual: int | None):
         if not estimated or not actual or estimated <= 0 or actual <= 0:
             return
-        ratio = max(0.25, min(4.0, actual / estimated))
+        # ``estimated`` already includes the current calibration. Treat the
+        # usage ratio as a correction to that factor, not a replacement for it.
+        ratio = max(0.25, min(4.0, self._estimate_calibration * actual / estimated))
         self._estimate_calibration = (self._estimate_calibration * 0.8) + (ratio * 0.2)
 
 

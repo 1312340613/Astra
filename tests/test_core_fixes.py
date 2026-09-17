@@ -780,7 +780,7 @@ def test_context_force_compression_uses_llm_summary_on_short_tail():
         await ctx.compress_if_needed(force=True)
 
         assert len(ctx.messages) < 6
-        assert ctx.last_prompt_tokens == 0
+        assert ctx.last_prompt_tokens == ctx.estimate_compaction_tokens()
         assert any("CONTEXT COMPACTION" in msg.get("content", "") for msg in ctx.messages)
 
     run(scenario())

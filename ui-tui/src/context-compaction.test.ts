@@ -18,3 +18,32 @@ test("invalid compaction events cannot inject terminal text", () => {
     assert.equal(compactionNotice({ ...event, messages_after: count as any }), null);
   }
 });
+
+test("cleanup reports token savings even when message counts barely change", () => {
+  const event: ContextCompactionEvent = {
+    type: "context_compaction", status: "completed", method: "cleanup",
+    messages_before: 108, messages_after: 106, tokens_before: 468256, tokens_after: 445137, target_tokens: 450000,
+  };
+  assert.equal(compactionNotice(event), "上下文轻量清理完成：估算 468,256 → 445,137 tokens，释放 4.9%；消息 108 → 106。");
+  assert.match(compactionNotice({ ...event, messages_after: 108 })!, /消息 108 → 108/);
+});
+
+test("history compression reports insufficient savings without claiming the target was met", () => {
+  const event: ContextCompactionEvent = {
+    type: "context_compaction", status: "completed", method: "summary",
+    messages_before: 100, messages_after: 20, tokens_before: 10000, tokens_after: 9900, target_tokens: 9000,
+  };
+  assert.match(compactionNotice(event)!, /历史压缩.*仍高于目标 9,000/);
+  assert.match(compactionNotice({ ...event, tokens_after: 10000 })!, /未减少/);
+  assert.match(compactionNotice({ ...event, tokens_after: 11000 })!, /增加 10\.0%/);
+});
+
+test("invalid optional metrics fall back to counts without printing untrusted text", () => {
+  const event: ContextCompactionEvent = { type: "context_compaction", status: "completed", messages_before: 10, messages_after: 5 };
+  for (const invalid of [-1, NaN, Infinity, 1.5, "\x1b[2J"]) {
+    assert.equal(compactionNotice({ ...event, tokens_before: invalid as any, tokens_after: 1, method: "cleanup" }), compactionNotice(event));
+  }
+  const text = compactionNotice({ ...event, tokens_before: 100, tokens_after: 50, method: "\x1b[2J" as any, target_tokens: "\x1b[2J" as any })!;
+  assert.doesNotMatch(text, /\x1b/);
+  assert.match(text, /100 → 50 tokens/);
+});

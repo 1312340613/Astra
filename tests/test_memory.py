@@ -493,14 +493,17 @@ def test_react_prompt_reinjects_memory_after_compression_without_mutating_contex
     agent.context.max_prompt_tokens = 1
 
     compressed = False
+    compaction_estimates = []
 
-    async def compress(force: bool = False):
+    async def compress(force: bool = False, **kwargs):
         nonlocal compressed
         compressed = True
+        compaction_estimates.append(kwargs["measure_tokens"]())
 
     agent.context.compress_if_needed = compress  # type: ignore[method-assign]
     prompt, _ = asyncio.run(agent._prepare_prompt_for_llm("hello", FakeLLM.estimate_tokens))
     assert compressed is True
+    assert compaction_estimates and all(value == FakeLLM.estimate_tokens(prompt) for value in compaction_estimates)
     # The dynamic memory pack rides the current user message so the system
     # prefix stays byte-stable across turns for provider prefix caching.
     assert "Prefer evidence-backed answers" in prompt[1]["content"]

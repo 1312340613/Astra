@@ -26,6 +26,12 @@ export type ContextCompactionEvent = {
   status: "started" | "completed" | "failed" | "cancelled";
   messages_before: number;
   messages_after: number;
+  tokens_before?: number;
+  tokens_after?: number;
+  target_tokens?: number;
+  method?: "none" | "cleanup" | "summary" | "truncate";
+  dropped_steps?: number;
+  cleared_results?: number;
 };
 
 export interface UserQuestionOption {

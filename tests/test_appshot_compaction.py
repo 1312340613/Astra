@@ -146,6 +146,8 @@ def test_verified_submission_recovers_once_launches_and_persists(agent, bundle):
         ]
         assert events[1]["messages_before"] == 4
         assert events[1]["messages_after"] == len(agent.context.messages)
+        assert events[1]["method"] == "summary"
+        assert events[1]["tokens_after"] < events[1]["tokens_before"]
         assert admission.lock.locked()
         await tasks[0]
         await asyncio.sleep(0)
@@ -219,6 +221,7 @@ def test_late_admission_failure_rolls_back_compaction(agent, bundle, monkeypatch
         assert [e["status"] for e in events if e["type"] == "context_compaction"] == [
             "started", "cancelled" if failure == "cancel" else "failed",
         ]
+        assert all("tokens_after" not in e for e in events if e["type"] == "context_compaction")
         assert not admission.lock.locked()
         assert not admission.reserved
         assert agent.context.messages == before
@@ -260,8 +263,12 @@ def test_auto_compaction_reports_progress_while_summary_is_pending(agent, outcom
         agent.llm.chat_limited = summary
         task = asyncio.create_task(agent.context.compress_if_needed())
         await asyncio.wait_for(entered.wait(), timeout=2)
-        assert events == [{"type": "context_compaction", "status": "started",
-                           "messages_before": 4, "messages_after": 4}]
+        assert len(events) == 1
+        assert events[0]["type"] == "context_compaction"
+        assert events[0]["status"] == "started"
+        assert events[0]["messages_before"] == events[0]["messages_after"] == 4
+        assert events[0]["tokens_before"] > events[0]["target_tokens"]
+        assert "tokens_after" not in events[0]
         if outcome == "cancelled":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -272,6 +279,9 @@ def test_auto_compaction_reports_progress_while_summary_is_pending(agent, outcom
         assert len(events) == 2
         assert events[1]["status"] == ("failed" if outcome == "exception" else outcome)
         assert events[1]["messages_after"] == len(agent.context.messages)
+        assert events[1]["tokens_after"] > 0
+        if outcome != "completed":
+            assert events[1]["tokens_before"] == events[1]["tokens_after"]
         assert not agent.llm.requests
 
     asyncio.run(run())

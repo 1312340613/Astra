@@ -2351,13 +2351,13 @@ class ReActAgent(AgentBase):
                 )
             )
 
-        def compact_prompt_copy(prompt: list[dict]) -> list[dict]:
+        def compact_prompt_copy(prompt: list[dict], *, record_metrics: bool = True) -> list[dict]:
             def risk_for(name: str) -> str:
                 tool = self.tools.get(name)
                 return str(getattr(tool, "risk", "read")) if tool is not None else "read"
 
             prepared, stats = micro_compact_tool_results(prompt, tool_risk=risk_for)
-            if stats.cleared_results:
+            if stats.cleared_results and record_metrics:
                 runtime_metrics.increment("tool_result_microcompact_count", stats.cleared_results)
                 runtime_metrics.increment("tool_result_microcompact_saved_chars", stats.saved_chars)
                 runtime_metrics.increment("tool_result_microcompact_saved_tokens", stats.saved_tokens)
@@ -2371,8 +2371,11 @@ class ReActAgent(AgentBase):
                 prompt_estimate = estimate_tokens(prompt)
             self.context.last_prompt_tokens = prompt_estimate
             if prompt_estimate >= self.context.max_prompt_tokens:
+                def measure_compaction_tokens() -> int:
+                    return estimate_tokens(compact_prompt_copy(rebuild_prompt(), record_metrics=False))
+
                 with profile.phase("context_compaction"):
-                    await self.context.compress_if_needed()
+                    await self.context.compress_if_needed(measure_tokens=measure_compaction_tokens)
                 with profile.phase("prompt_rebuild_after_compaction"):
                     prompt = compact_prompt_copy(rebuild_prompt())
                     prompt_estimate = estimate_tokens(prompt)
@@ -2383,7 +2386,7 @@ class ReActAgent(AgentBase):
                     # give compaction one forced retry before the request is
                     # sent to the provider.
                     with profile.phase("forced_context_compaction"):
-                        await self.context.compress_if_needed(force=True)
+                        await self.context.compress_if_needed(force=True, measure_tokens=measure_compaction_tokens)
                     with profile.phase("prompt_rebuild_after_forced_compaction"):
                         prompt = compact_prompt_copy(rebuild_prompt())
                         prompt_estimate = estimate_tokens(prompt)
@@ -4050,7 +4053,14 @@ class ReActAgent(AgentBase):
                     # and reasoning_content form one coherent checkpoint.
                     await self.context.save_async()
                     await durable_io(self.task_store.checkpoint, task_id, {"phase": "after_tools", "iteration": step})
-                await self.context.compress_if_needed()
+                def measure_post_tool_tokens(estimate=estimate_tokens) -> int:
+                    if estimate:
+                        return estimate(self.context.get_prompt(
+                            content_overrides=self._vision_prompt_content_overrides(),
+                        ))
+                    return self.context.estimate_compaction_tokens()
+
+                await self.context.compress_if_needed(measure_tokens=measure_post_tool_tokens)
                 if estimate_tokens:
                     self.context.last_prompt_tokens = estimate_tokens(self.context.get_prompt(
                         content_overrides=self._vision_prompt_content_overrides(),
@@ -4060,7 +4070,7 @@ class ReActAgent(AgentBase):
                     # after the normal context check (for example because tool
                     # schemas or multimodal overhead differ). Give compaction
                     # one forced retry before opening the safety circuit.
-                    await self.context.compress_if_needed(force=True)
+                    await self.context.compress_if_needed(force=True, measure_tokens=measure_post_tool_tokens)
                     if estimate_tokens:
                         self.context.last_prompt_tokens = estimate_tokens(self.context.get_prompt(
                             content_overrides=self._vision_prompt_content_overrides(),
