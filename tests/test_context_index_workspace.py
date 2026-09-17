@@ -85,7 +85,9 @@ def test_workspace_resolution_caches_git_probe_and_invalidates_on_git_metadata(m
     assert resolve_workspace(child).root == str(root.resolve())
     assert resolve_workspace(child).root == str(root.resolve())
     assert len(calls) == 1
-    head.write_text("ref: refs/heads/next\n")
+    # Change size as well as content: rapid equal-length writes can share a
+    # timestamp on Windows, leaving the metadata cache key unchanged.
+    head.write_text("ref: refs/heads/next-branch\n")
 
     assert resolve_workspace(child).root == str(root.resolve())
     assert len(calls) == 2
