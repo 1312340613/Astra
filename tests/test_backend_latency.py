@@ -76,7 +76,25 @@ def test_cancellation_during_approval_io_cannot_dispatch_tool(tmp_path, blocked_
     server.target_path = tmp_path / "never-written.py"
     server.target_content = "must not be written"
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    proc, _, _, wait = _start_question_protocol_backend(tmp_path, server.server_port, "approval-latency")
+    # Measure the real approval database contention after entry, not tool
+    # preparation or unrelated replay-journal fsync. Windows runners can spend
+    # several seconds committing earlier progress events in the output queue;
+    # that does not mean the control loop is blocked. Event persistence and
+    # ordered delivery have their own slow-I/O tests in test_event_writer.py.
+    bootstrap = f"""
+from agent.cli import backend
+from agent.runtime.approval_inbox import ApprovalInbox
+backend.RuntimeEventStream = lambda: None
+original = ApprovalInbox.{blocked_phase}
+def observe_entry(self, *args, **kwargs):
+    backend._send({{"type": "approval_io_entered", "phase": {blocked_phase!r}}})
+    return original(self, *args, **kwargs)
+ApprovalInbox.{blocked_phase} = observe_entry
+raise SystemExit(backend.run())
+"""
+    proc, _, _, wait = _start_question_protocol_backend(
+        tmp_path, server.server_port, "approval-latency", bootstrap_code=bootstrap,
+    )
     lock = None
 
     def send(payload):
@@ -94,9 +112,7 @@ def test_cancellation_during_approval_io_cannot_dispatch_tool(tmp_path, blocked_
             lock = sqlite3.connect(tmp_path / "approvals.db")
             lock.execute("BEGIN IMMEDIATE")
             send({"type": "tool_approval_response", "request_id": approval["request_id"], "decision": "once"})
-        else:
-            wait(lambda e: e.get("type") == "tool_calls")
-        time.sleep(.1)
+        wait(lambda e: e.get("type") == "approval_io_entered" and e.get("phase") == blocked_phase)
         send({"type": "command", "cmd": "/yolo status"})
         wait(lambda e: e.get("type") == "yolo_status", timeout=2)
         send({"type": "command", "cmd": "/cancel"})

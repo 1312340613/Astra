@@ -974,8 +974,8 @@ def _start_question_protocol_backend(
     threading.Thread(target=read_events, daemon=True).start()
 
     def wait_for(predicate, timeout: float = 15) -> dict:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             if proc.poll() is not None:
                 stderr = proc.stderr.read() if proc.stderr is not None else ""
                 raise AssertionError(f"Backend exited with {proc.returncode}: {stderr}; seen={seen}")

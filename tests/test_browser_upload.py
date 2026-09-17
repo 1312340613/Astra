@@ -45,10 +45,6 @@ def test_nonfiles_and_limits_rejected_without_reading(tmp_path):
     for paths in ([str(tmp_path)], ["missing"], [""]):
         with pytest.raises((OSError, ValueError)):
             inspect_files(paths, tmp_path)
-    fifo = tmp_path / "pipe"
-    os.mkfifo(fifo)
-    with pytest.raises(ValueError, match="ordinary"):
-        inspect_files([str(fifo)], tmp_path)
     big = tmp_path / "big"
     with big.open("wb") as f:
         f.truncate(MAX_FILE_BYTES + 1)
@@ -60,6 +56,14 @@ def test_nonfiles_and_limits_rejected_without_reading(tmp_path):
         inspect_files([str(big)] * 3, tmp_path)
     with pytest.raises(ValueError, match="at most 10"):
         inspect_files([str(big)] * 11, tmp_path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX named pipes are unavailable")
+def test_fifo_rejected_without_opening(tmp_path):
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="ordinary"):
+        inspect_files([str(fifo)], tmp_path)
 
 
 class UploadTransport:
