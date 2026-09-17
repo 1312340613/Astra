@@ -13,6 +13,8 @@ on:
       - 'agent/cli/session_lifecycle.py'
       - 'agent/runtime/self_protection.py'
       - 'agent/runtime/maintenance.py'
+      - 'agent/runtime/event_writer.py'
+      - 'agent/runtime/event_stream.py'
       - 'agent/runtime/session_wakeup.py'
       - 'agent/runtime/browser*.py'
       - 'agent/runtime/cdp_backend.py'
@@ -28,6 +30,10 @@ on:
       - 'tests/test_self_protection.py'
       - 'tests/test_runtime_maintenance.py'
       - 'tests/test_backend_conversation_commands.py'
+      - 'tests/test_event_writer.py'
+      - 'tests/test_event_stream.py'
+      - 'tests/test_backend_task_protocol.py'
+      - 'tests/test_backend_terminal_shutdown.py'
       - 'tests/test_graceful_restart.py'
       - 'tests/test_session_lifecycle_protocol.py'
       - 'tests/test_session_wakeup*.py'
@@ -53,6 +59,8 @@ on:
       - 'agent/cli/session_lifecycle.py'
       - 'agent/runtime/self_protection.py'
       - 'agent/runtime/maintenance.py'
+      - 'agent/runtime/event_writer.py'
+      - 'agent/runtime/event_stream.py'
       - 'agent/runtime/session_wakeup.py'
       - 'agent/runtime/browser*.py'
       - 'agent/runtime/cdp_backend.py'
@@ -68,6 +76,10 @@ on:
       - 'tests/test_self_protection.py'
       - 'tests/test_runtime_maintenance.py'
       - 'tests/test_backend_conversation_commands.py'
+      - 'tests/test_event_writer.py'
+      - 'tests/test_event_stream.py'
+      - 'tests/test_backend_task_protocol.py'
+      - 'tests/test_backend_terminal_shutdown.py'
       - 'tests/test_graceful_restart.py'
       - 'tests/test_session_lifecycle_protocol.py'
       - 'tests/test_session_wakeup*.py'
@@ -134,6 +146,8 @@ jobs:
           tests/test_self_protection.py tests/test_graceful_restart.py tests/test_session_wakeup.py
           tests/test_runtime_maintenance.py
           tests/test_browser_upload.py tests/test_backend_conversation_commands.py
+          tests/test_event_writer.py tests/test_event_stream.py tests/test_backend_terminal_shutdown.py
+          tests/test_backend_task_protocol.py::test_backend_exposes_tasks_command_without_blocking_protocol
           tests/test_session_lifecycle_protocol.py tests/test_session_wakeup_protocol.py
           tests/test_browser_lifecycle.py tests/test_browser_child_environment.py tests/test_mcp_recovery.py
           tests/test_browser_backend_router.py tests/test_browser_control_transport.py

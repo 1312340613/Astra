@@ -74,6 +74,110 @@ def test_slow_event_persistence_does_not_block_loop_and_replay_stays_ordered(tmp
     asyncio.run(scenario())
 
 
+def test_default_close_drains_a_slow_but_progressing_journal(tmp_path):
+    async def scenario():
+        stream = RuntimeEventStream(tmp_path / "slow-events.db")
+        output = []
+        stream._fault_hook = lambda stage: time.sleep(0.1) if stage == "before_commit" else None
+        writer = OrderedEventWriter(stream, output.append)
+        for index in range(30):
+            writer.send({"type": "done", "index": index})
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while writer.alive:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        pulse = asyncio.create_task(heartbeat())
+        try:
+            await writer.close()
+        finally:
+            await asyncio.to_thread(writer._thread.join, 5)
+            await pulse
+        assert ticks > 5
+        assert [event["index"] for event in output] == list(range(30))
+        assert len(stream.replay(0)) == 30
+        assert not writer.alive
+
+    asyncio.run(scenario())
+
+
+def test_replay_delivery_also_advances_the_close_progress_clock(tmp_path):
+    async def scenario():
+        stream = RuntimeEventStream(tmp_path / "replay-events.db")
+        for _ in range(8):
+            stream.publish({"type": "done"})
+        output = []
+
+        def write(event):
+            time.sleep(0.05)
+            output.append(event)
+
+        writer = OrderedEventWriter(stream, write)
+        writer.replay(0)
+        try:
+            await writer.close(timeout=3, stall_timeout=0.2)
+        finally:
+            await asyncio.to_thread(writer._thread.join, 1)
+        assert [event["type"] for event in output] == ["done"] * 8 + ["event_replay_complete"]
+        assert all(event["replayed"] for event in output[:-1])
+        assert not writer.alive
+
+    asyncio.run(scenario())
+
+
+def test_close_still_bounds_stalled_output_with_a_longer_total_budget():
+    async def scenario():
+        started, release = threading.Event(), threading.Event()
+
+        def write(_event):
+            started.set()
+            release.wait(2)
+
+        writer = OrderedEventWriter(None, write)
+        writer.send({"type": "done"})
+        assert await asyncio.to_thread(started.wait, 1)
+        began = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="did not drain"):
+                await writer.close(timeout=1, stall_timeout=0.05)
+            assert time.monotonic() - began < 0.75
+        finally:
+            release.set()
+            await asyncio.to_thread(writer._thread.join, 1)
+        assert not writer.alive
+
+    asyncio.run(scenario())
+
+
+def test_delivery_progress_cannot_extend_the_absolute_close_deadline():
+    async def scenario():
+        release = threading.Event()
+        output = []
+
+        def write(event):
+            release.wait(0.02)
+            output.append(event)
+
+        writer = OrderedEventWriter(None, write)
+        for index in range(100):
+            writer.send({"type": "done", "index": index})
+        began = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="did not drain"):
+                await writer.close(timeout=0.15, stall_timeout=0.1)
+            assert time.monotonic() - began < 0.75
+        finally:
+            release.set()
+            await asyncio.to_thread(writer._thread.join, 1)
+        assert 1 < len(output) < 100
+        assert not writer.alive
+
+    asyncio.run(scenario())
+
+
 def test_event_queue_is_bounded_and_async_producers_wait(tmp_path):
     async def scenario():
         started, release = threading.Event(), threading.Event()

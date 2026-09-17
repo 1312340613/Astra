@@ -51,6 +51,7 @@ class OrderedEventWriter:
         self._bytes = 0
         self._closing = False
         self._error: Exception | None = None
+        self._last_delivery = 0.0
         self._thread = threading.Thread(target=self._run, name="astra-event-writer", daemon=True)
         self._thread.start()
 
@@ -121,7 +122,7 @@ class OrderedEventWriter:
         persisted = time.perf_counter() if self.profiler else 0.0
         if self.profiler is not None:
             event = self.profiler.trace_event(event, request_id=request_id)
-        self.write(event)
+        self._write_output(event)
         if self.profiler is not None:
             self.profiler.record("event", {
                 "queue_ms": queue_ms, "persist_ms": (persisted - started) * 1000,
@@ -138,13 +139,20 @@ class OrderedEventWriter:
         limit = event["limit"]
         replayed = self.stream.replay(after, limit=limit) if self.stream is not None else []
         for saved in replayed:
-            self.write(saved)
+            self._write_output(saved)
         self._publish({
             "type": "event_replay_complete", "after_cursor": after,
             "next_cursor": int(replayed[-1]["cursor"]) if replayed else after,
             "cursor": self.stream.cursor if self.stream is not None else after,
             "count": len(replayed), "has_more": len(replayed) >= limit,
         })
+
+    def _write_output(self, event: dict) -> None:
+        self.write(event)
+        # Only completed output counts as progress, not queue admission or a
+        # persistence attempt. Replay output must advance this clock too.
+        with self._condition:
+            self._last_delivery = time.monotonic()
 
     def _wake_producers(self) -> None:
         if not self._space.is_set():
@@ -174,14 +182,27 @@ class OrderedEventWriter:
                 self._bytes = 0
                 self._wake_producers()
 
-    async def close(self, *, timeout: float = 2.0) -> None:
+    def _join_until(self, started: float, timeout: float, stall_timeout: float) -> None:
+        deadline = started + timeout
+        while self.alive:
+            with self._condition:
+                idle_deadline = max(started, self._last_delivery) + stall_timeout
+            remaining = min(deadline, idle_deadline) - time.monotonic()
+            if remaining <= 0:
+                return
+            self._thread.join(remaining)
+
+    async def close(self, *, timeout: float = 8.0, stall_timeout: float = 2.0) -> None:
+        # Allow a healthy backlog to drain within the TUI's 10-second grace,
+        # but retain the short bound for a reader or disk that stops progressing.
+        started = time.monotonic()
         with self._condition:
             self._closing = True
             self._condition.notify()
             self._wake_producers()
         # Bound the join itself. Cancelling an unbounded to_thread(join) would
         # still leave asyncio.run waiting for that executor thread at exit.
-        await durable_io(self._thread.join, max(0.0, timeout))
+        await durable_io(self._join_until, started, max(0.0, timeout), max(0.0, stall_timeout))
         if self.alive:
             with self._condition:
                 self._error = TimeoutError("Backend event output did not drain before shutdown")
