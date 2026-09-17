@@ -8,6 +8,32 @@ from agent.runtime.query_profiler import (
     QueryProfiler,
     analyze_profile,
 )
+from agent.runtime.runtime_context_projection import wrap_turn_context
+
+
+@pytest.mark.parametrize("kind", ["append", "rewrite", "shrink"])
+def test_first_prefix_difference_distinguishes_append_from_rewrite(tmp_path, kind):
+    tracker = PromptCacheTracker()
+    profiler = QueryProfiler(enabled=True, session_id="s", request_id="r", step=1, model="m", root=tmp_path)
+    first = [{"role": "system", "content": "private system"},
+             {"role": "user", "content": "private question"},
+             {"role": "user", "content": wrap_turn_context("private runtime") }]
+    profiler.set_request(first, [])
+    tracker.observe(model="m", session_id="s", fingerprint=profiler.fingerprint, usage=None, now=1)
+    if kind == "append":
+        current = [*first, {"role": "assistant", "content": "private answer"}]
+    elif kind == "rewrite":
+        current = [*first[:-1], {"role": "user", "content": wrap_turn_context("changed private state")}]
+    else:
+        current = first[:-1]
+    profiler.set_request(current, [])
+    result = tracker.observe(model="m", session_id="s", fingerprint=profiler.fingerprint, usage=None, now=2)
+    difference = result["first_difference"]
+    assert difference["change"] == {"append": "appended", "rewrite": "changed", "shrink": "removed"}[kind]
+    assert difference["message_index"] == (3 if kind == "append" else 2)
+    if kind != "append":
+        assert difference["previous_kind"] == "runtime_context"
+    assert "private" not in json.dumps(result)
 
 
 def test_query_profiler_is_opt_in_and_writes_hashes_only(tmp_path, monkeypatch):

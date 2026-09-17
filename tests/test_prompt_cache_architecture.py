@@ -126,13 +126,11 @@ def test_react_freezes_turn_context_and_system_prefix_across_tool_iterations():
     second_messages, second_tools = llm.calls[1]
     assert first_messages[0]["role"] == "system"
     assert first_messages[0]["content"].startswith("stable-system")
-    # The dynamic turn context rides the current user message, never the
-    # system prefix, so cross-turn prefix cache stays intact.
+    # Runtime snapshots are separate, replayable messages; user text stays clean.
     assert "snapshot-1" not in first_messages[0]["content"]
-    assert "snapshot-1" in first_messages[1]["content"]
+    assert "snapshot-1" in first_messages[2]["content"]
     assert "check this" in first_messages[1]["content"]
-    assert second_messages[0] == first_messages[0]
-    assert second_messages[1] == first_messages[1]
+    assert second_messages[:len(first_messages)] == first_messages
     assert first_tools == second_tools
     assert {item["function"]["name"] for item in first_tools} == {
         "lookup",
@@ -141,8 +139,16 @@ def test_react_freezes_turn_context_and_system_prefix_across_tool_iterations():
     assert agent.context.messages[0]["content"] == "check this"
     assert "api_content" not in agent.context.messages[0]
 
+    # A genuine second user turn catches the old disappearing-sidecar bug.
+    run(agent.reply(Msg(content=[ContentBlock.text("next question")], id="turn-2")))
+    third_messages, third_tools = llm.calls[2]
+    assert router.calls == 2
+    assert third_messages[:len(second_messages)] == second_messages
+    assert "snapshot-2" in third_messages[-1]["content"]
+    assert third_tools == first_tools
 
-def test_context_index_coexists_with_memory_router_in_one_frozen_user_sidecar():
+
+def test_context_index_coexists_with_memory_router_in_one_frozen_snapshot():
     class Pack:
         trace = SimpleNamespace(record_ids=())
 
@@ -188,8 +194,8 @@ def test_context_index_coexists_with_memory_router_in_one_frozen_user_sidecar():
 
     run(agent.reply(Msg(content=[ContentBlock.text("continue")], id="both-1")))
 
-    assert "<agent-memory>remembered</agent-memory>" in llm.messages[0][1]["content"]
-    assert "<context-index>suggested</context-index>" in llm.messages[0][1]["content"]
+    assert "<agent-memory>remembered</agent-memory>" in llm.messages[0][-1]["content"]
+    assert "<context-index>suggested</context-index>" in llm.messages[0][-1]["content"]
 
 
 def test_deepseek_cache_usage_is_normalized():

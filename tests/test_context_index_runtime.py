@@ -128,7 +128,8 @@ def test_react_injects_one_frozen_index_outside_system_prefix():
     first, second = llm.calls
     assert "<context-index" not in first.messages[0]["content"]
     assert first.messages[1] == second.messages[1]
-    assert "<context-index" in first.messages[1]["content"]
+    assert "<context-index" in first.messages[2]["content"]
+    assert second.messages[:len(first.messages)] == first.messages
     assert agent.context.messages[0]["content"] == "check history"
     assert broker.completed_requests == [broker.build_calls[0]["request_id"]]
     assert agent._context_index_request_id == ""
@@ -304,7 +305,7 @@ def test_reused_external_id_gets_a_fresh_context_index_turn_key():
     first_key, second_key = [call["request_id"] for call in broker.build_calls]
     assert first_key != second_key
     assert broker.completed_requests == [first_key, second_key]
-    assert "<context-index>1</context-index>" in llm.calls[0].messages[1]["content"]
+    assert "<context-index>1</context-index>" in llm.calls[0].messages[-1]["content"]
     assert "<context-index>2</context-index>" in json.dumps(llm.calls[1].messages)
 
 

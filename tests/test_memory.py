@@ -504,11 +504,10 @@ def test_react_prompt_reinjects_memory_after_compression_without_mutating_contex
     prompt, _ = asyncio.run(agent._prepare_prompt_for_llm("hello", FakeLLM.estimate_tokens))
     assert compressed is True
     assert compaction_estimates and all(value == FakeLLM.estimate_tokens(prompt) for value in compaction_estimates)
-    # The dynamic memory pack rides the current user message so the system
-    # prefix stays byte-stable across turns for provider prefix caching.
-    assert "Prefer evidence-backed answers" in prompt[1]["content"]
-    assert "Verify prompt injection" in prompt[1]["content"]
-    assert prompt[1]["content"].count("<agent-memory>") == 1
+    # Memory is a separate replayable snapshot, never injected into user text.
+    assert "Prefer evidence-backed answers" in prompt[-1]["content"]
+    assert "Verify prompt injection" in prompt[-1]["content"]
+    assert prompt[-1]["content"].count("<agent-memory>") == 1
     assert prompt[1]["content"].endswith("hello")
     assert prompt[0] == {"role": "system", "content": "base prompt"}
     assert agent.context.system_prompt == "base prompt"

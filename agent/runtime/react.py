@@ -555,7 +555,7 @@ class ReActAgent(AgentBase):
         for name in sorted(self._active_skill_names):
             if name == CORE_SKILL_NAME:
                 # Core rules belong only in model-requested tool results.
-                # Reinjecting them here rewrites the cached user prefix and
+                # Duplicating them in snapshots adds avoidable context and
                 # hides whether the model actually remembered to read them.
                 continue
             try:
@@ -1884,7 +1884,7 @@ class ReActAgent(AgentBase):
                     prompt.insert(0, {"role": "system", "content": runtime_block})
         # Interaction modes use a strict allowlist and have their own
         # protocol-backed state semantics. Preserve their existing adjacent
-        # runtime-state layout; the cache-stable work-mode sidecar below must
+        # runtime-state layout; the cache-stable work-mode projection must
         # not change Bar Atomic/Stream behavior.
         if self.tool_allowlist is not None and self.runtime_turn_context_provider is not None:
             try:
@@ -2263,8 +2263,7 @@ class ReActAgent(AgentBase):
             self._turn_context_key = cache_key
             self._turn_context_block = "\n\n".join(blocks)
 
-        def with_turn_context(prompt: list[dict]) -> list[dict]:
-            prepared = copy.deepcopy(prompt)
+        def turn_context_text() -> str:
             dynamic_blocks: list[str] = []
             if self._project_instructions is not None:
                 path_rules = self._project_instructions.rules_for(self._task_context_paths)
@@ -2273,9 +2272,15 @@ class ReActAgent(AgentBase):
             skill_contract = self._active_skill_contract()
             if skill_contract:
                 dynamic_blocks.append(skill_contract)
-            combined_context = "\n\n".join(
+            return "\n\n".join(
                 part for part in (self._turn_context_block, *dynamic_blocks) if part
             )
+
+        def with_turn_context(prompt: list[dict]) -> list[dict]:
+            # Restricted interaction modes retain their adjacent state layout.
+            # Work mode instead uses the durable projection below.
+            prepared = copy.deepcopy(prompt)
+            combined_context = turn_context_text()
             if not combined_context:
                 return prepared
             wrapped = (
@@ -2283,14 +2288,6 @@ class ReActAgent(AgentBase):
                 f"{combined_context}\n"
                 "[END SYSTEM-SUPPLIED TURN CONTEXT]"
             )
-            # The turn context changes every user turn (memory recall, runtime
-            # state). Appending it to the system message would invalidate the
-            # whole message-history prefix across turns, discarding DeepSeek /
-            # Qwen prefix-cache savings. Prepend it to the current user message
-            # instead: that message is outside the cached prefix (it is new each
-            # turn) and stays frozen across tool iterations, so intra-turn cache
-            # stability is preserved. Mirrors the runtime_turn_context_provider
-            # layout below.
             for message in reversed(prepared):
                 if message.get("role") != "user":
                     continue
@@ -2333,9 +2330,14 @@ class ReActAgent(AgentBase):
             return [*prepared, *non_system]
 
         def rebuild_prompt() -> list[dict]:
-            rebuilt = with_turn_context(self.context.get_prompt(
+            work_mode = self.tool_allowlist is None and not self.minimal_mode and not self.writing_mode
+            rebuilt = self.context.get_prompt(
                 content_overrides=self._vision_prompt_content_overrides(),
-            ))
+                runtime_context=turn_context_text() if work_mode else None,
+                include_runtime_context=work_mode,
+            )
+            if not work_mode:
+                rebuilt = with_turn_context(rebuilt)
             rebuilt = without_context_open_placeholders(rebuilt)
             if self._fresh_tool_context:
                 for item in rebuilt:

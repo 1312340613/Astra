@@ -353,6 +353,7 @@ class SessionStore:
         return {
             "system_prompt": data.get("system_prompt", ""),
             "system_prompt_projection": data.get("system_prompt_projection", {}),
+            "runtime_context_projection": data.get("runtime_context_projection", {}),
             "persona_id": data.get("persona_id", ""),
             "persona_definition_version": data.get("persona_definition_version", 0),
             "persona_state_revision": data.get("persona_state_revision", 0),

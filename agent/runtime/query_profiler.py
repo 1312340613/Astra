@@ -61,24 +61,30 @@ def _request_segments(messages: list[dict], tools: list[dict]) -> list[dict[str,
             "hash": _digest(tools),
             "tokens": estimate_value_tokens(tools),
         })
-    for message in messages:
+    for index, message in enumerate(messages):
         if message.get("role") == "system":
             stable, dynamic = _split_system_context(str(message.get("content") or ""))
             if dynamic:
                 stable_message = {**message, "content": stable}
                 segments.append({
                     "kind": "system_stable",
+                    "message_index": index,
                     "hash": _digest(stable_message),
                     "tokens": estimate_value_tokens(stable_message),
                 })
                 segments.append({
                     "kind": "system_dynamic",
+                    "message_index": index,
                     "hash": _digest(dynamic),
                     "tokens": estimate_value_tokens(dynamic),
                 })
                 continue
         segments.append({
-            "kind": str(message.get("role") or "message"),
+            "kind": "runtime_context" if (
+                message.get("role") == "user"
+                and str(message.get("content") or "").startswith(_TURN_CONTEXT_MARKER)
+            ) else str(message.get("role") or "message"),
+            "message_index": index,
             "hash": _digest(message),
             "tokens": estimate_value_tokens(message),
         })
@@ -164,6 +170,19 @@ class PromptCacheTracker:
             _usage_int(segment, "tokens")
             for segment in current.get("request_segments", [])
         )
+        previous_segments = previous.get("request_segments", [])
+        current_segments = current.get("request_segments", [])
+        difference = None
+        if reusable_segments < max(len(previous_segments), len(current_segments)):
+            before = previous_segments[reusable_segments] if reusable_segments < len(previous_segments) else None
+            after = current_segments[reusable_segments] if reusable_segments < len(current_segments) else None
+            difference = {
+                "segment": reusable_segments,
+                "change": "appended" if before is None else "removed" if after is None else "changed",
+                "previous_kind": before.get("kind") if before else None,
+                "current_kind": after.get("kind") if after else None,
+                "message_index": (after or before or {}).get("message_index"),
+            }
         if material and not causes and gap_seconds >= 300:
             causes.append("possible_cache_ttl_or_server_eviction")
         return {
@@ -173,6 +192,7 @@ class PromptCacheTracker:
             "drop_tokens": max(0, drop),
             "gap_seconds": round(gap_seconds, 3),
             "causes": causes,
+            "first_difference": difference,
             "reusable_prefix_segments": reusable_segments,
             "reusable_prefix_tokens_estimate": reusable_tokens,
             "reusable_prefix_ratio_estimate": round(

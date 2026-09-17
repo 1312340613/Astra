@@ -43,9 +43,25 @@ ephemeral data exclusion. Run the affected runtime/session/profiler/Appshot and
 interaction tests, lint and type checks. Offline tests establish request prefix
 stability; actual cloud cache hit rates require subsequent real usage.
 
-References: deepseek-ai/deepseek-harness runtime-context.ts and agent-loop README;
-DeepSeek API context caching guide. Local comparison used upstream fb2c4b9e and
+References:
+- https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/agent-loop/src/runtime-context.ts
+- https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/agent-loop/README.md
+- https://api-docs.deepseek.com/zh-cn/guides/kv_cache/
+
+Local comparison used upstream fb2c4b9e and
 the official master implementation checked during the investigation.
 
 Self-review: scope, authority, persistence, reset, budgeting and preview boundaries
 are specified; no new provider dependencies or architecture approval are needed.
+
+## Validation
+
+- 413 related tests passed across projection, memory, Context Index, session
+  handoff, Appshot admission/rollback, compaction, runtime faults, provider
+  adapters, and interaction-mode isolation. Two writing-prompt wording tests
+  were excluded after reproducing the same failures on untouched main 689f883a9:
+  `test_writing_prompt_keeps_the_adult_only_premise_and_leave_hint` and
+  `test_writing_prompt_ships_no_bypass_vocabulary`.
+- Ruff, Pyright (zero errors/warnings), and `git diff --check` passed.
+- No live provider requests, active-session edits or configuration changes.
+  Cloud hit-rate improvement is not measured by these offline tests.

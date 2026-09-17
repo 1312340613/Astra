@@ -168,6 +168,7 @@ async def prepare_appshot_message(agent, msg):
         candidate = copy.copy(agent.context)
         candidate.messages = copy.deepcopy(agent.context.messages)
         candidate.system_projection = copy.deepcopy(agent.context.system_projection)
+        candidate.runtime_projection = copy.deepcopy(agent.context.runtime_projection)
         candidate._message_token_costs = list(agent.context._message_token_costs)
         candidate._session_store = None
         candidate._save_lock = asyncio.Lock()
@@ -195,6 +196,7 @@ class _PreparedAppshotCompaction:
     _fields = (
         "system_prompt", "messages", "compressor", "last_prompt_tokens",
         "_message_token_costs", "_system_token_cost", "_saved_message_count",
+        "runtime_projection",
     )
 
     def __init__(self, context, candidate):
@@ -240,6 +242,7 @@ async def _prepare_appshot_message(agent, msg, cache):
     preview.context = copy.copy(agent.context)
     preview.context.messages = copy.deepcopy(agent.context.messages)
     preview.context.system_projection = copy.deepcopy(agent.context.system_projection)
+    preview.context.runtime_projection = copy.deepcopy(agent.context.runtime_projection)
     preview.context._message_token_costs = list(agent.context._message_token_costs)
     preview.context._session_store = None
     preview.context._save_lock = asyncio.Lock()

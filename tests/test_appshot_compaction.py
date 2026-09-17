@@ -64,6 +64,9 @@ def appshot(text="Inspect this new window"):
 
 
 def test_budget_recovery_stages_history_without_accepting_or_saving(agent):
+    agent.context.get_prompt(runtime_context="original work snapshot")
+    agent.runtime_turn_context_provider = lambda: "new preview-only runtime state"
+    projection_before = copy.deepcopy(agent.context.runtime_projection.state)
     before = copy.deepcopy(agent.context.messages)
     compressor = agent.context.compressor
     assert compressor is not None
@@ -73,6 +76,7 @@ def test_budget_recovery_stages_history_without_accepting_or_saving(agent):
     assert not agent.llm.requests
     assert prepared is not None
     assert agent.context.messages == before
+    assert agent.context.runtime_projection.state == projection_before
     assert agent.context.compressor is compressor
     assert compressor.compression_count == 0
     assert compressor._previous_summary is None
@@ -177,6 +181,8 @@ def test_late_admission_failure_rolls_back_compaction(agent, bundle, monkeypatch
     from agent.runtime.appshot_media import AppshotMediaStore
 
     async def run():
+        agent.context.get_prompt(runtime_context="work snapshot before preview")
+        projection_before = copy.deepcopy(agent.context.runtime_projection.state)
         events = []
         before = copy.deepcopy(agent.context.messages)
         original_compressor = agent.context.compressor
@@ -225,6 +231,7 @@ def test_late_admission_failure_rolls_back_compaction(agent, bundle, monkeypatch
         assert not admission.lock.locked()
         assert not admission.reserved
         assert agent.context.messages == before
+        assert agent.context.runtime_projection.state == projection_before
         assert agent.context.compressor is original_compressor
         assert original_compressor.compression_count == 0
         assert original_compressor._previous_summary is None

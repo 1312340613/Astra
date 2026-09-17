@@ -17,6 +17,7 @@ from .token_estimator import estimate_value_tokens
 from .persona import PersonaState, parse_persona_metadata
 from .prompts import get_prompt_profile, is_legacy_persona_prompt, normalize_system_prompt
 from .system_prompt_projection import SystemPromptProjection
+from .runtime_context_projection import RuntimeContextProjection
 from .time_utils import needs_relative_date_anchor, relative_date_anchor, relative_date_metadata, weekday_label
 
 if TYPE_CHECKING:
@@ -308,6 +309,7 @@ class AgentContext:
     _tools_token_cost: int = 0
     _stable_system_suffix: str = field(default="", init=False, repr=False)
     system_projection: SystemPromptProjection = field(default_factory=SystemPromptProjection, init=False, repr=False)
+    runtime_projection: RuntimeContextProjection = field(default_factory=RuntimeContextProjection, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.max_prompt_tokens == 100_000:
@@ -329,6 +331,7 @@ class AgentContext:
 
     def set_session(self, path: str):
         self.system_projection.reset()
+        self.runtime_projection.reset()
         self._session_path = path
         self._session_store = SessionStore(path)
         self._saved_message_count = 0
@@ -468,6 +471,7 @@ class AgentContext:
         data = {
             "system_prompt": self.system_prompt,
             "system_prompt_projection": self.system_projection.state,
+            "runtime_context_projection": self.runtime_projection.state,
             "persona_id": self.persona_id,
             "persona_definition_version": self.persona_definition_version,
             "persona_state_revision": self.persona_state_revision,
@@ -490,6 +494,7 @@ class AgentContext:
         """Load a candidate without resetting the active session on bad media."""
         candidate = copy.copy(self)
         candidate.system_projection = copy.deepcopy(self.system_projection)
+        candidate.runtime_projection = copy.deepcopy(self.runtime_projection)
         candidate.messages = []
         candidate._message_token_costs = []
         candidate.compressor = None  # never reset the live compressor in preview
@@ -521,6 +526,7 @@ class AgentContext:
             for message in migrated:
                 hydrate_content(message.get("content"), self.session_path)
             self.system_projection = SystemPromptProjection(data.get("system_prompt_projection"))
+            self.runtime_projection = RuntimeContextProjection(data.get("runtime_context_projection"))
             loaded_prompt = data.get("system_prompt")
             if isinstance(loaded_prompt, str) and loaded_prompt.strip():
                 persona_id = data.get("persona_id") if isinstance(data.get("persona_id"), str) else ""
@@ -684,23 +690,39 @@ class AgentContext:
     def get_prompt(
         self,
         content_overrides: dict[int, Any] | None = None,
+        *,
+        runtime_context: str | None = None,
+        include_runtime_context: bool = True,
     ) -> list[dict]:
         """Build provider context with optional non-canonical message content.
 
         Overrides are applied only to the returned deep copy. The canonical
         message list remains safe for checkpoints and session persistence.
+        Work-mode runtime context is recorded separately: None replays existing
+        snapshots, an empty string clears current state, and unchanged text is
+        deduplicated. Restricted interaction modes can exclude this projection.
         """
         result = []
         effective_system = self.effective_system_prompt
         if effective_system:
             result.append({"role": "system", "content": effective_system})
+        inserts = self.runtime_projection.project(self.messages, runtime_context) if include_runtime_context else {}
+        result.extend(inserts.get(0, []))
         for index, stored in enumerate(self.messages):
             override = _NO_OVERRIDE
             if content_overrides is not None and index in content_overrides:
                 override = content_overrides[index]
             message = self._provider_message(stored, override)
             result.append(message)
+            result.extend(inserts.get(index + 1, []))
         return result
+
+    def _runtime_context_tokens(self) -> int:
+        return sum(
+            _estimate_value_tokens(message)
+            for items in self.runtime_projection.project(self.messages).values()
+            for message in items
+        )
 
     def _compaction_messages(self) -> list[dict]:
         """Build canonical compaction input without provider-only time markers."""
@@ -732,7 +754,10 @@ class AgentContext:
         if self.last_prompt_tokens > 0:
             return self.last_prompt_tokens
         self._ensure_token_cache()
-        return max(1, self._system_token_cost + self._tools_token_cost + sum(self._message_token_costs))
+        return max(1, (
+            self._system_token_cost + self._tools_token_cost
+            + sum(self._message_token_costs) + self._runtime_context_tokens()
+        ))
 
     def prompt_token_breakdown(self) -> dict[str, Any]:
         """Return a cheap, model-agnostic breakdown for local diagnostics."""
@@ -743,14 +768,16 @@ class AgentContext:
             role = str(message.get("role") or "unknown")
             role_tokens[role] = role_tokens.get(role, 0) + int(cost)
             role_messages[role] = role_messages.get(role, 0) + 1
+        runtime_tokens = self._runtime_context_tokens()
         estimated_current = max(
             1,
-            self._system_token_cost + self._tools_token_cost + sum(self._message_token_costs),
+            self._system_token_cost + self._tools_token_cost + sum(self._message_token_costs) + runtime_tokens,
         )
         return {
             "system": int(self._system_token_cost),
             "tools": int(self._tools_token_cost),
             "messages": int(sum(self._message_token_costs)),
+            "runtime_context": runtime_tokens,
             "estimated_current": estimated_current,
             "last_request": int(self.last_prompt_tokens),
             "limit": int(self.max_prompt_tokens),
@@ -765,10 +792,14 @@ class AgentContext:
         if callable(estimate):
             return max(1, cast(Callable[[list[dict]], int], estimate)(self.get_prompt()))
         self._ensure_token_cache()
-        return max(1, self._system_token_cost + self._tools_token_cost + sum(self._message_token_costs))
+        return max(1, (
+            self._system_token_cost + self._tools_token_cost
+            + sum(self._message_token_costs) + self._runtime_context_tokens()
+        ))
 
     def reset(self):
         self.system_projection.reset()
+        self.runtime_projection.reset()
         self.messages.clear()
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
@@ -840,6 +871,14 @@ class AgentContext:
         measure_tokens: Callable[[], int], target_tokens: int, report: dict,
     ):
 
+        # Superseded runtime snapshots are useful only for prefix reuse. Retire
+        # them under budget pressure before sacrificing canonical conversation.
+        changed = self.runtime_projection.compact(self.messages)
+        if changed:
+            report["method"] = "cleanup"
+            if not force and measure_tokens() <= target_tokens:
+                return True
+
         # Cheapest-first: deterministic layers before the expensive LLM summary.
         # Drop completed read/network tool steps (side-effecting and current-turn
         # steps stay), then clear old read tool results in place. When those
@@ -857,8 +896,9 @@ class AgentContext:
         )
         self.messages, micro_stats = micro_compact_tool_results(self.messages, tool_risk=risk)
         report.update(dropped_steps=drop_stats.dropped_steps, cleared_results=micro_stats.cleared_results)
-        changed = bool(drop_stats.dropped_steps or micro_stats.cleared_results)
-        if changed:
+        history_changed = bool(drop_stats.dropped_steps or micro_stats.cleared_results)
+        changed = changed or history_changed
+        if history_changed:
             self._message_token_costs.clear()
             self.last_prompt_tokens = 0
             self._saved_message_count = 0
