@@ -77,14 +77,17 @@ def recommend(archive, source, query=QUERY, **kwargs):
         current_embedding.reset(token)
 
 
-def test_production_broker_finds_paraphrases_and_shares_one_query_encoding(archive):
+def test_production_broker_finds_paraphrases_and_shares_one_query_encoding(archive, monkeypatch):
+    # Verify production wiring with fixed vectors, not cold-host latency.
+    # Dedicated timeout/performance tests retain their explicit short budgets.
+    monkeypatch.setenv("ASTRA_CONTEXT_INDEX_SOURCE_MS", "2000")
     assert not SessionRecommendationSource(archive.session).recommend(QUERY, WORKSPACE, "current",
         frozenset(), NOW.timestamp(), plan_query(QUERY, NOW)).relevance
     assert not RecordSource(archive.memory.path).recommend(plan_query(QUERY, NOW), WORKSPACE, frozenset()).relevance
     broker = create_context_index_broker(SimpleNamespace(mode="session", char_budget=900), Path.cwd())
     pack = asyncio.run(broker.build(QUERY, "one", "current", WORKSPACE, NOW, frozenset(),
                                    memory_path=archive.memory.path))
-    assert pack.rows and TEXT in pack.rendered
+    assert pack.rows and TEXT in pack.rendered, repr(broker.last_trace)
     assert len(archive.encoder.calls) == 1
     assert broker.last_trace.semantic_status == {"session": "available", "memory": "available"}
     assert broker.last_trace.source_status["activity"] == "disabled"
