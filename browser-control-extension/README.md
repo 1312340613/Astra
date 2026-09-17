@@ -32,7 +32,19 @@ CDP remains an explicit alternative.
 ## Capabilities and boundaries
 
 - Allowed operations: tabs, attach, open, snapshot, click, type, fill, check, read, select, wait,
-  screenshot (explicitly unsupported), handoff, resume, close.
+  upload_prepare/upload_chunk/upload_commit/upload_abort, screenshot (explicitly
+  unsupported), handoff, resume, close.
+- Version 0.4.0 adds `browser_upload` without new permissions. It discovers even
+  hidden native file inputs, transfers authorized files in 256 KiB chunks, sets
+  `input.files` in the exact document and verifies file metadata. It never opens
+  a picker, activates a window or submits a form. Sites can upload on change.
+  Pending transfers bind the tab grant, origin, frame and element; they expire
+  after 60 seconds idle or five minutes total, and are discarded on navigation,
+  stop, disconnect, handoff or regrant. Only commit is a page write, with no
+  automatic replay after an uncertain result. See the [file workflow](../docs/browser-interaction.md#file-selection-without-desktop-focus).
+- Version 0.4.1 verifies an empty replacement input after clearing when the same
+  document, grant, form and unique field identity are retained. This is read-only
+  result verification, with no new input or authority for the replacement node.
 - In 0.3.3, the worker announces its actual controller operations before the
   unchanged protocol-1 ready frame. Astra combines those capabilities with the
   page helper's capabilities, rather than assuming page support means the
@@ -112,3 +124,15 @@ isolated real CDP browser is available through
 `scripts/cu_form_browser_acceptance.py --scope form`; start the local server
 with `scripts/cu_form_fixture.py` first. This does not replace live extension
 permission/native-host acceptance.
+
+With Playwright available, the opt-in test below launches an isolated headless
+Chromium instance, verifies more than 1 MiB of file bytes against SHA-256 and
+exercises hidden/multiple/iframe inputs, clearing and transaction failures:
+
+```sh
+ASTRA_BROWSER_UPLOAD_E2E=1 ASTRA_BROWSER_EXECUTABLE=/path/to/chromium \
+  node --test tests/test_browser_upload_e2e.cjs
+```
+
+This validates the real page engine. Installed-extension Native Messaging and
+the target website require separate acceptance; this test never submits a form.

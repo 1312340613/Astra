@@ -461,6 +461,11 @@ struct ActionElement {
         return !isSecure && enabled != false
     }
 
+    var opensFilePanel: Bool {
+        roleResult.status == .complete && roleResult.value == "AXButton"
+            && subroleResult.status == .complete && subroleResult.value == "AXFileUploadButton"
+    }
+
     var supportsAXSelectedTextWrite: Bool {
         guard roleResult.status == .complete, let role = roleResult.value else {
             return false
@@ -1255,7 +1260,7 @@ final class SystemActionPerformer: ActionProviding {
             logActionRejected("FOCUS-ACQUIRE-EARLY unverified ref=\(expected.identityToken)")
         }
         if requiresFrontmostWindowContract {
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == selected.pid else {
+            guard liveFrontmostPID() == selected.pid else {
                 throw ActionExecutionError.targetNotFrontmost
             }
         }
@@ -1297,7 +1302,7 @@ final class SystemActionPerformer: ActionProviding {
             }
         }
         if requiresFrontmostWindowContract {
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == selected.pid else {
+            guard liveFrontmostPID() == selected.pid else {
                 throw ActionExecutionError.targetNotFrontmost
             }
         }

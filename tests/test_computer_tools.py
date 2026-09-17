@@ -4712,6 +4712,47 @@ def test_legacy_helper_checked_goal_fails_before_planning(registry, manager, bac
     assert not any(name in {"act", "plan_actions"} for name, _ in backend.calls)
 
 
+@pytest.mark.parametrize("approval", ["once", "deny"])
+def test_dialog_intent_activates_before_an_ordinary_ax_button_with_normal_approval(
+    registry, manager, backend, monkeypatch, approval,
+):
+    monkeypatch.setattr("agent.runtime.tools.computer.enabled_pid_actions", lambda *_: frozenset({"click"}))
+    backend.snapshot_ax_tree_override = {"role": "AXWindow", "observation_capabilities": ["auto_takeover_v1"],
+        "children": [{"role": "AXButton", "element_ref": "snapshot-1:1", "label": "Ordinary"}]}
+    register(registry, manager)
+    focus(registry)
+    snapshot = json.loads(run(registry.execute("computer_snapshot", {}))["fresh_output"])
+    requests = []
+
+    async def approve(request):
+        requests.append(request)
+        return approval
+
+    registry.set_approval_handler(approve)
+    result = run(registry.execute("computer_act", {"snapshot_id": snapshot["snapshot_id"],
+        "opens_dialog": True, "actions": [{"type": "click", "element_ref": "snapshot-1:1"}]}))
+    assert [value[1] for name, value in backend.calls if name == "plan_actions"] == ["foreground_takeover"]
+    assert len(requests) == 1
+    if approval == "once":
+        assert not result.get("error"), result
+        assert result["computer_receipt"]["mode"] == "foreground_takeover"
+        assert sum(name == "act" for name, _ in backend.calls) == 1
+    else:
+        assert result["code"] == "approval_denied"
+        assert not any(name in {"takeover_begin", "act"} for name, _ in backend.calls)
+
+
+def test_dialog_intent_rejects_explicit_background_before_planning(registry, manager, backend):
+    register(registry, manager)
+    focus(registry)
+    snapshot = json.loads(run(registry.execute("computer_snapshot", {}))["fresh_output"])
+    result = run(registry.execute("computer_act", {"snapshot_id": snapshot["snapshot_id"],
+        "interaction_mode": "background", "opens_dialog": True,
+        "actions": [{"type": "click", "element_ref": "snapshot-1:1"}]}))
+    assert result["code"] == "invalid_arguments"
+    assert not any(name in {"plan_actions", "takeover_begin", "act"} for name, _ in backend.calls)
+
+
 def test_background_ax_scroll_uses_normal_approval_without_takeover_or_pid_lookup(
     registry,
     manager,

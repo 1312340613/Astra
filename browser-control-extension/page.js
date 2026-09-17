@@ -1,7 +1,7 @@
 /* Inject only into an isolated world. No page-supplied code is evaluated. */
 (() => {
   'use strict';
-  const VERSION = 6;
+  const VERSION = 10;
   if (globalThis.__astraBrowserPageVersion === VERSION) return;
   globalThis.__astraBrowserPage?.('invalidate', {});
   globalThis.__astraBrowserPageVersion = VERSION;
@@ -11,6 +11,9 @@
   const documentIds = new WeakMap();
   const parent = el => el.parentElement || el.getRootNode()?.host;
   const interactive = 'a[href],button,input,textarea,select,[role],[tabindex],[contenteditable]';
+  let uploadEngine;
+  const fileInput = el => el.tagName === 'INPUT' && el.type === 'file';
+  const fileInfo = el => fileInput(el) ? {accept:el.accept.slice(0,2000),multiple:el.multiple,webkitdirectory:!!el.webkitdirectory,visible:visible(el),files:Array.from(el.files || []).slice(0,10).map(f=>({name:f.name.slice(0,255),size:f.size,type:f.type.slice(0,127)})),filesTruncated:(el.files?.length || 0)>10} : {};
   const secret = el => el.tagName === 'INPUT' && ['password','file','hidden'].includes(el.type);
   const contentEditable = el => el.isContentEditable || ['','true','plaintext-only'].includes(el.getAttribute('contenteditable'));
   const editable = el => contentEditable(el) || el.tagName === 'TEXTAREA' ||
@@ -37,13 +40,13 @@
     if (!el.isConnected || !el.getClientRects().length) return false;
     for (let node = el; node; node = parent(node)) {
       const style = node.ownerDocument.defaultView.getComputedStyle(node);
-      if (node.hidden || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+      if (node.hasAttribute('hidden') || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
     }
     return true;
   }
   function disabled(el) {
     for (let node = el; node; node = parent(node))
-      if (node.matches(':disabled') || node.inert || node.hasAttribute('inert') || node.getAttribute('aria-disabled') === 'true') return true;
+      if (node.matches(':disabled') || node.inert === true || node.hasAttribute('inert') || node.getAttribute('aria-disabled') === 'true') return true;
     return false;
   }
   function validFrame(frame) {
@@ -56,6 +59,26 @@
   }
   function validTarget(target) {
     return target.el.isConnected && target.el.ownerDocument === target.frame.doc && validFrame(target.frame);
+  }
+  function fileReadbackAnchor(el) {
+    const root=el.getRootNode(), id=el.id, escape=el.ownerDocument.defaultView.CSS?.escape;
+    if(!id || id.length>255 || !escape) return null;
+    const selector='#'+escape(id), found=root.querySelectorAll(selector);
+    if(found.length!==1 || found[0]!==el) return null;
+    return {root,selector,form:el.form,name:el.name,accept:el.accept,multiple:el.multiple,
+      directory:el.hasAttribute('webkitdirectory')};
+  }
+  function clearedFileReplacement(target) {
+    // Only observe the same logical field after a clear event rebuilt it.
+    // This neither restores the old action ref nor grants input to a new node.
+    const anchor=target.fileReadbackAnchor;
+    if(target.generation!==generation || !validFrame(target.frame) || target.el.isConnected ||
+       !anchor || !anchor.root.isConnected || (anchor.form && !anchor.form.isConnected)) return null;
+    const found=anchor.root.querySelectorAll(anchor.selector), el=found[0];
+    if(found.length!==1 || !fileInput(el) || el.ownerDocument!==target.frame.doc || disabled(el) ||
+       el.form!==anchor.form || el.name!==anchor.name || el.accept!==anchor.accept ||
+       el.multiple!==anchor.multiple || el.hasAttribute('webkitdirectory')!==anchor.directory) return null;
+    return el;
   }
   function forgetRemoved(records) {
     for (const record of records) for (const removed of record.removedNodes) {
@@ -77,7 +100,7 @@
     return label.replace(/\s+/g,' ').trim().slice(0,limit);
   }
   function role(el) {
-    return el.getAttribute('role') || (editable(el) ? 'textbox' : ({BUTTON:'button',A:'link',SELECT:'combobox',INPUT:['checkbox','radio'].includes(el.type)?el.type:'input'}[el.tagName])) || el.tagName.toLowerCase();
+    return (fileInput(el) ? 'file' : el.getAttribute('role')) || (editable(el) ? 'textbox' : ({BUTTON:'button',A:'link',SELECT:'combobox',INPUT:['checkbox','radio'].includes(el.type)?el.type:'input'}[el.tagName])) || el.tagName.toLowerCase();
   }
   function context(el) {
     for (let node=parent(el), depth=0; node && depth++<6; node=parent(node)) {
@@ -109,9 +132,10 @@
         }
         return;
       }
-      if (node.nodeType!==1 || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName) || !visible(node) || secret(node)) return;
-      if (node.matches(interactive) && !['presentation','none'].includes(role(node))) elements.push({el:node,frame});
-      if (node.matches('iframe,frame')) {
+      if (node.nodeType!==1 || ['SCRIPT','STYLE','NOSCRIPT','TEMPLATE'].includes(node.tagName) || (secret(node) && !fileInput(node))) return;
+      if (fileInput(node)) elements.push({el:node,frame});
+      else if (visible(node) && node.matches(interactive) && !['presentation','none'].includes(role(node))) elements.push({el:node,frame});
+      if (visible(node) && node.matches('iframe,frame')) {
         try {
           if(opaqueSandbox(node)) throw new Error('opaque sandbox');
           const doc=node.contentDocument;
@@ -136,7 +160,7 @@
   }
   function targetInfo(target) {
     const {el,frame}=target;
-    return {frameRef:frame.frameRef,role:role(el),name:name(el),tag:el.tagName.toLowerCase(),id:el.id.slice(0,200),context:context(el),disabled:disabled(el),editable:editable(el),readonly:Boolean(el.readOnly || el.getAttribute('aria-readonly')==='true'),...choiceState(el)};
+    return {frameRef:frame.frameRef,role:role(el),name:name(el),tag:el.tagName.toLowerCase(),id:el.id.slice(0,200),context:context(el),disabled:disabled(el),editable:editable(el),readonly:Boolean(el.readOnly || el.getAttribute('aria-readonly')==='true'),...choiceState(el),...fileInfo(el)};
   }
   function choiceState(el) {
     if(el.tagName==='INPUT' && ['checkbox','radio'].includes(el.type))
@@ -179,7 +203,7 @@
     if(!['all','editable','form'].includes(scope) || typeof role_filter!=='string' || typeof frame_ref!=='string' || !Number.isInteger(offset) || offset<0 || !Number.isInteger(limit) || limit<1 || limit>150 || typeof include_text!=='boolean') throw new Error('Invalid snapshot scope/filter/offset/limit/include_text');
     const data=scan();
     if(frame_ref && !data.frames.some(f=>f.frameRef===frame_ref)) throw failure('stale_snapshot','Frame reference expired; request a fresh unscoped snapshot');
-    const fields=new Set(['textbox','checkbox','radio','combobox']);
+    const fields=new Set(['textbox','checkbox','radio','combobox','file']);
     const formFrames=new Set(data.elements.filter(t=>fields.has(role(t.el))).map(t=>t.frame));
     const selected=data.elements.filter(t=>(scope!=='editable' || editable(t.el)) &&
       (scope!=='form' || fields.has(role(t.el)) || (role(t.el)==='button' &&
@@ -192,7 +216,7 @@
     for(const root of data.roots) observer.observe(root,{childList:true,subtree:true});
     lastOptions={scope,role_filter,frame_ref,offset,limit,include_text};
     const result={url:location.href.slice(0,4096),title:document.title.slice(0,1000),snapshotId,text:include_text?data.text:'',textIncluded:include_text,
-      capabilities:{check:true,checkBatchLimit:20,checkViaClick:true,pageVersion:VERSION,formSnapshot:true},frames:data.frames.map(frameInfo),scope,offset,totalMatches:selected.length,nextOffset:null,elements:[],limitations:data.limitations};
+      capabilities:{check:true,checkBatchLimit:20,checkViaClick:true,pageVersion:VERSION,formSnapshot:true,upload:typeof globalThis.__astraCreateFileUpload==='function' && typeof DataTransfer==='function'},frames:data.frames.map(frameInfo),scope,offset,totalMatches:selected.length,nextOffset:null,elements:[],limitations:data.limitations};
     const groups=new Map();
     if(scope==='form') result.groups=[];
     for(const target of selected.slice(offset,offset+limit)) {
@@ -204,7 +228,7 @@
         const fullName=name(target.el,1001);
         info={ref,frameRef:target.frame.frameRef,role:role(target.el),name:fullName.slice(0,1000),
           ...(fullName.length>1000 ? {nameTruncated:true} : {}),
-          ...(target.el.id ? {id:target.el.id.slice(0,200)} : {}),...choiceState(target.el),
+          ...(target.el.id ? {id:target.el.id.slice(0,200)} : {}),...choiceState(target.el),...fileInfo(target.el),
           ...(disabled(target.el) ? {disabled:true} : {}),
           ...(target.el.readOnly || target.el.getAttribute('aria-readonly')==='true' ? {readonly:true} : {})};
         const group=formGroup(target.el);
@@ -224,16 +248,21 @@
     const overBudget=()=>{const text=JSON.stringify(result);return new Blob([text]).size>60000 || (scope==='form' && text.length>10000);};
     const pruneGroups=()=>{if(result.groups){const used=new Set(result.elements.map(e=>e.group));
       result.groups=result.groups.filter(g=>{if(used.has(g.id)) return true;refs.delete(g.ref);return false;});}};
+    const updatePagination=()=>{
+      if(offset+result.elements.length<selected.length) {
+        result.nextOffset=offset+result.elements.length;
+        const hint='More matching elements available; request nextOffset or narrow the frame/scope.';
+        if(!result.limitations.includes(hint)) result.limitations.push(hint);
+      }
+    };
+    // Pagination fields count towards the budget too, including after trimming.
+    updatePagination();
     if(overBudget()) {
       result.limitations.push(scope==='form' ? 'Form observation limited to 10K characters; use nextOffset or frame_ref.' : 'Snapshot truncated to fit the 64 KiB transport budget; use frame_ref or pagination.');
       while(result.text.length && overBudget()) result.text=result.text.slice(0,Math.floor(result.text.length*0.5));
-      while(result.elements.length && overBudget()) {refs.delete(result.elements.pop().ref);pruneGroups();}
+      while(result.elements.length && overBudget()) {refs.delete(result.elements.pop().ref);pruneGroups();updatePagination();}
       // Frame metadata itself can exceed the transport budget on long URLs.
       if(overBudget()) for(const f of result.frames) f.url=f.url.slice(0,200);
-    }
-    if(offset+result.elements.length<selected.length) {
-      result.nextOffset=offset+result.elements.length;
-      result.limitations.push('More matching elements available; request nextOffset or narrow the frame/scope.');
     }
     return result;
   }
@@ -268,11 +297,22 @@
     });
   }
   async function run(operation,args={}) {
-    if(operation==='invalidate'){generation++;observer.disconnect();refs.clear();lastOptions={};return {status:'observed',message:'References invalidated'};}
+    if(operation==='invalidate'){uploadEngine?.abort();generation++;observer.disconnect();refs.clear();lastOptions={};return {status:'observed',message:'References invalidated'};}
     let dispatched=false;
     try {
       if(args.expectedOrigin && location.origin!==args.expectedOrigin) throw new Error('Page origin changed; renewed approval required');
-      if(operation==='snapshot') return snapshot(args);
+      if(operation==='snapshot') {uploadEngine?.abort();return snapshot(args);}
+      if(operation.startsWith('upload_')) {
+        if(typeof globalThis.__astraCreateFileUpload!=='function') return {status:'unsupported_operation',dispatch_state:'not_dispatched',message:'Reload the updated Browser Control extension'};
+        uploadEngine ??= globalThis.__astraCreateFileUpload({resolve:args=>{
+          const target=resolveChoice(args);
+          if(disabled(target.el)) throw failure('error','File input is disabled');
+          return {...target,generation,fileReadbackAnchor:fileReadbackAnchor(target.el)};
+        },retained:t=>t.generation===generation && validTarget(t),
+          clearedReplacement:clearedFileReplacement,
+          describe:targetInfo,after:()=>snapshot({...lastOptions,include_text:false}),nextTask});
+        return await uploadEngine.run(operation,args);
+      }
       if(operation==='check') return await checkSelections(args);
       // Old protocol-1 controllers already authorize click as a write. Keep the
       // same goal validation/verification engine instead of replaying raw clicks.
@@ -296,6 +336,7 @@
         return {matched:(!target || visible(target.el)) && (!args.text || scan().text.includes(args.text)) && (!args.urlContains || location.href.includes(args.urlContains))};
       }
       const {el,frame}=target, view=el.ownerDocument.defaultView;
+      if(operation==='read' && fileInput(el)) return {status:'observed',target:targetInfo(target),...fileInfo(el)};
       if(!visible(el)) throw new Error('Target is not visible');
       for(let f=frame; f.owner; f=f.parent) if(!visible(f.owner)) throw new Error('Containing frame is not visible');
       if(secret(el)) throw new Error('Password, file and hidden inputs are not supported');

@@ -67,7 +67,7 @@ Chrome 使用 `--browser chrome`。安装器只注册该 ID，并记录当前仓
 
 ## 当前限制
 
-普通快照最多 150 个交互元素、12,000 个文本字符，总序列化预算小于 64 KiB。排除 password/file/hidden 输入框，但一般页面文本仍可能含敏感内容。支持开放 shadow root 和可访问的同来源子 frame；跨来源、不透明 sandbox frame、关闭的 shadow root 仍有限制，不能当作已完整读取。
+普通快照最多 150 个交互元素、12,000 个文本字符，总序列化预算小于 64 KiB。排除 password 和 hidden 文本输入框；文件控件只返回元数据，包括视觉上隐藏的文件控件。一般页面文本仍可能含敏感内容。支持开放 shadow root 和可访问的同来源子 frame；跨来源、不透明 sandbox frame、关闭的 shadow root 仍有限制，不能当作已完整读取。
 
 表单快照使用更小的 10K 字符预算，并在清理/持久化阶段保留紧凑 JSON。长表单分页，题干每组最多 2,000 字符、选项名最多 1,000 字符，附截断标记。勾选验证只证明 DOM 状态，不证明应用保存或服务器持久化。
 
@@ -80,6 +80,20 @@ Chrome 使用 `--browser chrome`。安装器只注册该 ID，并记录当前仓
 ```
 
 之后在 Edge 移除控制扩展，不会卸载 Activity URLs 或改变活动历史。
+
+## 无需桌面焦点的文件选择
+
+Browser Control **0.4.1** 支持 `browser_upload`，在已授权标签页中选择、替换或清空文件。更新后重新加载扩展并重启 Astra；不新增扩展权限。扩展重载后，已有用户标签页需重新 **Allow current tab**。
+
+1. 调用 `browser_snapshot(tab_id=..., scope="form", role_filter="file", include_text=false)`，找到目标文件控件和新 ref。支持隐藏的原生文件输入框及可访问的同来源 iframe。
+2. 调用 `browser_upload(tab_id=..., selector="ref:...", paths=["/绝对路径/文件"])`。审批显示确切文件列表和目标网站，通用网站写权限不授权读取任意文件。网站可能在选择后立即上传，因此这是向网站提供文件的操作。
+3. 核对 `verified`、`files` 和 `after`。验证会读回 `input.files`，比较名称、大小、MIME 类型和顺序；它不证明服务器已收到文件，也不代表已提交。最终 Submit 保持独立。
+
+`paths=[]` 清空选择；多文件要求控件带 `multiple`。最多 10 个普通文件，单文件 32 MiB、合计 64 MiB。首版不支持目录、跨来源 frame、关闭的 shadow root、仅接受拖放的组件。文件不匹配 `accept` 提示时在选择前拒绝；匹配提示也不代表服务器一定接受。CDP 和旧扩展控制器在读取或传输文件内容前明确返回 `unsupported_operation`。
+
+文件经 Native Messaging 分块传输，不打开文件面板、不激活应用、不点击控件、不提交表单。导航、撤销授权、handoff、控件替换或传输超时会废弃未完成的传输。commit 结果不确定时先观察文件元数据，不重放。`browser_fill`/`browser_type` 继续拒绝文件输入框。
+
+清空导致控件重建时，仅在原文档、授权、表单和唯一字段身份仍匹配的情况下，只读核验新控件的空列表，并标记 `verification_source: replacement_input`。不会补发任何输入；目标有歧义或授权已撤销时仍保留未确认状态。
 
 <a id="form-editing-and-verification"></a>
 

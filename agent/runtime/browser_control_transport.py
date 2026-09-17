@@ -13,8 +13,9 @@ import sys
 import uuid
 
 MAX_FRAME = 1024 * 1024
-OPERATIONS = frozenset({'tabs','attach','open','snapshot','click','type','fill','check','read','select','wait','screenshot','handoff','resume','close'})
-WRITES = frozenset({'open','click','type','fill','check','select','close','handoff','resume'})
+UPLOAD_OPERATIONS = frozenset({'upload_prepare','upload_chunk','upload_commit','upload_abort'})
+OPERATIONS = UPLOAD_OPERATIONS | frozenset({'tabs','attach','open','snapshot','click','type','fill','check','read','select','wait','screenshot','handoff','resume','close'})
+WRITES = frozenset({'upload_commit','open','click','type','fill','check','select','close','handoff','resume'})
 
 
 class BrowserUnsupportedOperation(RuntimeError):
@@ -118,7 +119,7 @@ class BrowserControlTransport:
             return operation in operations
         # Protocol-1's original controller supports click, but check was added
         # without a wire-version bump. A page capability cannot establish it.
-        return None if operation in {'check', 'screenshot'} else operation in OPERATIONS
+        return None if operation in {'check', 'screenshot'} | UPLOAD_OPERATIONS else operation in OPERATIONS
 
     @staticmethod
     def _validate_capabilities(value: object) -> dict:

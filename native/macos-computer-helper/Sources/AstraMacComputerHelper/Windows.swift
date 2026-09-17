@@ -1078,7 +1078,7 @@ final class SystemWindowObserver: WindowObserving {
         activity: userActivity,
         activation: activation,
         cursor: virtualCursor,
-        frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        frontmostPID: { liveFrontmostPID() },
         applicationExists: { pid in
             guard let application = NSRunningApplication(processIdentifier: pid) else { return false }
             return !application.isTerminated
@@ -1490,7 +1490,7 @@ final class SystemWindowObserver: WindowObserving {
         try budget.check()
         let backgroundFrontmostPID: pid_t?
         if target.interactionMode == .background {
-            guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
+            guard let frontmostPID = liveFrontmostPID() else {
                 throw WindowObservationError.targetNotFrontmost
             }
             backgroundFrontmostPID = frontmostPID
@@ -1498,7 +1498,7 @@ final class SystemWindowObserver: WindowObserving {
             backgroundFrontmostPID = nil
         }
         guard target.interactionMode == .background ||
-                NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid
+                liveFrontmostPID() == target.pid
         else {
             throw WindowObservationError.targetNotFrontmost
         }
@@ -1589,7 +1589,7 @@ final class SystemWindowObserver: WindowObserving {
                 axIdentity: CFHash(expectedAXWindow)
             )
             : makeCaptureIdentity(
-                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                frontmostPID: liveFrontmostPID(),
                 windowID: window.windowID,
                 bounds: window.frame,
                 axIdentity: CFHash(expectedAXWindow)
@@ -1745,7 +1745,7 @@ final class SystemWindowObserver: WindowObserving {
                 axIdentity: CFHash(expectedAfter)
             )
             : makeCaptureIdentity(
-                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                frontmostPID: liveFrontmostPID(),
                 windowID: windowAfter.windowID,
                 bounds: windowAfter.frame,
                 axIdentity: CFHash(expectedAfter)
@@ -1810,7 +1810,7 @@ final class SystemWindowObserver: WindowObserving {
                     menuBar: menuBarTree
                 )
                 try backgroundSession?.verifyFrontmost(
-                    NSWorkspace.shared.frontmostApplication?.processIdentifier
+                    liveFrontmostPID()
                 )
                 let tree = AXSerializer.serialize(
                     observationTree,
@@ -1935,7 +1935,7 @@ final class SystemWindowObserver: WindowObserving {
                     focusedFinal = expectedFinal
                     focusedFinalBounds = bounds
                     try backgroundSession?.verifyFrontmost(
-                        NSWorkspace.shared.frontmostApplication?.processIdentifier
+                        liveFrontmostPID()
                     )
                 } else {
                     guard let focused = trustedFocusedAXRoot(
@@ -1964,7 +1964,7 @@ final class SystemWindowObserver: WindowObserving {
                         axIdentity: CFHash(expectedFinal)
                     )
                     : makeCaptureIdentity(
-                        frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                        frontmostPID: liveFrontmostPID(),
                         windowID: finalWindow.windowID,
                         bounds: finalWindow.frame,
                         axIdentity: CFHash(expectedFinal)
@@ -2996,7 +2996,7 @@ final class SystemWindowObserver: WindowObserving {
     /// continuity proves the key window; the executor independently bounds both
     /// frames against the already-posted path before every following event.
     private func currentCapturedDragTargetState(for target: WindowTarget, snapshotID: String) throws -> PIDActionTargetState {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+        guard liveFrontmostPID() == target.pid,
               let retained = target.axElement, let identity = target.axIdentity,
               CFHash(retained) == identity else { throw ActionExecutionError.targetNotFrontmost }
         let content = try waitForShareableContent()
@@ -3015,7 +3015,7 @@ final class SystemWindowObserver: WindowObserving {
             target: ActionTargetState(pid: target.pid, windowID: window.windowID,
                 bounds: window.frame, axIdentity: identity, focusedAXIdentity: CFHash(focused),
                 focusedAXBounds: focusedBounds, focusedRootPreference: .selectedWindow),
-            snapshotID: snapshotID, isFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+            snapshotID: snapshotID, isFrontmost: liveFrontmostPID() == target.pid,
             isKeyWindow: true)
     }
 
@@ -3031,7 +3031,7 @@ final class SystemWindowObserver: WindowObserving {
         return observation.stateFactory.make(
             target: observation.target,
             snapshotID: snapshotID,
-            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            frontmostPID: liveFrontmostPID(),
             observedKeyboardFocus: observation.keyboardFocus
         )
     }
@@ -3040,7 +3040,7 @@ final class SystemWindowObserver: WindowObserving {
         for target: WindowTarget,
         expectedFocusedRootPreference: FocusedRootPreference
     ) throws -> (target: ActionTargetState, stateFactory: ForegroundPIDActionStateFactory, keyboardFocus: KeyboardFocusObservation) {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid else {
+        guard liveFrontmostPID() == target.pid else {
             throw ActionExecutionError.targetNotFrontmost
         }
         let content: SCShareableContent

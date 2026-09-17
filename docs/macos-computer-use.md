@@ -257,6 +257,14 @@ the new target. Focus observed after takeover cleanup is not input-delivery evid
 
 Use `computer_apps` → `computer_get_app_state` → one `computer_act` with independent `{type:"click", element_index:currentIndex, checked:true}` goals. The default mode is `auto`: new helpers negotiate and plan foreground takeover internally before dispatch. Legacy helpers retain background behavior; explicit modes remain supported. Never pass a background plan to takeover_begin.
 
+For the first action opening a native file picker, save panel or modal dialog,
+set `opens_dialog:true` on `computer_act` (or explicitly request
+`foreground_takeover`). Chromium can expose a file input as an ordinary AXButton,
+so a successful background AXPress does not imply a focused, bindable panel.
+The dialog intent routes auto through the existing takeover approval before
+input; it does not grant window identity or permit replay. Explicit background
+with this flag is rejected. For ordinary webpage uploads, prefer `browser_upload`.
+
 Protocol remains v4. Capabilities `subtree_v1`, `checked_click_v1`, and `auto_takeover_v1` live inside the extensible AX tree. Old clients can consume ordinary snapshots; new clients do not send optional requests to old helpers. Native `snapshot_subtree` binds the exact old snapshot and AX object to the same window, then re-reads it. A single truncated web form triggers one anchored read during initial observation and checked-batch verification. No unbounded expansion or title-based recovery occurs.
 
 Each checked goal reads first, skips an already satisfied control, otherwise dispatches once and waits at most 400 ms for its AX state. Final `choice_verification` correlates fresh observations with process-scoped AX identities, role and label/title, surviving layout changes and text-context truncation. Correlation tokens cannot authorize actions. Unknown state never means false or permits replay. Numeric 0.0/1.0 and boolean values are recognized; long choice labels are retained within the existing byte bound.

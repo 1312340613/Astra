@@ -16,7 +16,7 @@ final class CGForegroundInputPoster: PIDTargetedInputPosting {
 
     init(
         preflightAccess: @escaping () -> Bool = { CGPreflightPostEventAccess() },
-        frontmostPID: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        frontmostPID: @escaping () -> pid_t? = { liveFrontmostPID() },
         pointIsInTargetWindow: @escaping (CGPoint, pid_t) -> Bool = { _, _ in false },
         deliver: @escaping (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) },
         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }

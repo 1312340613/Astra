@@ -77,6 +77,8 @@ class ExtensionBrowserBackend:
             self._page_capabilities[tab_id or 'default'] = page
             route = self._check_route(tab_id)
             observation['capabilities'] = {**page,
+                'upload': page.get('upload') is True and all(self._operation_support(op) is True for op in
+                    ('upload_prepare', 'upload_chunk', 'upload_commit', 'upload_abort')),
                 'check': None if route == 'unconfirmed' else route != 'unavailable',
                 'nativeCheck': self._operation_support('check'), 'checkRoute': route,
                 'checkBatchLimit': page.get('checkBatchLimit', 0) if route != 'unavailable' else 0}
@@ -174,6 +176,10 @@ class ExtensionBrowserBackend:
 
     async def interactive_read(self, selector, *, tab_id='default', url=''):
         return await self._action('read', tab_id, url, self._target(selector))
+
+    async def interactive_upload(self, selector, files, *, tab_id, url, frame_ref=''):
+        from .browser_upload import upload
+        return await upload(self, selector, files, tab_id=tab_id, url=url, frame_ref=frame_ref)
 
     async def interactive_check(self, selector='', *, checked=True, checks=None, tab_id='default', url=''):
         args = {'checks':checks} if checks is not None else {**self._target(selector), 'checked':checked}

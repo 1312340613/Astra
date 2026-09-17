@@ -380,6 +380,11 @@ ACT_SCHEMA = _object_schema(
             "default": "auto",
             "description": "auto plans the supported input path and handles takeover within the existing approval scope; explicit legacy modes remain available",
         },
+        "opens_dialog": {
+            "type": "boolean",
+            "default": False,
+            "description": "Set true on the FIRST action that opens a native file picker, save panel or modal dialog. With auto, activate the target before input even if AX exposes an ordinary button. Never replay an already-dispatched click to add this flag.",
+        },
     },
     required=("snapshot_id", "actions"),
 )
@@ -2886,6 +2891,7 @@ def register_computer_tools(
         actions: list[dict[str, Any]],
         interaction_mode: str = "auto",
         coordinate_space: str = "window_logical",
+        opens_dialog: bool = False,
         *,
         _permission_call_id: str = "",
     ):
@@ -3657,9 +3663,12 @@ def register_computer_tools(
                 raise ValueError("Pixel coordinates require the latest published target-window snapshot")
             raw_actions = image_actions(raw_actions, published_image_geometry[1])
         requested_mode = str(args.get("interaction_mode") or "auto")
+        opens_dialog = args.get("opens_dialog", False)
         raw_tree = _LAST_PUBLISHED_AX_TREES.get(str(manager.session_id or ""))
-        automatic = requested_mode == "auto" and "auto_takeover_v1" in observation_capabilities(raw_tree)
-        mode = ComputerInteractionMode.BACKGROUND if requested_mode == "auto" else ComputerInteractionMode(requested_mode)
+        automatic = requested_mode == "auto" and not opens_dialog and "auto_takeover_v1" in observation_capabilities(raw_tree)
+        mode = (
+            ComputerInteractionMode.FOREGROUND_TAKEOVER if opens_dialog else ComputerInteractionMode.BACKGROUND
+        ) if requested_mode == "auto" else ComputerInteractionMode(requested_mode)
         prepared = _PreparedComputerAct(
             mode=mode,
             snapshot_id=str(args.get("snapshot_id") or ""),
@@ -3667,6 +3676,12 @@ def register_computer_tools(
             raw_actions=tuple(dict(action) for action in raw_actions),
         )
         prepared_acts[call_id] = prepared
+        if opens_dialog and requested_mode == "background":
+            prepared.failure = _failure(
+                "invalid_arguments", "opens_dialog requires auto or foreground_takeover; no input was dispatched.",
+                retryable=False,
+            )
+            return None
         if manager.handed_off:
             return None
         snapshot_id = prepared.snapshot_id
@@ -3999,7 +4014,7 @@ def register_computer_tools(
         postcondition=verify_snapshot, repeat_guard=False, max_calls_per_turn=32, **common,
     ))
     registry.register(ToolDef(
-        "computer_act", "Execute a guarded batch. For short forms, put independent radio/checkbox choices in one actions array using click + checked:true and fresh form_controls refs/indexes. Already satisfied goals skip input; inspect final choice_verification. An input acknowledgement alone does not prove the desired effect. Default auto plans any needed takeover internally before input. Coordinates default to window_logical; use image_pixels only with the latest published target image. Return fresh refs for continued work. Never replay unknown outcomes or click Submit without task authorization.", ACT_SCHEMA, computer_act,
+        "computer_act", "Execute a guarded batch. For short forms, put independent radio/checkbox choices in one actions array using click + checked:true and fresh form_controls refs/indexes. Already satisfied goals skip input; inspect final choice_verification. An input acknowledgement alone does not prove the desired effect. Default auto plans takeover before input; set opens_dialog:true on the FIRST click opening a native file/save/modal panel, including ordinary or custom buttons. Coordinates default to window_logical; use image_pixels only with the latest published target image. Return fresh refs for continued work. Never replay unknown outcomes or click Submit without task authorization.", ACT_SCHEMA, computer_act,
         risk="write", approval="on_risk", replay="never", max_retries=0,
         result_persistence="request_local", permission_check=act_permission_check,
         permission_grant=act_permission_grant, permission_finalizer=finalize_act_permission,

@@ -104,3 +104,35 @@ test('fill requires write approval; scoped snapshot and read stay background ope
  assert.equal((await f.req('read',1,{ref:'s1:e1'})).ok,true);
  assert.ok(f.scripts.every(o=>o.world==='ISOLATED' && o.target.tabId===1));
 });
+
+for(const action of ['stop','disconnect','revoke','handoff','navigation']) test('pending file buffers invalidated on '+action,async()=>{
+ const f=fixture();f.c.enable();await f.c.grant(1);
+ assert.ok(f.c.capabilities().operations.includes('upload_prepare'));
+ await f.req('upload_prepare',1,{ref:'file',files:[]});
+ const before=f.scripts.length;
+ if(action==='revoke')f.c.revoke(1);
+ else if(action==='handoff')await f.req('handoff',1);
+ else if(action==='navigation')f.c.navigation(1,'https://example.com/new');
+ else f.c[action]();
+ const cleanup=f.scripts.slice(before).filter(s=>s.func && s.args?.length===1);
+ assert.equal(cleanup.length,1);
+ assert.equal(cleanup[0].target.tabId,1);
+ assert.equal(cleanup[0].world,'ISOLATED');
+});
+
+test('file transfer requires origin approval and never activates tabs',async()=>{
+ const f=fixture();f.c.enable();await f.c.grant(1);
+ for(const operation of ['upload_prepare','upload_chunk','upload_commit','upload_abort']) {
+  const r=await f.c.handle({id:operation,operation,tabId:1,args:{}});
+  assert.equal(r.ok,false);assert.equal(f.scripts.length,0);
+ }
+ await f.req('upload_prepare',1,{ref:'file',files:[]});
+ assert.deepEqual(f.scripts[0].files,['file-upload.js','page.js']);
+});
+
+test('uncertain file commit is not retried',async()=>{
+ const f=fixture();f.c.enable();await f.c.grant(1);
+ let count=0;f.api.scripting.executeScript=async o=>{if(o.files)return [];count++;throw Error('lost response')};
+ const result=await f.req('upload_commit',1,{transferId:'t'});
+ assert.equal(result.result.status,'unknown_outcome');assert.equal(count,1);
+});

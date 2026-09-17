@@ -22,6 +22,7 @@ Security invariants (inherited from browser_session):
 from __future__ import annotations
 
 import json
+import hashlib
 import inspect
 import logging
 import re
@@ -60,6 +61,8 @@ def register_browser_tools(
     extract_fn=None,
     status_fn=None,
     enable_extension: bool = False,
+    workdir: str = ".",
+    filesystem_policy=None,
 ) -> BrowserSessionManager:
     """Register browser tools and return the session manager.
 
@@ -96,6 +99,67 @@ def register_browser_tools(
         enabled=lambda: registry.approval_handler is not None,
         approved_scopes=registry.approved_permission_scopes,
     )
+    from .files import FilesystemPolicy
+    from ..browser_upload import inspect_files
+    file_access = filesystem_policy or FilesystemPolicy.load(workdir)
+    # A generic per-origin write grant must never authorize arbitrary local files.
+    upload_approvals = ScopedApprovalStore(approved_scopes=registry.approved_permission_scopes)
+
+    def _upload_context(args):
+        if not args.get("tab_id") or not str(args.get("selector", "")).startswith("ref:"):
+            raise ValueError("browser_upload requires an explicit tab_id and a fresh file input ref")
+        tab, error = _resolve_tab(args["tab_id"])
+        if error:
+            raise ValueError(error)
+        files = inspect_files(args.get("paths"), file_access.workspace)
+        origin = normalized_origin(tab.url)
+        if not origin:
+            raise ValueError("Upload requires an HTTP(S) origin")
+        binding = [origin, tab.tab_id, args["selector"], args.get("frame_ref", ""),
+                   [(str(f.path), f.fingerprint) for f in files]]
+        scope = "browser-upload:" + hashlib.sha256(json.dumps(binding).encode()).hexdigest()
+        return tab, files, scope
+
+    def _upload_permission_check(args):
+        tab, files, scope = _upload_context(args)
+        request = upload_approvals.request(scope=scope, kind="browser_upload", operation="Select browser files",
+            target=normalized_origin(tab.url), reason="Provide these exact local files to this website",
+            detail="The site may upload on selection. This does not authorize clicking Submit or other local files.",
+            arguments={"tab_id": tab.tab_id, "selector": args["selector"], "paths": json.dumps([str(f.path) for f in files])},
+            approval_title="向网页提供指定文件", approval_effect="读取列出的文件并选择到目标网页；网站可能立即上传。",
+            approval_boundary="仅此文件列表、文件身份和目标控件；不包含 Submit")
+        if request is not None:
+            request["files"] = [{**f.metadata(), "path": str(f.path)} for f in files]
+            request["filesystem_requests"] = [r for f in files if
+                (r := file_access.permission_request(str(f.path), write=False, operation="Upload file"))]
+        return request
+
+    async def _browser_upload(tab_id: str, selector: str, paths: list[str], frame_ref: str = ""):
+        try:
+            tab, files, scope = _upload_context({"tab_id": tab_id, "selector": selector, "paths": paths, "frame_ref": frame_ref})
+            if scope not in upload_approvals.approved_scopes:
+                return _failure("Exact upload authorization is missing or the file/target changed", "approval_required")
+            method = getattr(manager.backend, "interactive_upload", None)
+            if not callable(method):
+                from ..browser_control_transport import BrowserUnsupportedOperation
+                return await _finish_action(tab_id, json.dumps(BrowserUnsupportedOperation("browser_upload").result()))
+            error = _interactive_guard(tab)
+            if error:
+                return _failure(error)
+            # Combined approval includes the listed local reads. Grants are exact
+            # paths and revoked in finally, independently of session origin grants.
+            grants = [file_access.grant(str(file.path), "ro") for file in files]
+            try:
+                for file in files:
+                    if file_access.resolve(str(file.original)) != file.path:
+                        raise ValueError("Upload path changed after authorization")
+                result = await _await_backend_result(method(selector, files, tab_id=tab_id, url=tab.url, frame_ref=frame_ref))
+                return await _finish_action(tab_id, str(result))
+            finally:
+                for grant in reversed(grants):
+                    file_access.revoke(grant)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return _connection_failure("browser_upload", exc)
 
     def _get_or_create_session() -> str:
         session_id = active.get("session_id", "")
@@ -978,6 +1042,23 @@ def register_browser_tools(
         trace_context=_browser_trace_context, group="browser",
         permission_check=_browser_write_permission_check("Fill page field", "text"),
         permission_grant=browser_approvals.grant,
+    ))
+    register(ToolDef(
+        name="browser_upload",
+        description=("通过 Browser Control 扩展向指定网页选择/替换本地文件；paths=[] 清空。"
+            "先 browser_snapshot(scope=form,role_filter=file) 取新 ref；支持隐藏 file input 和同源 iframe。"
+            "不打开系统文件面板、不抢桌面焦点。网站可能在选择后自动上传；Submit 是另一个操作。"
+            "最多10个文件，单文件32 MiB、合计64 MiB；verified仅证明input.files匹配。"
+            "unknown_outcome先观察，禁止自动重试；其他后端明确不支持。"),
+        parameters={"type": "object", "properties": {
+            "tab_id": {"type": "string", "minLength": 1},
+            "selector": {"type": "string", "pattern": "^ref:.+"},
+            "paths": {"type": "array", "maxItems": 10, "items": {"type": "string", "minLength": 1}},
+            "frame_ref": {"type": "string", "default": ""}}, "required": ["tab_id", "selector", "paths"]},
+        fn=_browser_upload, risk="write", approval="on_risk", idempotent=False,
+        permission_check=_upload_permission_check, permission_grant=upload_approvals.grant,
+        permission_authoritative=True, permission_yolo_auto_grant=True,
+        trace_context=_browser_trace_context, group="browser",
     ))
     register(ToolDef(
         name="browser_read",

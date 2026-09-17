@@ -185,6 +185,14 @@ class BrowserBackendRouter:
     async def interactive_click(self, *args, **kwargs) -> str:
         return await self._bound(kwargs.get('tab_id', 'default')).interactive_click(*args, **kwargs)
 
+    async def interactive_upload(self, *args, **kwargs) -> str:
+        import json
+        from .browser_control_transport import BrowserUnsupportedOperation
+        method = getattr(self._bound(kwargs['tab_id']), 'interactive_upload', None)
+        if method is None:
+            return json.dumps(BrowserUnsupportedOperation('browser_upload').result())
+        return await method(*args, **kwargs)
+
     async def interactive_type(self, *args, **kwargs) -> str:
         return await self._bound(kwargs.get('tab_id', 'default')).interactive_type(*args, **kwargs)
 

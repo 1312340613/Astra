@@ -151,8 +151,9 @@ snapshot/read on an unbound tab, even if a generic recovery hint suggests them.
 ## Current limits
 
 Page snapshots are bounded to 150 interactive elements, 12,000 text characters
-and a total serialization budget below 64 KiB. Password/file/hidden inputs are
-excluded; arbitrary page text may still contain sensitive information. Open
+and a total serialization budget below 64 KiB. Password and hidden-text inputs
+are excluded. File inputs expose metadata only, including when visually hidden;
+arbitrary page text may still contain sensitive information. Open
 shadow roots and accessible same-origin child frames are supported. Cross-origin
 or opaque sandbox frames and closed shadow roots remain limitations rather than
 being silently presented as fully inspected.
@@ -177,6 +178,41 @@ Uninstall the native host with:
 
 Then remove the control extension in Edge. This does not uninstall Activity URLs
 or change existing activity history.
+
+## File selection without desktop focus
+
+With Browser Control **0.4.1**, `browser_upload` selects, replaces or clears files
+in an already authorized tab. Reload the updated extension and restart Astra.
+No new extension permissions are required. Existing user tabs need a new
+**Allow current tab** grant after extension reload.
+
+1. Call `browser_snapshot(tab_id=..., scope="form", role_filter="file",
+   include_text=false)` and identify the exact file input and its fresh ref.
+   Hidden native inputs and accessible same-origin frames are supported.
+2. Call `browser_upload(tab_id=..., selector="ref:...", paths=["/absolute/file"] )`.
+   Approval names the exact local files and website. A general website write
+   grant does not permit reading arbitrary files. A website may upload as soon
+   as selection changes, so this is a file disclosure operation.
+3. Inspect `verified`, `files` and `after`. Verification reads `input.files`
+   back and compares filename, size, MIME type and order. It does not establish
+   server receipt or submission. A final Submit action is separate.
+
+Use `paths=[]` to clear the input. Multiple files require its `multiple` flag.
+If clearing rebuilds the input, read-only verification can confirm the empty
+replacement with `verification_source: replacement_input`, provided the original
+document, grant, form and unique field identity still match. It sends no further
+input; ambiguous or revoked targets remain unconfirmed.
+Limits are 10 ordinary files, 32 MiB per file and 64 MiB total. Directory inputs,
+cross-origin frames, closed shadow roots and drop-only widgets are unsupported.
+`accept` mismatches are rejected before selection; matching that hint does not
+prove the server will accept the file. CDP and old extension controllers return
+`unsupported_operation` before file content is read or transferred.
+
+Transfers use bounded chunks through Native Messaging and never open a file
+picker, activate the app, click the input or submit the form. Navigation,
+revocation, handoff, target replacement and transfer expiry invalidate pending
+work. An uncertain commit is not replayed: inspect current file metadata before
+continuing. `browser_fill` and `browser_type` still reject file inputs.
 
 ## Form editing and verification
 

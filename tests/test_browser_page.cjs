@@ -24,6 +24,17 @@ test('bounded snapshot omits hidden and secret values, finds open shadow buttons
   w.close();
 });
 
+test('file controls under hidden containers remain discoverable without hiding a named form',async()=>{
+  const w=fixture('<form><label>Visible<input id=visible type=file></label><div hidden><input id=hidden type=file multiple></div><input type=password value=secret></form>');
+  const s=await w.__astraBrowserPage('snapshot',{scope:'form',role_filter:'file'});
+  assert.equal(s.elements.length,2);assert.equal(s.elements[0].visible,true);assert.equal(s.elements[1].visible,false);
+  assert.equal(s.elements[1].multiple,true);assert.ok(!JSON.stringify(s).includes('secret'));
+  const r=await w.__astraBrowserPage('read',{ref:s.elements[1].ref});
+  assert.deepEqual(Array.from(r.files),[]);assert.equal(r.value,undefined);
+  assert.equal((await w.__astraBrowserPage('fill',{ref:s.elements[1].ref,text:'/a/file'})).status,'error');
+  w.close();
+});
+
 function frameForm(w, id, html) {
   const frame=w.document.createElement('iframe');frame.id=id;w.document.body.append(frame);
   const doc=frame.contentDocument;doc.body.innerHTML=html;

@@ -511,6 +511,36 @@ import Testing
     #expect(performer.performed.map(\.method) == [.accessibilityPress, .wait, .accessibilityText])
 }
 
+@Test func fileUploadAXPressRequiresTakeoverBeforeAnyBackgroundInput() throws {
+    let performer = InputDispatcherPerformerSpy()
+    performer.pressSubrole = "AXFileUploadButton"
+    let dispatcher = InputDispatcher(performer: performer)
+    let context = DispatchContext(guardValue: inputDispatcherBackgroundGuard())
+    let plan = try dispatcher.plan(actions: [.click(elementRef: "press")], context: context)
+    #expect(plan.backends == [.axPress])
+    #expect(plan.requiresTakeover)
+    #expect(plan.cooperativeError == nil)
+    #expect(throws: ActionExecutionError.targetNotFrontmost) {
+        _ = try dispatcher.execute(plan, context: context)
+    }
+    #expect(performer.performed.isEmpty)
+}
+
+@Test func fileUploadAXPressKeepsSinglePressWithinAuthorizedForegroundPlan() throws {
+    let performer = InputDispatcherPerformerSpy()
+    performer.pressSubrole = "AXFileUploadButton"
+    let dispatcher = InputDispatcher(performer: performer)
+    let context = DispatchContext(guardValue: inputDispatcherForegroundGuard())
+    let actions = [NativeAction.click(elementRef: "press")]
+    let plan = try dispatcher.plan(actions: actions, context: context)
+    let entries = try dispatcher.consumeForegroundPlan(plan, authority: foregroundConsumptionAuthority(
+        plan: plan, context: context, actions: actions))
+    #expect(plan.requiresTakeover)
+    #expect(entries.count == 1)
+    #expect(entries.first?.backend == .axPress)
+    #expect(performer.performed.isEmpty)
+}
+
 @Test(arguments: [CGFloat(1), CGFloat(999)])
 func positiveVerticalElementScrollPlansOneBackgroundAXIncrement(deltaY: CGFloat) throws {
     let performer = InputDispatcherPerformerSpy()
@@ -2300,6 +2330,7 @@ private final class InputDispatcherPerformerSpy: ActionProviding {
     var pressElement = AXUIElementCreateApplication(11)
     var pressIdentity = "press"
     var pressRole = kAXButtonRole as String
+    var pressSubrole: String?
     let textPreflight: AXTextMutationPreflight
     let failures: [Int: ActionPerformFailure]
     /// 实机条件注入：app 在后台时 macOS 根本不报 kAXFocusedUIElement（实测 -25212），
@@ -2368,7 +2399,7 @@ private final class InputDispatcherPerformerSpy: ActionProviding {
             identityToken: pressIdentity,
             bounds: CGRect(x: 10, y: 10, width: 20, height: 20),
             roleResult: .init(value: pressRole, status: .complete),
-            subroleResult: .init(value: nil, status: .complete),
+            subroleResult: .init(value: pressSubrole, status: .complete),
             enabled: true,
             actionNames: .complete([kAXPressAction as String])
         )

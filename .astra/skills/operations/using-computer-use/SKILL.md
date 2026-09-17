@@ -74,6 +74,7 @@ description: Use when controlling macOS interfaces with computer_* tools.
 
 - 优先用 fresh AX `element_ref` 执行语义动作；截图坐标是窗口相对，且必须绑定实际目标。AX detail 文件的屏幕坐标不可直接作为 act 坐标。
 - `computer_apps.routing_advice` 区分精确版本配置与 `generic_foreground`。未配置应用、`foreground_keyboard` 或 `requires_active=true` 路径可保留默认 `interaction_mode="auto"`，工具在输入前内部规划一次前台接管；显式 `foreground_takeover` 仍可用：通用前台不依赖版本登记，会使用真实鼠标；后台仍严格匹配。建议不是实机保证，helper plan、授权和用户活动检查始终生效。
+- 将打开原生文件选择、保存或模态面板的首次 `computer_act` 必须传 `opens_dialog=true`（默认 `auto` 会在输入前完成前台接管），也可显式 `foreground_takeover`。Chromium 的文件按钮可能只有普通 `AXButton`，无额外身份，不能假设普通 AXPress 会让面板获得焦点。原生和自定义上传按钮均适用；`opens_dialog` 只声明操作目的，不替代目标绑定和审批。网页标准文件输入优先用 `browser_upload`。已经出现 unmatched 面板时不得为补加标记而重放点击或绕过绑定检查。
 - 不自行 activate、固定 sleep、直连 helper 或改兼容表绕过焦点/交互失败。`config/macos_computer_compatibility.json` 的配置与 signed helper resource 要一致；应用升级后重新核对，不能套用历史成功结论。
 - 先看 `form_controls.elements` 的 label/title、context、checked 和当前 ref/index；无需逐层展开深层网页。新版 helper 扩展网页分支深度。窗口栏挤占表单时，get_app_state 自动做一次同窗口原生子树读取。仍截断时用当前 ref 指定 subtree_ref；`subtree_v1` 表示这会重新读取原生子树，旧 helper 仍只做已捕获内容投影。
 

@@ -214,6 +214,8 @@ ASTRA_MACOS_COMPUTER_E2E=1 .venv/bin/python -m pytest tests/macos_computer_e2e -
 
 使用 `computer_apps` → `computer_get_app_state` → 一次 `computer_act`，传入相互独立的 `{type:"click", element_index:currentIndex, checked:true}` 目标。默认 `auto`：新辅助程序在派发前内部协商并规划前台接管；旧程序保留后台行为，也支持显式模式。后台计划不能传给 takeover_begin。
 
+首次打开原生文件选择、保存或模态面板时，在 `computer_act` 传 `opens_dialog:true`，也可显式指定 `foreground_takeover`。Chromium 可能把文件按钮暴露成普通 AXButton；后台 AXPress 成功不代表面板获得焦点或可绑定。对话框标记让 auto 在输入前走现有接管审批，不替代窗口身份，也不允许重放。显式 background 与此标记组合会被拒绝。普通网页上传优先用 `browser_upload`。
+
 协议仍为 v4，`subtree_v1`、`checked_click_v1`、`auto_takeover_v1` 位于可扩展 AX 树中。旧客户端可读取普通快照，新客户端不会给旧辅助程序发送不支持的可选请求。原生 `snapshot_subtree` 将精确旧快照和 AX 对象绑定同一窗口后重读。网页表单截断时，首次观察和批次验证各可触发一次定位子树读取，不无界展开或按标题恢复。
 
 每个 checked 目标先读状态，已满足则跳过，否则只派发一次，最多等 400 ms 观察 AX 状态。最终 `choice_verification` 用进程内 AX 身份、角色、标签/标题关联新观察，可处理布局变化和文本上下文截断。关联 token 不授权动作。未知状态不等于 false，更不允许重放。数值 0.0/1.0 和布尔值均识别，长选择标签仍受现有字节上限限制。

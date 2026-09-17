@@ -932,13 +932,14 @@ async def _async_init(llm_config: LLMConfig, sandbox_timeout: int, workdir: str)
     chrome_path = find_chrome()
     if chrome_path:
         browser_backend = CdpBrowserBackend(chrome_path)
-        browser_backend = register_browser_tools(tools, backend=browser_backend, enable_extension=True).backend
+        browser_backend = register_browser_tools(tools, backend=browser_backend, enable_extension=True, workdir=workdir).backend
     else:
         browser_backend = register_browser_tools(
             tools,
             extract_fn=create_browser_extract_fn(),
             status_fn=create_browser_status_fn(),
             enable_extension=True,
+            workdir=workdir,
         ).backend
     browser_startup = getattr(browser_backend, 'startup', None)
     if callable(browser_startup):

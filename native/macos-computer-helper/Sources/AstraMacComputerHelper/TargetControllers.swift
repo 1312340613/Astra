@@ -466,7 +466,7 @@ struct SystemApplicationActivationRuntime: ApplicationActivationRuntime {
     }
 
     func frontmostPID() -> pid_t? {
-        NSWorkspace.shared.frontmostApplication?.processIdentifier
+        liveFrontmostPID()
     }
 
     func focusedWindowMatches(_ target: WindowTarget) -> Bool {

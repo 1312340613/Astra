@@ -1,5 +1,5 @@
 const MAX_BYTES = 1024 * 1024;
-const OPERATIONS = new Set(['tabs','attach','open','snapshot','click','type','fill','check','read','select','wait','screenshot','handoff','resume','close']);
+const OPERATIONS = new Set(['upload_prepare','upload_chunk','upload_commit','upload_abort','tabs','attach','open','snapshot','click','type','fill','check','read','select','wait','screenshot','handoff','resume','close']);
 const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
 function origin(tab) {
   if (!tab || tab.incognito || !Number.isInteger(tab.id)) throw new Error('Private or missing tab');
@@ -9,7 +9,7 @@ function origin(tab) {
 }
 export function createControl(api, {openTimeoutMs=10000}={}) {
   let enabled = false, epoch = 0, grantSequence = 0;
-  const grants = new Map(), seen = new Set(), revisions = new Map(), queues = new Map();
+  const grants = new Map(), seen = new Set(), revisions = new Map(), queues = new Map(), uploads = new Map();
   const revision=id=>revisions.get(id)||0;
   const changed=id=>revisions.set(id,revision(id)+1);
   const session = crypto.randomUUID();
@@ -36,7 +36,7 @@ export function createControl(api, {openTimeoutMs=10000}={}) {
     const grant = grants.get(id), tab = await api.tabs.get(id);
     check(token);
     try { if (origin(tab) !== grant.origin) throw new Error('Origin changed; grant this tab again'); }
-    catch (error) { grants.delete(id); throw error; }
+    catch (error) { revoke(id); throw error; }
     if (grants.get(id) !== grant) throw new Error('Tab grant revoked');
     return {tab,grant};
   }
@@ -64,13 +64,14 @@ export function createControl(api, {openTimeoutMs=10000}={}) {
   }
   async function pageNow(id, operation, args, token) {
     const {grant} = await target(id, token);
-    const write=['click','type','fill','check','select'].includes(operation);
-    const expected=approvedOrigin(args,grant,write), grantToken=grant.token;
+    const write=['upload_commit','click','type','fill','check','select'].includes(operation);
+    const expected=approvedOrigin(args,grant,write || operation.startsWith('upload_')), grantToken=grant.token;
     if (grant.paused) throw new Error('Tab handed off; resume explicitly');
-    await api.scripting.executeScript({target:{tabId:id},world:'ISOLATED',files:['page.js']});
+    if(operation==='upload_prepare') uploads.set(id,grantToken);
+    await api.scripting.executeScript({target:{tabId:id},world:'ISOLATED',files:['file-upload.js','page.js']});
     const current=await target(id, token);
     if(current.grant!==grant || grant.token!==grantToken) throw new Error('Tab grant changed before dispatch');
-    approvedOrigin(args,grant,write);
+    approvedOrigin(args,grant,write || operation.startsWith('upload_'));
     if (grant.paused) throw new Error('Tab handed off before dispatch');
     try {
       // Once executeScript is submitted, rejection cannot prove no write occurred.
@@ -85,9 +86,11 @@ export function createControl(api, {openTimeoutMs=10000}={}) {
       },args:[operation,args,expected,grantToken]});
       check(token);
       if (!results?.[0] || results[0].result === undefined) throw new Error('No page result');
+      if(['upload_commit','upload_abort'].includes(operation)) uploads.delete(id);
       return results[0].result;
     } catch(error) {
-      if(write) return {status:'unknown_outcome',message:`${error.message || error}; write was submitted and will not be replayed`};
+      if(write) return {status:'unknown_outcome',dispatch_state:'unknown',repeat_input:false,
+        message:`${error.message || error}; write was submitted and will not be replayed`};
       throw error;
     }
   }
@@ -108,13 +111,21 @@ export function createControl(api, {openTimeoutMs=10000}={}) {
       await new Promise(resolve=>setTimeout(resolve,Math.min(100,Math.max(0,deadline-performance.now()))));
     }
   }
-  function revoke(id) { changed(id); grants.delete(id); }
-  function stop() { enabled=false;epoch++;grants.clear(); /* IDs survive reconnect: never replay. */ }
+  function discardUpload(id) {
+    const grantToken=uploads.get(id);
+    if(!grantToken) return;
+    uploads.delete(id);
+    void api.scripting.executeScript({target:{tabId:id},world:'ISOLATED',func:token=>{
+      if(globalThis.__astraBrowserGrantToken===token) return globalThis.__astraBrowserPage?.('invalidate',{});
+    },args:[grantToken]}).catch(()=>{});
+  }
+  function revoke(id) { discardUpload(id);changed(id); grants.delete(id); }
+  function stop() { for(const id of grants.keys()) discardUpload(id);enabled=false;epoch++;grants.clear(); /* IDs survive reconnect: never replay. */ }
   return {
     enable(){enabled=true;},stop,revoke,
-    capabilities(){return {version:1,controllerVersion:2,extensionVersion:api.runtime?.getManifest?.().version || '',
+    capabilities(){return {version:1,controllerVersion:3,extensionVersion:api.runtime?.getManifest?.().version || '',
       operations:[...OPERATIONS].filter(op=>op!=='screenshot'),waitTimeoutMs:10000};},
-    disconnect(){enabled=false;epoch++;},
+    disconnect(){for(const id of grants.keys()) discardUpload(id);enabled=false;epoch++;},
     exportGrants(){return [...grants].map(([tabId,g])=>({tabId,origin:g.origin,owned:g.owned,paused:g.paused}));},
     async restore(saved) {
       const token=epoch, restored=[];
@@ -131,10 +142,10 @@ export function createControl(api, {openTimeoutMs=10000}={}) {
       for(const [id,version,g] of restored) if(revision(id)===version) grants.set(id,g);
       return true;
     },
-    navigation(id,url){ changed(id); const grant=grants.get(id);if(grant){try{if(new URL(url).origin!==grant.origin) revoke(id);else grant.token=`${session}:${++grantSequence}`;}catch{revoke(id);}} },
+    navigation(id,url){ discardUpload(id);changed(id); const grant=grants.get(id);if(grant){try{if(new URL(url).origin!==grant.origin) revoke(id);else grant.token=`${session}:${++grantSequence}`;}catch{revoke(id);}} },
     state(){return {enabled,grantedTabIds:[...grants.keys()]};},
     async grant(id) {
-      const token=epoch, version=revision(id);check(token);const tab=await api.tabs.get(id);check(token);
+      discardUpload(id);const token=epoch, version=revision(id);check(token);const tab=await api.tabs.get(id);check(token);
       const bound=origin(tab);
       if (!await api.permissions.contains({origins:[bound+'/*']})) throw new Error('Page permission not granted');
       check(token);if(revision(id)!==version)throw new Error('Tab changed while granting');grants.set(id,{origin:bound,owned:grants.get(id)?.owned || false,paused:false,token:`${session}:${++grantSequence}`});
@@ -178,7 +189,7 @@ export function createControl(api, {openTimeoutMs=10000}={}) {
           approvedOrigin(args,grant,['click','type','select','handoff','resume'].includes(operation));
           if(operation==='snapshot' && args.metadataOnly===true) result={url:tab.url,title:tab.title||''};
           else if(operation==='attach') result={tabId,url:tab.url,title:tab.title||''};
-          else if(operation==='handoff' || operation==='resume') {grant.paused=operation==='handoff';result={status:grant.paused?'handed_off':'resumed',tabId};}
+          else if(operation==='handoff' || operation==='resume') {discardUpload(tabId);grant.token=`${session}:${++grantSequence}`;grant.paused=operation==='handoff';result={status:grant.paused?'handed_off':'resumed',tabId};}
           else if(operation==='close') {
             revoke(tabId);
             if(grant.owned) await api.tabs.remove(tabId);

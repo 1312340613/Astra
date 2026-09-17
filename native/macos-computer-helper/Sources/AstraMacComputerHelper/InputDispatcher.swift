@@ -731,7 +731,10 @@ final class InputDispatcher: InputDispatching {
                     verifiedElement: element
                 ),
                 backend: .axPress,
-                actionClass: .press
+                actionClass: .press,
+                // A file-picker AXPress can succeed while its system panel is
+                // unfocused and unbindable. Activate before that single press.
+                requiresTakeover: element.opensFilePanel
             )
         case .type:
             guard let element else { return .takeover(backend: .foregroundKeyboard, actionClass: .text) }

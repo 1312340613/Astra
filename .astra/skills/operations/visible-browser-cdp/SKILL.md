@@ -85,6 +85,13 @@ description: Use when the user asks to operate a visible Edge or Chrome browser,
 - 用 snapshot/read 或 after 中的 `checked` 核对具体选项。已经满足用户要求的选项不再点；需要改变时使用 browser_check(selector=当前引用, checked=目标布尔值)，用 verified 和 after 的实际状态核对。原生 checkbox 另有 `indeterminate`；ARIA checkbox 可为 `"mixed"`，属性缺失/无效返回 null。混合、未定义或缺字段不能当成 false，也不能当成目标已满足。`value="1"` 只是表单值。
 - `observed`、checked 或题目变为 Answered 均不等于具体选项已由服务端保存。保存提示可以晚于输入更新，用有限观察核对，不假定每个站点都固定滞后一个周期。旧版本拒绝 include_text 或缺少状态字段时，核对扩展重载和 Astra 重启，不声称已完成精简/选中状态核验。
 
+### 文件选择
+
+- 网页选文件优先使用 `browser_upload`。先 `browser_snapshot(tab_id=实际逻辑标签, scope="form", role_filter="file", include_text=false)`，按 label、accept、frameRef 识别实际 input，再传最新 `ref:` 与明确本地文件路径数组。隐藏 file input 也可操作；不先点击可见 Choose file 按钮打开系统面板。
+- 支持选择、替换和 `paths=[]` 清空；多文件需 multiple。最多 10 个普通文件、单个 32 MiB、合计 64 MiB。不支持目录、跨域 frame、closed shadow root 或纯拖放控件。文件内容不经过模型；不要自行转 base64 或写入工具参数。
+- 这是向明确网站提供明确文件的操作，网站可能在 change 时立即上传。`verified` 仅证明 input.files 中的名称、大小、类型和顺序匹配；结合页面观察核对实际结果。最终 Submit 独立，用户说不提交就停在选好文件。
+- 需要 Browser Control 0.4.0 并重启 Astra。旧扩展或 CDP 返回 unsupported_operation/not_dispatched 时按提示更新，不反复换引用；unknown_outcome 时先只读核对，不能自动切 CU 重放。文件授权只涵盖本次具体文件身份和目标控件。
+
 ## 能力边界与 CDP 备用路径
 
 - extension 不支持 `browser_screenshot`、任意 JS eval、cookie 读取。以结构化快照及结果核验；不能声称截图过，也不要拿另一个 CDP 标签的截图验证当前扩展标签。
