@@ -197,8 +197,11 @@ def test_member_can_use_fifty_turns_and_last_turn_is_tool_free(tmp_path, monkeyp
     async def scenario():
         llm = LLM()
         async with running_team(tmp_path, monkeypatch, llm) as (call, team, store):
-            spawned = await call("team_spawn", team_id=team["id"], name="worker", goal="investigate", timeout=30)
-            result = await call("delegate_poll", process_id=spawned["process"]["process_id"], wait_ms=5000)
+            timeout = 30
+            spawned = await call("team_spawn", team_id=team["id"], name="worker", goal="investigate", timeout=timeout)
+            # A short poll may still report running on a busy CI runner. Wait
+            # for completion within the worker's existing budget, not five seconds.
+            result = await call("delegate_poll", process_id=spawned["process"]["process_id"], wait_ms=timeout * 1000)
             assert result["worker"]["status"] == "completed"
             assert len(llm.requests) == 50
             assert llm.requests[-1]["tools"] is None

@@ -783,8 +783,8 @@ class LearningReviewer:
                         temperature=0.1,
                         disable_thinking=os.getenv("LEARNING_REVIEW_DISABLE_THINKING", "1").lower()
                         in {"1", "true", "yes", "on"},
-                        request_timeout=timeout if attempt == 1 else max(
-                            0.001, deadline - asyncio.get_running_loop().time(),
+                        request_timeout=timeout if attempt == 1 else min(
+                            timeout, max(0.001, deadline - asyncio.get_running_loop().time()),
                         ),
                         max_retries=self.max_retries(),
                     ))

@@ -258,9 +258,11 @@ class BrowserControlTransport:
         task = asyncio.current_task()
         self._tasks.add(task)
         try:
+            if self._closed:
+                return
             auth = await asyncio.wait_for(read_frame(reader), 3)
             token = auth.get('token')
-            if not isinstance(token, str) or not secrets.compare_digest(token, self._token) or self.connected:
+            if self._closed or not isinstance(token, str) or not secrets.compare_digest(token, self._token) or self.connected:
                 return
             self._client = writer
             self.controller_capabilities = {}
@@ -364,12 +366,17 @@ class BrowserControlTransport:
         self._closed = True
         self._connection_changed.set()
         if self._server is not None:
-            self._server.close(); await self._server.wait_closed(); self._server = None
+            self._server.close()
         if self._client is not None:
             self._client.close()
         tasks = [task for task in self._tasks if task is not asyncio.current_task()]
         for task in tasks: task.cancel()
         if tasks: await asyncio.gather(*tasks, return_exceptions=True)
+        # Python 3.12+ waits for active connections too. Accepted peers must be
+        # closed first, including those still waiting for authentication.
+        if self._server is not None:
+            await self._server.wait_closed()
+            self._server = None
         if self._lock_fd is not None:
             try:
                 if json.loads(self.descriptor_path.read_text()).get('token') == self._token:

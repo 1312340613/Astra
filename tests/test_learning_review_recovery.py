@@ -49,6 +49,34 @@ def test_one_precise_repair_reuses_evidence_without_echoing_bad_output(tmp_path,
     assert reviewer.lifecycle.new_review_sources("session", MESSAGES) == []
 
 
+@pytest.mark.parametrize("budget,elapsed", [(360.0, 0.0), (360.0, 12.5), (0.0001, 0.0)])
+def test_retry_timeout_never_exceeds_shared_budget(tmp_path, monkeypatch, budget, elapsed):
+    monkeypatch.setenv("LEARNING_REVIEW_TIMEOUT", str(budget))
+    now = 152.2  # (now + 360) - now rounds up even without elapsed time.
+
+    class TimedLLM(SequenceLLM):
+        async def chat_limited(self, messages, **options):
+            nonlocal now
+            response = await super().chat_limited(messages, **options)
+            now += elapsed
+            return response
+
+    llm = TimedLLM([{"content": "not JSON"}, VALID])
+    reviewer = reviewer_for(tmp_path, llm)
+
+    async def scenario():
+        # Both fixture responses finish synchronously: only the review's clock
+        # arithmetic is under test, not event-loop scheduling or a real sleep.
+        with monkeypatch.context() as clock:
+            clock.setattr(asyncio.get_running_loop(), "time", lambda: now)
+            await reviewer._review_response(MESSAGES)
+
+    asyncio.run(scenario())
+    first, retry = [options["request_timeout"] for _, options in llm.calls]
+    assert 0 < retry <= first == budget
+    assert retry == pytest.approx(budget - elapsed)
+
+
 def test_failed_repair_is_not_a_timeout_and_preserves_evidence(tmp_path, caplog, capsys):
     llm = SequenceLLM([{"content": "SENSITIVE_SENTINEL"}] * 2)
     reviewer = reviewer_for(tmp_path, llm)

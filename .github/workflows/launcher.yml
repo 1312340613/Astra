@@ -90,6 +90,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-26]
+        python-version: ['3.11.15']
+        include:
+          # Server.wait_closed also waits for peers starting with Python 3.12.
+          - os: windows-2025
+            python-version: '3.12'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
@@ -101,7 +106,7 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           version: '0.11.27'
-          python-version: '3.11.15'
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
           cache-dependency-glob: uv.lock
           download-from-astral-mirror: false

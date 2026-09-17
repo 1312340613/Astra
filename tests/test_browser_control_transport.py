@@ -24,6 +24,97 @@ async def connect_peer(server):
     return reader,writer
 
 
+@pytest.mark.parametrize('peer_state', ['authenticating', 'authenticated', 'ready'])
+@run_async
+async def test_close_disconnects_peers_before_waiting_for_server(tmp_path, monkeypatch, peer_state):
+    server = BrowserControlTransport(tmp_path / 'endpoint')
+    accepted = asyncio.Event()
+    original_accept = server._accept
+
+    async def accept(reader, writer):
+        accepted.set()
+        await original_accept(reader, writer)
+
+    monkeypatch.setattr(server, '_accept', accept)
+    await server.start()
+    descriptor = json.loads(server.descriptor_path.read_text())
+    reader, writer = await asyncio.open_connection('127.0.0.1', descriptor['port'])
+    try:
+        await asyncio.wait_for(accepted.wait(), 2)
+        if peer_state != 'authenticating':
+            writer.write(encode_frame({'token': descriptor['token']}))
+            await writer.drain()
+            assert (await read_frame(reader))['ok']
+        if peer_state == 'ready':
+            await acknowledge_ready(server, writer)
+
+        # The remote peer must not have to disconnect before close can finish.
+        await asyncio.wait_for(asyncio.gather(server.close(), server.close()), 2)
+        assert await asyncio.wait_for(reader.read(), 2) == b''
+        assert not server.connected and not server.ready
+        assert not server._tasks and server._server is None and server._lock_fd is None
+        assert not server.descriptor_path.exists()
+        replacement = BrowserControlTransport(server.directory)
+        try:
+            await replacement.start()
+        finally:
+            await replacement.close()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.wait_for(server.close(), 2)
+
+
+@run_async
+async def test_accept_callback_after_close_does_not_wait_for_authentication(tmp_path, monkeypatch):
+    server = BrowserControlTransport(tmp_path / 'endpoint')
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_accept = server._accept
+
+    async def delayed_accept(reader, writer):
+        entered.set()
+        await release.wait()
+        await original_accept(reader, writer)
+
+    monkeypatch.setattr(server, '_accept', delayed_accept)
+    await server.start()
+    descriptor = json.loads(server.descriptor_path.read_text())
+    reader, writer = await asyncio.open_connection('127.0.0.1', descriptor['port'])
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        closing = asyncio.create_task(server.close())
+        await asyncio.sleep(0)
+        assert server._closed
+        release.set()
+        await asyncio.wait_for(closing, 2)
+        assert await asyncio.wait_for(reader.read(), 2) == b''
+    finally:
+        release.set()
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.wait_for(server.close(), 2)
+
+
+@run_async
+async def test_close_fails_pending_write_without_replaying_it(tmp_path):
+    server = BrowserControlTransport(tmp_path / 'endpoint')
+    reader, writer = await connect_peer(server)
+    await acknowledge_ready(server, writer)
+    pending = asyncio.create_task(server.request('click', tab_id='7', args={'selector': 'button'}))
+    try:
+        assert (await asyncio.wait_for(read_frame(reader), 2))['operation'] == 'click'
+        await asyncio.wait_for(server.close(), 2)
+        with pytest.raises(ConnectionError, match='unknown_outcome.*will not be replayed'):
+            await asyncio.wait_for(pending, 2)
+        assert not server._pending
+        assert await asyncio.wait_for(reader.read(), 2) == b''
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.wait_for(server.close(), 2)
+        await asyncio.gather(pending, return_exceptions=True)
+
+
 @run_async
 async def test_capability_announcement_precedes_legacy_ready_and_resets_on_reconnect(tmp_path):
     server=BrowserControlTransport(tmp_path/'endpoint')
