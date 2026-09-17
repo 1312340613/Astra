@@ -1,10 +1,12 @@
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from agent.runtime.event_stream import RuntimeEventStream
+from agent.runtime import event_writer
 from agent.runtime.event_writer import OrderedEventWriter, EventQueueFull
 
 
@@ -74,31 +76,46 @@ def test_slow_event_persistence_does_not_block_loop_and_replay_stays_ordered(tmp
     asyncio.run(scenario())
 
 
-def test_default_close_drains_a_slow_but_progressing_journal(tmp_path):
+def test_default_close_allows_progress_past_the_stall_budget(monkeypatch):
+    # Model a three-second drain without making the assertion depend on CI
+    # filesystem latency. Real persistence/replay and pipe tests remain above.
+    clock = [0.0]
+
+    class WriterThread:
+        def __init__(self, *, target, **_kwargs):
+            self.writer = target.__self__
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return bool(self.writer._queue)
+
+        def join(self, timeout):
+            deadline = clock[0] + timeout
+            while self.writer._queue and clock[0] + 1 <= deadline:
+                kind, payload, size, _queued, _request = self.writer._queue.popleft()
+                self.writer._bytes -= size
+                clock[0] += 1
+                self.writer._deliver(kind, payload)
+            if self.is_alive():
+                clock[0] = deadline
+
+    monkeypatch.setattr(event_writer, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], perf_counter=time.perf_counter,
+    ))
+    monkeypatch.setattr(event_writer, "threading", SimpleNamespace(
+        Condition=threading.Condition, Thread=WriterThread,
+    ))
+
     async def scenario():
-        stream = RuntimeEventStream(tmp_path / "slow-events.db")
         output = []
-        stream._fault_hook = lambda stage: time.sleep(0.1) if stage == "before_commit" else None
-        writer = OrderedEventWriter(stream, output.append)
-        for index in range(30):
+        writer = OrderedEventWriter(None, output.append)
+        for index in range(3):
             writer.send({"type": "done", "index": index})
-        ticks = 0
-
-        async def heartbeat():
-            nonlocal ticks
-            while writer.alive:
-                ticks += 1
-                await asyncio.sleep(0.01)
-
-        pulse = asyncio.create_task(heartbeat())
-        try:
-            await writer.close()
-        finally:
-            await asyncio.to_thread(writer._thread.join, 5)
-            await pulse
-        assert ticks > 5
-        assert [event["index"] for event in output] == list(range(30))
-        assert len(stream.replay(0)) == 30
+        await writer.close()
+        assert [event["index"] for event in output] == list(range(3))
+        assert clock[0] == 3
         assert not writer.alive
 
     asyncio.run(scenario())
