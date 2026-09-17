@@ -68,4 +68,10 @@ jobs:
       # Phase T runs normal tests, wheel smoke, latency acceptance and Swift
       # tests in sequence. Performance never shares a runner with a Swift build.
       - name: Run release gate
+        # Keep SQLite and browser profiles on the runner scratch volume,
+        # outside the checkout, just like the launcher compatibility gate.
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: uv run --locked --no-sync python scripts/phase_t_gate.py --keep-going ${{ matrix.gate_args }}

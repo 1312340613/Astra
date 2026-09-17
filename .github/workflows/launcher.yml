@@ -26,6 +26,7 @@ on:
       - 'tests/test_public_image_boundary.py'
       - 'agent/cli/browser_commands.py'
       - 'tests/test_browser*.py'
+      - 'tests/test_cdp_backend.py'
       - 'tests/test_mcp*.py'
       - 'tests/test_self_protection.py'
       - 'tests/test_runtime_maintenance.py'
@@ -73,6 +74,7 @@ on:
       - 'tests/test_public_image_boundary.py'
       - 'agent/cli/browser_commands.py'
       - 'tests/test_browser*.py'
+      - 'tests/test_cdp_backend.py'
       - 'tests/test_mcp*.py'
       - 'tests/test_self_protection.py'
       - 'tests/test_runtime_maintenance.py'
@@ -138,6 +140,10 @@ jobs:
       - name: Exercise native launchers and update/recovery contracts
         # Keep database fixtures on the runner's scratch volume, outside the
         # checkout. Windows' user-profile temp volume can stall durable writes.
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: >-
           uv run --locked --no-sync python -m pytest -q
           --basetemp="${{ runner.temp }}/astra-launcher-pytest"
@@ -158,5 +164,6 @@ jobs:
           tests/test_context_index_semantic.py
           tests/test_session_lifecycle_protocol.py tests/test_session_wakeup_protocol.py
           tests/test_browser_lifecycle.py tests/test_browser_child_environment.py tests/test_mcp_recovery.py
+          tests/test_cdp_backend.py
           tests/test_browser_backend_router.py tests/test_browser_control_transport.py
           tests/test_extension_browser_backend.py tests/test_browser_auto_connect.py

@@ -204,10 +204,41 @@ class TestCdpBackendExtract:
         result = run(backend.extract(""))
         assert "url is required" in result
 
+    def test_extract_deadline_cancels_output_and_cleans_owned_profile(self, monkeypatch, tmp_path):
+        async def scenario():
+            profile = tmp_path / "owned-profile"
+            profile.mkdir()
+            cancelled = asyncio.Event()
+
+            async def stalled_output():
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+            process = mock.Mock(communicate=mock.AsyncMock(side_effect=stalled_output))
+            spawn = mock.AsyncMock(return_value=process)
+            reap = mock.AsyncMock()
+            monkeypatch.setattr(cdp_backend_mod, "_make_temp_profile", lambda: str(profile))
+            monkeypatch.setattr(cdp_backend_mod.asyncio, "create_subprocess_exec", spawn)
+            monkeypatch.setattr(cdp_backend_mod, "_force_kill_process_tree", reap)
+            backend = CdpBrowserBackend("/fake/chrome", timeout=1)
+
+            result = await asyncio.wait_for(backend.extract("data:text/html,deadline"), timeout=10)
+
+            assert "Chrome timed out after 1s" in result
+            assert cancelled.is_set()
+            reap.assert_awaited_once_with(process)
+            assert not profile.exists()
+
+        run(scenario())
+
     @requires_native_chrome
     def test_extract_data_url(self):
         """Extract text from a data: URL (no network needed)."""
-        backend = CdpBrowserBackend(find_chrome(), timeout=15)
+        # Check content with the production cold-start budget. The regression
+        # above checks a stuck child's short deadline without real Chrome.
+        backend = CdpBrowserBackend(find_chrome())
         html = "<html><body><h1>CDP Test</h1><p>Hello from headless Chrome</p></body></html>"
         data_url = f"data:text/html,{html}"
         result = run(backend.extract(data_url))
@@ -216,7 +247,7 @@ class TestCdpBackendExtract:
 
     @requires_native_chrome
     def test_extract_truncates(self):
-        backend = CdpBrowserBackend(find_chrome(), timeout=15)
+        backend = CdpBrowserBackend(find_chrome())
         long_text = "A" * 500
         html = f"<html><body><p>{long_text}</p></body></html>"
         data_url = f"data:text/html,{html}"
@@ -226,7 +257,7 @@ class TestCdpBackendExtract:
 
     @requires_native_chrome
     def test_extract_strips_scripts(self):
-        backend = CdpBrowserBackend(find_chrome(), timeout=15)
+        backend = CdpBrowserBackend(find_chrome())
         html = '<html><body><script>var x = "should not appear";</script><p>Clean text</p></body></html>'
         data_url = f"data:text/html,{html}"
         result = run(backend.extract(data_url))
