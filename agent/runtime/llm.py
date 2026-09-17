@@ -292,6 +292,48 @@ class _RequestBudget:
         )
 
 
+@dataclass
+class _StreamReadTiming:
+    """Per-attempt idle budget charges provider reads, not consumer pauses."""
+
+    read_wait_seconds: float = 0.0
+    idle_wait_seconds: float = 0.0
+    local_pause_seconds: float = 0.0
+    chunk_count: int = 0
+    meaningful_chunk_count: int = 0
+    last_chunk_kind: str = "none"
+    _last_read_finished: float | None = None
+
+    async def read(self, iterator, budget: _RequestBudget, idle_timeout: float):
+        started = time.monotonic()
+        if self._last_read_finished is not None:
+            self.local_pause_seconds += max(0.0, started - self._last_read_finished)
+        try:
+            remaining = idle_timeout - self.idle_wait_seconds if idle_timeout > 0 else None
+            if remaining is not None and remaining <= 0:
+                # Keep the absolute request/turn deadline authoritative, even
+                # when empty frames have exhausted the read-only idle budget.
+                overall_remaining = budget.remaining()
+                if overall_remaining is not None and overall_remaining <= 0:
+                    budget._raise_overall_timeout()
+                raise _RequestCapTimeout()
+            return await budget.run(iterator.__anext__, cap=remaining)
+        finally:
+            finished = time.monotonic()
+            elapsed = max(0.0, finished - started)
+            self.read_wait_seconds += elapsed
+            self.idle_wait_seconds += elapsed
+            self._last_read_finished = finished
+
+    def observe(self, kind: str) -> None:
+        # Callers supply fixed labels, never provider text or tool arguments.
+        self.chunk_count += 1
+        self.last_chunk_kind = kind
+        if kind in {"reasoning", "content", "tool", "finish"}:
+            self.meaningful_chunk_count += 1
+            self.idle_wait_seconds = 0.0
+
+
 def _image_source_path(part: dict) -> str:
     metadata = part.get("metadata")
     source = metadata.get("source_path", "") if isinstance(metadata, dict) else ""
@@ -905,23 +947,16 @@ class OpenAICompatibleProvider:
         recovered = False
         recovery_usage: dict = {}
 
-        async def _consume_stream():
+        async def _consume_stream(timing: _StreamReadTiming):
             nonlocal emitted_any, full_content, full_reasoning, usage, last_chunk, finish_reason
             idle_timeout = self.config.idle_timeout
-            last_progress = time.monotonic()
 
             async def next_chunk(iterator):
                 try:
                     # Completion is already known. Allow a short usage trailer,
                     # not another full idle timeout waiting for socket closure.
                     effective_idle = min(idle_timeout, 1.0) if finish_reason and idle_timeout > 0 else 1.0 if finish_reason else idle_timeout
-                    remaining = effective_idle - (time.monotonic() - last_progress)
-                    if effective_idle > 0 and remaining <= 0:
-                        raise _RequestCapTimeout()
-                    return await budget.run(
-                        iterator.__anext__,
-                        cap=remaining if effective_idle > 0 else None,
-                    )
+                    return await timing.read(iterator, budget, effective_idle)
                 except LLMOverallTimeout:
                     if finish_reason:
                         raise StopAsyncIteration from None
@@ -934,7 +969,7 @@ class OpenAICompatibleProvider:
                     ) from exc
 
             async def consume_chunks() -> AsyncGenerator[dict, None]:
-                nonlocal emitted_any, full_content, full_reasoning, usage, last_chunk, finish_reason, last_progress
+                nonlocal emitted_any, full_content, full_reasoning, usage, last_chunk, finish_reason
                 iterator = stream.__aiter__()
                 while True:
                     try:
@@ -949,23 +984,31 @@ class OpenAICompatibleProvider:
                         usage = _usage_dict(chunk.usage)
 
                     if not chunk.choices:
+                        timing.observe("usage" if getattr(chunk, "usage", None) else "empty")
                         continue
 
                     choice = chunk.choices[0]
                     # Usage may arrive after the terminal delta. Repeated
                     # terminal frames must not append arguments or text twice.
                     if finish_reason:
+                        timing.observe("terminal_repeat")
                         continue
                     delta = choice.delta
                     # Role-only/empty heartbeat chunks must not keep a stalled
                     # generation alive forever when overall_timeout is disabled.
-                    if choice.finish_reason or (delta and (
-                        getattr(delta, "reasoning_content", None) or delta.content
-                        or any(tc.id or (tc.function and (
+                    kind = "empty"
+                    if choice.finish_reason:
+                        kind = "finish"
+                    elif delta:
+                        if any(tc.id or (tc.function and (
                             tc.function.name or tc.function.arguments
-                        )) for tc in (delta.tool_calls or []))
-                    )):
-                        last_progress = time.monotonic()
+                        )) for tc in (delta.tool_calls or [])):
+                            kind = "tool"
+                        elif delta.content:
+                            kind = "content"
+                        elif getattr(delta, "reasoning_content", None):
+                            kind = "reasoning"
+                    timing.observe(kind)
                     if choice.finish_reason:
                         finish_reason = str(choice.finish_reason)
                     if not delta:
@@ -1022,7 +1065,8 @@ class OpenAICompatibleProvider:
             asyncio.TimeoutError,
         ) + TRANSPORT_REQUEST_ERRORS
         while True:
-            stream_events = _consume_stream()
+            timing = _StreamReadTiming()
+            stream_events = _consume_stream(timing)
             try:
                 try:
                     async for event in stream_events:
@@ -1063,13 +1107,21 @@ class OpenAICompatibleProvider:
                     summary = summarize_provider_error(exc)
                     logger.error(
                         "llm stream failed error_type=%s category=%s status=%s "
-                        "request_id=%s component=stream attempt=%s emitted_any=%s",
+                        "request_id=%s component=stream attempt=%s emitted_any=%s "
+                        "read_wait_seconds=%.3f idle_wait_seconds=%.3f local_pause_seconds=%.3f "
+                        "chunks=%s meaningful_chunks=%s last_chunk_kind=%s",
                         summary.error_type,
                         summary.category,
                         summary.status_code,
                         summary.request_id,
                         budget.attempts,
                         emitted_any,
+                        timing.read_wait_seconds,
+                        timing.idle_wait_seconds,
+                        timing.local_pause_seconds,
+                        timing.chunk_count,
+                        timing.meaningful_chunk_count,
+                        timing.last_chunk_kind,
                     )
                     raise
                 logger.warning("llm stream retry attempt=%s", budget.attempts)
