@@ -136,8 +136,11 @@ jobs:
       - name: Install locked test dependencies
         run: uv sync --locked --extra dev --extra mcp --extra tracing --extra server --extra notebook
       - name: Exercise native launchers and update/recovery contracts
+        # Keep database fixtures on the runner's scratch volume, outside the
+        # checkout. Windows' user-profile temp volume can stall durable writes.
         run: >-
           uv run --locked --no-sync python -m pytest -q
+          --basetemp="${{ runner.temp }}/astra-launcher-pytest"
           tests/test_launcher.py tests/test_launcher_windows_bootstrap.py
           tests/test_launcher_services.py tests/test_launcher_service_launchd.py
           tests/test_launcher_service_windows.py tests/test_launcher_service_embedding.py
