@@ -38,6 +38,30 @@ def test_backend_starts_with_example_env_and_bundled_models(tmp_path, monkeypatc
         _stop_protocol_backend(proc)
 
 
+def test_aliyun_deepseek_startup_reports_half_million_input_budget(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.setenv("ASTRA_HOME", str(tmp_path / "state"))
+    proc, _, _, wait = _start_question_protocol_backend(
+        tmp_path, 0, "aliyun-context", settings_overrides={
+            "selected_model": "qwen38::deepseek-v4.1-flash",
+        }, env_overrides={
+            "AGENT_MODELS_FILE": str(root / "config" / "models.yaml"),
+            "QWEN38_API_KEY": "fixture-only-key",
+        },
+    )
+    try:
+        initial = wait(lambda event: event.get("type") == "model_info")
+        assert initial["model"] == "deepseek-v4.1-flash"
+        assert initial["model_key"] == "qwen38::deepseek-v4.1-flash"
+        assert initial["context_limit"] == 500_000
+        model = next(item for item in initial["models"] if item["current"])
+        assert model["context_limit"] == 1_000_000
+        assert model["metadata_known"]
+        assert "token-plan.cn-beijing.maas.aliyuncs.com" in model["endpoint"]
+    finally:
+        _stop_protocol_backend(proc)
+
+
 class ModelsHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass

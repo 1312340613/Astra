@@ -71,6 +71,20 @@ models:
       top_p: 0.95
       top_k: 64
 
+  # Model Studio uses its own ID; do not migrate this to DeepSeek's direct API.
+  # https://help.aliyun.com/zh/model-studio/deepseek-v4-1-flash
+  deepseek-v4.1-flash:
+    provider: openai-compatible
+    base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    api_key_env: QWEN38_API_KEY
+    catalog_provider: qwen38
+    provider_label: Qwen / Model Studio · Token Plan · Beijing
+    context_limit: 1000000
+    capabilities: [tools, reasoning, vision, streaming]
+    vision_detail: original
+    generation:
+      max_tokens: 393216
+
   qwen3.8-max:
     provider: openai-compatible
     base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1

@@ -23,7 +23,8 @@ def isolated_config(monkeypatch, tmp_path):
 
 
 def test_bundled_deepseek_profiles():
-    assert {name for name in models.model_profiles() if name.startswith("deepseek")} == {
+    assert {name for name, profile in models.model_profiles().items()
+            if profile.base_url == "https://api.deepseek.com"} == {
         "deepseek-flash", "deepseek-v4-pro",
     }
 
