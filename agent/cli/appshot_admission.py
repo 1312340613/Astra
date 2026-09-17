@@ -152,7 +152,77 @@ async def prepare_appshot_message(agent, msg):
     # Any ordinary-image tiling during preview uses isolated ephemeral storage
     # and request registries, never the live session's tile state.
     with tempfile.TemporaryDirectory(prefix="astra-appshot-preview-") as cache:
-        return await _prepare_appshot_message(agent, msg, cache)
+        try:
+            return await _prepare_appshot_message(agent, msg, cache)
+        except AppshotValidationError as exc:
+            if (
+                str(exc) != "context_budget_exceeded"
+                or not agent.context.compaction_enabled
+                or agent.context.compressor is None
+            ):
+                raise
+
+        # Fresh Appshots reach admission before ReAct's automatic compaction.
+        # Try once on detached history, retaining the incoming message verbatim
+        # for a fresh preview. Rejection/cancellation must not compact live state.
+        candidate = copy.copy(agent.context)
+        candidate.messages = copy.deepcopy(agent.context.messages)
+        candidate.system_projection = copy.deepcopy(agent.context.system_projection)
+        candidate._message_token_costs = list(agent.context._message_token_costs)
+        candidate._session_store = None
+        candidate._save_lock = asyncio.Lock()
+        candidate.compaction_observer = None
+        candidate.compressor = copy.copy(agent.context.compressor)
+        candidate.compressor.hooks = None
+        live = agent.context
+        before = len(live.messages)
+        live.report_compaction("started", before)
+        try:
+            await candidate.compress_if_needed(force=True, preserve_on_failure=True)
+            staged_agent = copy.copy(agent)
+            staged_agent.context = candidate
+            await _prepare_appshot_message(staged_agent, msg, cache)
+            candidate.compressor.hooks = live.compressor.hooks
+            return _PreparedAppshotCompaction(live, candidate)
+        except BaseException as exc:
+            live.report_compaction("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", before)
+            raise
+
+
+class _PreparedAppshotCompaction:
+    """Install validated history only across the synchronous launch boundary."""
+
+    _fields = (
+        "system_prompt", "messages", "compressor", "last_prompt_tokens",
+        "_message_token_costs", "_system_token_cost", "_saved_message_count",
+    )
+
+    def __init__(self, context, candidate):
+        self.context = context
+        self.candidate = candidate
+        self.previous = None
+        self.messages_before = len(context.messages)
+
+    def install(self):
+        self.previous = {key: getattr(self.context, key) for key in self._fields}
+        for key in self._fields:
+            setattr(self.context, key, getattr(self.candidate, key))
+        # Deterministic compaction can also change history. The next checkpoint
+        # must replace the saved prefix, never append to its old message count.
+        self.context._saved_message_count = 0
+
+    def rollback(self):
+        if self.previous is not None:
+            for key, value in self.previous.items():
+                setattr(self.context, key, value)
+        self.context.report_compaction("failed", self.messages_before)
+
+    def committed(self):
+        logging.getLogger(__name__).info(
+            "appshot_compaction_committed messages_before=%d messages_after=%d",
+            self.messages_before, len(self.context.messages),
+        )
+        self.context.report_compaction("completed", self.messages_before)
 
 
 async def _prepare_appshot_message(agent, msg, cache):
@@ -167,8 +237,11 @@ async def _prepare_appshot_message(agent, msg, cache):
     preview.vision_preprocessor = VisionPreprocessor(cache_root=cache)
     preview.context = copy.copy(agent.context)
     preview.context.messages = copy.deepcopy(agent.context.messages)
+    preview.context.system_projection = copy.deepcopy(agent.context.system_projection)
     preview.context._message_token_costs = list(agent.context._message_token_costs)
     preview.context._session_store = None
+    preview.context._save_lock = asyncio.Lock()
+    preview.context.compaction_observer = None
     preview.context.compaction_enabled = False
     # Mutable per-turn state must not alias the live React instance.
     for key, value in vars(agent).items():
@@ -312,6 +385,7 @@ class AppshotAdmission:
         owned = False
         handed_off = False
         reservation_owned = False
+        prepared = None
         stage = "validate_submission"
         try:
             if self.reserved or self.busy() or self.lock.locked():
@@ -402,7 +476,7 @@ class AppshotAdmission:
             msg = Msg(sender="user", role="user", content=blocks)
             selected_context = self.context()
             stage = "prepare_request"
-            await self.prepare(msg)
+            prepared = await self.prepare(msg)
             if self.busy() or self.context() is not selected_context:
                 raise AppshotValidationError("backend_busy")
             if self.parent_identity() != parent:
@@ -416,9 +490,13 @@ class AppshotAdmission:
                 refs.append(ref)
                 blocks[len(blocks) - 2 * len(decoded) + 2 * index].data["appshot_media"] = ref
             stage = "launch"
+            if isinstance(prepared, _PreparedAppshotCompaction):
+                prepared.install()
             if not self.launch(msg, text):
                 raise AppshotValidationError("backend_busy")
             handed_off = True
+            if isinstance(prepared, _PreparedAppshotCompaction):
+                prepared.committed()
             result = {"type": "message_accepted", "submission_id": sid}
             self.records[sid] = (digest, result)
             self.send(result)
@@ -429,6 +507,8 @@ class AppshotAdmission:
                 if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                     raise
                 return
+            if isinstance(prepared, _PreparedAppshotCompaction):
+                prepared.rollback()
             if store is not None and not handed_off:
                 try:
                     store.rollback(refs)

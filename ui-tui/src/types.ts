@@ -21,6 +21,13 @@ export type GenerationProgress = {
   idle_seconds: number;
 };
 
+export type ContextCompactionEvent = {
+  type: "context_compaction";
+  status: "started" | "completed" | "failed" | "cancelled";
+  messages_before: number;
+  messages_after: number;
+};
+
 export interface UserQuestionOption {
   label: string;
   description?: string;
@@ -72,6 +79,7 @@ export type AppshotAdmissionEvent =
   | {type:'submission_status'; submission_id:string; status:'accepted'|'rejected'|'pending'|'unknown'; code?:string; retryable?:boolean};
 export type PyEvent =
   | AppshotAdmissionEvent
+  | ContextCompactionEvent
   | { type: "chunk"; content: string }
   | { type: "reasoning"; content: string }
   | {

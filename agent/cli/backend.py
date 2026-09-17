@@ -1095,6 +1095,7 @@ async def _main(startup_started: float):
         context_index_broker=context_index_broker,
     )
     agent.set_vision_tiles_enabled(load_vision_tiles_enabled())
+    agent.context.compaction_observer = _send
     agent.set_persona(persona_state, system_prompt)
     agent.delegate_mailbox = delegate_mailbox
     agent_holder["agent"] = agent
@@ -2129,7 +2130,7 @@ async def _main(startup_started: float):
     async def _prepare_appshot(msg):
         await _cancel_goal_verifications(exclude=asyncio.current_task())
         await _cancel_manual_reviews()
-        await prepare_appshot_message(agent, msg)
+        return await prepare_appshot_message(agent, msg)
 
     appshot_admission = AppshotAdmission(
         lock=agent_turn_lock,

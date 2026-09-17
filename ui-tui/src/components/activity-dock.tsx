@@ -8,6 +8,7 @@ import { WorkingMemoryPanel, workingProgress } from "./working-memory.js";
 import { buildStatusParts, computerIndicator, truncateDisplayText, type ComputerUiState } from "./status-bar.js";
 import { responsiveMode } from "./app-header.js";
 import type { AgentTeamView } from "../agent-team-state.js";
+import { COMPACTION_LABEL } from "../context-compaction.js";
 
 export type ActiveTool = ToolCallInfo & { startedAt: number };
 export type ActivityVisualState = "idle" | "busy" | "error";
@@ -86,7 +87,7 @@ export function formatToolProgress(progress?: ToolProgressInfo): string {
 export function activityVisualState(status: string, toolCount: number, hasPendingApproval = false): ActivityVisualState {
   const normalized = status.trim().toLowerCase();
   if (normalized === "disconnected" || /\b(?:failed|error)\b/.test(normalized)) return "error";
-  if (hasPendingApproval || toolCount > 0 || normalized === "thinking" || normalized.startsWith("task ")
+  if (hasPendingApproval || toolCount > 0 || normalized === COMPACTION_LABEL || normalized === "thinking" || normalized.startsWith("task ")
     || /^(?:model wait|generating|no output)\b/.test(normalized) || normalized === "bar · talking") return "busy";
   return "idle";
 }
@@ -117,7 +118,7 @@ export function buildActivitySummary(input: ActivitySummaryInput): string[] {
     if (computerLabel) segments.push(computerLabel);
     if (pendingApproval) {
       segments.push(`APPROVAL ${pendingApproval.queueIndex}/${pendingApproval.queueTotal} · ${pendingApproval.toolName} · ${pendingApproval.status.toUpperCase()}`);
-    } else if (active) {
+    } else if (active && input.status !== COMPACTION_LABEL) {
       segments.push(`RUN ${shorten(formatToolName(active.name), 10)} ${formatToolElapsed(active.startedAt, input.now)}`);
       const stage = active.progress?.stage.replace(/_/g, " ").toUpperCase();
       if (stage) segments.push(shorten(stage, 7));
@@ -138,7 +139,7 @@ export function buildActivitySummary(input: ActivitySummaryInput): string[] {
   if (computerLabel) segments.push(computerLabel);
   if (pendingApproval) {
     segments.push(`APPROVAL ${pendingApproval.queueIndex}/${pendingApproval.queueTotal} · ${pendingApproval.toolName} · ${pendingApproval.status.toUpperCase()}`);
-  } else if (active) {
+  } else if (active && input.status !== COMPACTION_LABEL) {
     const extra = input.tools.length > 1 ? ` +${input.tools.length - 1}` : "";
     const stage = active.progress?.stage.replace(/_/g, " ").toUpperCase() ?? "";
     const measured = typeof active.progress?.percent === "number"

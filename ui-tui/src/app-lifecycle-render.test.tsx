@@ -47,6 +47,40 @@ async function setup(columns = 90, rows = 30, appshotClientFactory?: (consumer:a
 }
 async function tool(h: Awaited<ReturnType<typeof setup>>) { h.child.event({ type: "tool_result", name: "read_file", output: "detail line\n".repeat(20), error: "" }); await settle(); await h.key("\x0f"); assert.match(h.frame(), /Tool #1/); }
 
+for (const outcome of ["completed", "failed", "cancelled", "disconnect"] as const) {
+  test(`compaction stays visible while pending and clears on ${outcome}`, async () => {
+    const h = await setup(143, 30);
+    const event = { type: "context_compaction", messages_before: 168, messages_after: 85 };
+    const dock = () => h.frame().split("\n").filter((line) => /\bCTX \d+%/.test(line)).join("\n");
+    try {
+      await h.submit("continue the task");
+      h.child.event({ type: "tool_calls", calls: [{ id: "parallel-work", name: "execute_shell", arguments: {} }] });
+      h.child.event({ ...event, status: "started", messages_after: 168 });
+      await settle();
+      assert.match(dock(), /正在压缩上下文…/, h.frame());
+      assert.doesNotMatch(dock(), /READY/);
+      h.child.event({ type: "tool_result", name: "execute_shell", output: "Finished", error: "" });
+      await h.key("draft to retain");
+      if (outcome === "disconnect") {
+        h.child.emit("exit", 1);
+      } else {
+        h.child.event({ ...event, status: outcome });
+      }
+      await settle();
+      assert.doesNotMatch(dock(), /正在压缩上下文…/);
+      assert.match(h.frame(), /draft to retain/);
+      if (outcome === "completed") {
+        assert.match(h.stdout.chunks.map(stripAnsi).join(""), /上下文压缩完成：168 → 85 条消息。/);
+        h.child.event({ type: "generation_progress", phase: "requesting", elapsed_seconds: 0, idle_seconds: 0 });
+        await settle();
+        assert.match(dock(), /MODEL WAIT/);
+      } else if (outcome !== "disconnect") {
+        assert.match(h.stdout.chunks.map(stripAnsi).join(""), outcome === "failed" ? /上下文压缩未完成/ : /上下文压缩已取消/);
+      }
+    } finally { h.app.unmount(); }
+  });
+}
+
 test("terminal shutdown drains late events without restart acknowledgements, UI updates or premature kill", async () => {
   let finished = false;
   const lifecycle = new TuiLifecycle(async () => { finished = true; });

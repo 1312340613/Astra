@@ -6,6 +6,7 @@ import type { AppshotConsumer, AppshotDraftState } from "./appshot-client.js";
 import type { AppshotManifestReader } from "./appshot-input.js";
 import type { GenerationProgress, GenerationStats, InputSubmission, LocalModeDefinition } from "./types.js";
 import { generationProgressLabel } from "./generation-progress.js";
+import { COMPACTION_LABEL, compactionNotice } from "./context-compaction.js";
 import { createBackendEventReceiver, EventDeliveryState, writeProtocolDiagnostic } from "./backend-protocol.js";
 import { RuntimeTiming } from "./runtime-timing.js";
 import { ControlledBackendRestart } from "./controlled-restart.js";
@@ -631,6 +632,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
   const [toolResults, setToolResults] = useState<ToolResultRecord[]>([]);
   const [generationStats, setGenerationStats] = useState<GenerationStats | null>(null);
   const [generationProgress, setGenerationProgress] = useState<GenerationProgress | null>(null);
+  const [compacting, setCompacting] = useState(false);
   const generationModelKeyRef = useRef<string>();
   const generationSessionIdRef = useRef<string>();
   const [openToolResultId, setOpenToolResultId] = useState<number | null>(null);
@@ -863,6 +865,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
       busyRef.current = false;
       setBusy(false);
       setGenerationProgress(null);
+      setCompacting(false);
       setActiveTools([]);
       setActiveProcesses([]);
       setApprovalRequests([]);
@@ -1094,6 +1097,14 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
         if (event.phase === "requesting") setGenerationStats(null);
         setGenerationProgress(event.phase === "finished" ? null : event);
         break;
+      case "context_compaction": {
+        const notice = compactionNotice(event);
+        if (!notice) break;
+        setCompacting(event.status === "started");
+        if (event.status === "started") setGenerationProgress(null);
+        addMessage("system", notice);
+        break;
+      }
       case "working_memory":
         setWorkingMemory(event.memory);
         break;
@@ -2073,7 +2084,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
           contextLimit={info.contextLimit}
           status={backendStatus === "disconnected"
             ? "disconnected"
-            : activeTools.length || activeProcesses.length
+            : compacting ? COMPACTION_LABEL : activeTools.length || activeProcesses.length
               ? `tool ${(activeTools[0] ?? activeProcesses[0]).name} · ${formatToolElapsed((activeTools[0] ?? activeProcesses[0]).startedAt, toolClock)}`
               : generationProgressLabel(generationProgress) ?? (activeTask
                 ? `task ${activeTask.id.slice(0, 6)} · ${activeTask.status}`
@@ -2085,7 +2096,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
           showReasoning={showReasoning}
           reasoningEffort={info.reasoningEffort}
           codeMode={info.codeMode}
-          generationStats={generationProgress ? null : generationStats}
+          generationStats={compacting || generationProgress ? null : generationStats}
           sessionName={sessionName}
           columns={columns}
           teams={agentTeams}
@@ -2096,7 +2107,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
           session={barSessionName}
           busy={busy}
           disconnected={backendStatus === "disconnected"}
-          notice={generationProgressLabel(generationProgress) ?? barNotice}
+          notice={compacting ? COMPACTION_LABEL : generationProgressLabel(generationProgress) ?? barNotice}
           ambiance={barAmbiance}
           shift={barShift}
           lyraGlass={lyraGlass}
@@ -2108,7 +2119,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
           busy={busy}
           disconnected={backendStatus === "disconnected"}
           columns={columns}
-          generationLabel={generationProgressLabel(generationProgress)}
+          generationLabel={compacting ? COMPACTION_LABEL : generationProgressLabel(generationProgress)}
           cacheHitTokens={info.cacheHit}
           cacheMissTokens={info.cacheMiss}
           contextUsed={info.contextUsed}
@@ -2121,7 +2132,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
           tools={dockTools}
           now={toolClock}
           columns={columns}
-          generationLabel={generationProgressLabel(generationProgress)}
+          generationLabel={compacting ? COMPACTION_LABEL : generationProgressLabel(generationProgress)}
           cacheHitTokens={info.cacheHit}
           cacheMissTokens={info.cacheMiss}
           contextUsed={info.contextUsed}

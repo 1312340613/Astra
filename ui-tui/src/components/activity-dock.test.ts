@@ -20,6 +20,7 @@ assert.equal(formatToolProgress({ stage: "retrying", status: "running", current:
 assert.equal(formatToolProgress({ stage: "downloading", status: "running", percent: 42.4 }), "DOWNLOADING · 42%");
 assert.equal(activityVisualState("ready", 0), "idle");
 assert.equal(activityVisualState("thinking", 0), "busy");
+assert.equal(activityVisualState("正在压缩上下文…", 0), "busy");
 assert.equal(activityVisualState("bar · talking", 0), "busy");
 assert.equal(activityVisualState("bar · private shift", 0), "idle");
 assert.equal(activityVisualState("task FD6661 · running", 0), "busy");

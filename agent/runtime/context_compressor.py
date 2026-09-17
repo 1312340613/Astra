@@ -186,7 +186,7 @@ class ContextCompressor:
         self._failure_cooldown_until = 0.0
 
     async def compress(self, messages: list[dict], max_prompt_tokens: int,
-                       force: bool = False) -> list[dict]:
+                       force: bool = False, *, preserve_on_failure: bool = False) -> list[dict]:
         """Compress messages by summarizing middle turns. Returns new message list."""
         if force:
             self._failure_cooldown_until = 0.0
@@ -271,14 +271,12 @@ class ContextCompressor:
             else:
                 summary = None
         if not summary:
-            if not force:
+            if not force or preserve_on_failure:
                 # A failed summary must not silently delete history on the
-                # opportunistic path. Return the conversation untouched and
-                # let the caller's forced retry (which clears the failure
-                # cooldown and re-attempts summarization) decide whether
-                # space must be freed with the static fallback marker.
+                # opportunistic or admission-preview path. A normal forced
+                # retry may still explicitly choose the static fallback.
                 logger.info(
-                    "Summary unavailable; skipping non-forced compaction "
+                    "Summary unavailable; preserving history "
                     "so history is not dropped without a summary"
                 )
                 return messages

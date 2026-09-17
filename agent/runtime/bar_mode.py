@@ -268,6 +268,7 @@ class BarModeController:
             self.agent.tools.to_openai_tools(names=BAR_SCENE_TOOL_NAMES)
         ))
         bar.compressor = ContextCompressor(self.agent.llm)
+        bar.compaction_observer = work.compaction_observer
         bar.set_session(str(path))
         if not bar.load():
             SessionStore(path).save({
