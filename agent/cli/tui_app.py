@@ -21,7 +21,6 @@ from ..runtime.react import ReActAgent
 from ..runtime.skills import SkillStore
 from ..runtime.tools.activity import register_activity_tools
 from ..runtime.tools.code import register_code_tools
-from ..runtime.tools.comfyui import register_comfyui_tools
 from ..runtime.tools.computer import register_local_computer_runtime
 from ..runtime.tools.context_index import register_context_index_tools
 from ..runtime.tools.files import register_file_tools
@@ -537,7 +536,6 @@ def create_agent(llm_config: LLMConfig, sandbox_timeout: int,
     register_activity_tools(tools)
     register_context_index_tools(tools, context_index_broker)
     register_web_tools(tools, sandbox)
-    register_comfyui_tools(tools, workdir=workdir)
     register_image_tools(
         tools,
         workdir=workdir,

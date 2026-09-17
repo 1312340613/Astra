@@ -337,7 +337,7 @@ class LocalSandbox(Sandbox):
         import base64
 
         args = ["wsl.exe"]
-        distro = os.getenv("AGENT_WSL_DISTRO", "").strip() or os.getenv("COMFYUI_WSL_DISTRO", "").strip()
+        distro = os.getenv("AGENT_WSL_DISTRO", "").strip()
         if distro:
             args.extend(["-d", distro])
         # Pass the command as base64 to avoid Windows argv mangling of
@@ -352,7 +352,7 @@ class LocalSandbox(Sandbox):
         target = platform or sys.platform
         if target == "win32":
             args = ["wsl.exe"]
-            distro = os.getenv("AGENT_WSL_DISTRO", "").strip() or os.getenv("COMFYUI_WSL_DISTRO", "").strip()
+            distro = os.getenv("AGENT_WSL_DISTRO", "").strip()
             if distro:
                 args.extend(["-d", distro])
             return args + [

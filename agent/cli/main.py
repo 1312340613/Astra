@@ -37,7 +37,6 @@ from ..runtime.tools.files import register_file_tools
 from ..runtime.tools.git import register_git_tools
 from ..runtime.tools.time import register_time_tools
 from ..runtime.tools.web import register_web_tools, create_browser_extract_fn, create_browser_status_fn
-from ..runtime.tools.comfyui import register_comfyui_tools
 from ..runtime.tools.image import register_image_tools, select_vision_tiles_from_holder
 from ..runtime.tools.computer import register_local_computer_runtime
 from ..runtime.tools.browser import register_browser_tools
@@ -909,7 +908,6 @@ async def _async_init(llm_config: LLMConfig, sandbox_timeout: int, workdir: str)
     search_provider_state = register_web_tools(
         tools, sandbox, default_provider=resolve_startup_search_provider()
     )
-    register_comfyui_tools(tools, workdir=workdir)
     register_image_tools(
         tools,
         workdir=workdir,

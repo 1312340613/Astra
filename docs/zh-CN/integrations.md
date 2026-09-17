@@ -2,7 +2,7 @@
 
 [首页](../../README.zh-CN.md) · [文档导航](README.md) · [English](../integrations.md)
 
-[OpenAI 兼容 API](#optional-openai-compatible-api) · [原生消息渠道](#native-messaging-channels) · [MCP](#mcp) · [网页搜索](#web-search) · [Conclave 多专家研究](#conclave-multi-expert-research) · [ComfyUI 绘图](#comfyui-image-generation) · [163 邮件只读集成](#read-only-163-mail)
+[OpenAI 兼容 API](#optional-openai-compatible-api) · [原生消息渠道](#native-messaging-channels) · [MCP](#mcp) · [网页搜索](#web-search) · [Conclave 多专家研究](#conclave-multi-expert-research) · [图片工具](#image-tools) · [163 邮件只读集成](#read-only-163-mail)
 
 按需启用服务。Shell 示例从安装目录执行，提供方凭据放在本地 `.env`。
 
@@ -118,32 +118,16 @@ Conclave 编排 12 类领域专家的并行 SearXNG 搜索，再综合结构化�
 
 `chairperson` 选择综合模型，`active` 使用当前模型；`sources` 限制每位专家的来源数量。专家菜单支持多选：Tab 追加，Enter 确认，使用菜单提供的名称。配置自动保存到 `~/.config/hermes/conclave.json`。
 
-<a id="comfyui-image-generation"></a>
+<a id="image-tools"></a>
 
-## ComfyUI 绘图
+## 图片工具
 
-工具组保留 NoobAI/JANKU 路线，并提供独立 Anima/Qwen 路线：
+公开版提供 `read_image`、`read_image_tiles` 和 `inspect_image_metadata`。
+读图、查看局部图块和读取 PNG 生成元数据都不依赖生图服务。
 
-- `comfyui_draw`：旧 NoobAI 工作流，等待并下载结果。
-- `comfyui_start` / `comfyui_stop`：管理所选 WSL/原生实例，或说明外部服务所需操作；通过真实 HTTP API 验证状态。
-- `comfyui_anima_status`：检查 Anima 模型、Qwen CLIP/VAE 和锁定 LoRA。
-- `comfyui_anima_draw`：提交 Anima v2 signature-lineart 工作流，立即返回 `prompt_id`，不轮询。
-- `comfyui_result`：单次查询已提交任务，完成后下载并附图供实际查看。
-
-Anima 优先使用 `COMFYUI_ANIMA_SERVER`，否则共享 `COMFYUI_SERVER`。锁定默认参数为 Anima v2、Qwen 0.6B CLIP、Qwen Image VAE、Turbo 1.0、Aesthetic 0.6、Lyra lineart v2 0.8、16 步、CFG 1.0。日常请求优先用专用工具，未支持流程和诊断仍可用 Shell/API；只有真实 `prompt_id` 才代表提交成功。
-
-`COMFYUI_LIFECYCLE` 支持 `auto`、`wsl`、`native`、`external`。auto 在 Windows 保留 WSL；macOS/Linux 只有同时配置 `COMFYUI_NATIVE_ROOT` 和 `COMFYUI_NATIVE_PYTHON` 才选 native，否则视为外部管理。
-
-native 将 `main.py` 放进独立进程组，在工作区 `.astra` 保存 Astra 拥有的 PID 元数据，停止前核对命令和身份。`COMFYUI_NATIVE_LOG` 可覆盖日志路径。所有模式都以 `/system_stats` 为就绪和停止检查依据。
-
-自行在 macOS 启动的 ComfyUI 可这样连接：
-
-```dotenv
-COMFYUI_SERVER=http://127.0.0.1:8188
-COMFYUI_LIFECYCLE=external
-```
-
-需要 Astra 管理时，把 `COMFYUI_NATIVE_ROOT` 设为 ComfyUI 目录，`COMFYUI_NATIVE_PYTHON` 设为绝对解释器路径或相对该目录的路径。Windows 保留默认 WSL 生命周期时不要填写原生路径。
+公开版已移除内置 ComfyUI 生图工具及其生命周期管理；原有生图环境配置不会再注册工具或启动服务。
+如需生图，可通过 [MCP](#mcp) 配置外部服务，个人工作流和模型配置应保存在仓库之外。
+Windows 图片路径和 Shell 命令统一使用 `AGENT_WSL_DISTRO` 选择 WSL 发行版。
 
 <a id="read-only-163-mail"></a>
 

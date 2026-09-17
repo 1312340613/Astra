@@ -393,7 +393,7 @@ def test_materialize_wsl_image_uses_argument_safe_copy(monkeypatch, tmp_path):
 def test_inspect_image_metadata_summarizes_comfyui_prompt_graph(tmp_path):
     image = tmp_path / "generated.png"
     workflow = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "anima.safetensors"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "example-model.safetensors"}},
         "2": {"class_type": "LoraLoader", "inputs": {
             "lora_name": "style.safetensors", "strength_model": 0.8, "strength_clip": 0.0,
         }},
@@ -404,7 +404,7 @@ def test_inspect_image_metadata_summarizes_comfyui_prompt_graph(tmp_path):
             "positive": ["4", 0], "negative": ["5", 0], "seed": 42,
             "steps": 16, "cfg": 1.0, "sampler_name": "euler_ancestral", "scheduler": "normal",
         }},
-        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "agent_anima/test"}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "generated/test"}},
     }
     _write_comfy_png(image, workflow)
 
@@ -418,13 +418,13 @@ def test_inspect_image_metadata_summarizes_comfyui_prompt_graph(tmp_path):
     assert "No additional metadata extraction is required" in result["guidance"]
     assert result["image"]["width"] == 1024
     assert list(generation)[:4] == ["format", "node_count", "positive_prompt", "negative_prompt"]
-    assert generation["models"][0]["unet_name"] == "anima.safetensors"
+    assert generation["models"][0]["unet_name"] == "example-model.safetensors"
     assert generation["loras"][0]["strength_model"] == 0.8
     assert generation["samplers"][0]["seed"] == 42
     assert generation["positive_prompt"] == "positive prompt"
     assert generation["negative_prompt"] == "negative prompt"
     assert generation["latent_images"][0]["height"] == 1344
-    assert generation["filename_prefixes"] == ["agent_anima/test"]
+    assert generation["filename_prefixes"] == ["generated/test"]
 
     raw_result = _inspect_image_metadata(image, include_raw=True)
     assert raw_result["prompt_extracted"] is True

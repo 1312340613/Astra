@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 
+import pytest
+
 from agent.core.msg import ContentBlock, Msg
 from agent.runtime.react import ReActAgent
 from agent.runtime.tools.registry import ToolDef, ToolRegistry
@@ -11,7 +13,8 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_comfyui_draw_result_is_sent_back_to_llm_as_image(tmp_path):
+@pytest.mark.parametrize("tool_name", ["render_diagram", "read_image"])
+def test_tool_image_result_is_sent_back_to_llm_as_image(tmp_path, tool_name):
     image = tmp_path / "generated.png"
     image.write_bytes(base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -29,7 +32,7 @@ def test_comfyui_draw_result_is_sent_back_to_llm_as_image(tmp_path):
                     "type": "tool_calls",
                     "calls": [{
                         "id": "call-1",
-                        "name": "comfyui_draw",
+                        "name": tool_name,
                         "arguments": json.dumps({"prompt": "test"}),
                     }],
                     "content": "",
@@ -44,10 +47,13 @@ def test_comfyui_draw_result_is_sent_back_to_llm_as_image(tmp_path):
         registry = ToolRegistry()
 
         def fake_draw(prompt: str):
-            return json.dumps({"success": True, "paths": [str(image)]})
+            payload = {"success": True, "paths": [str(image)]}
+            if tool_name != "read_image":
+                payload["type"] = "image_attachment"
+            return json.dumps(payload)
 
         registry.register(ToolDef(
-            name="comfyui_draw",
+            name=tool_name,
             description="fake draw",
             parameters={"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]},
             fn=fake_draw,

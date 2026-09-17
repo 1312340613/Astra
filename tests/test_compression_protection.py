@@ -212,8 +212,8 @@ class TestPreferenceRegex:
         "以后都用 split loader",
         "下次要用 QAT 版本",
         "记住，我的邮箱是 test@example.com",
-        "不是，应该用 qwen_image_vae",
-        "你搞错了，VAE 不是 ae.safetensors",
+        "不是，应该用 config.toml",
+        "你搞错了，配置文件不是 config.json",
         "应该用 --lowvram 启动",
         "别再用 highvram 了",
         "I prefer monochrome lineart",
@@ -221,8 +221,8 @@ class TestPreferenceRegex:
         "I always use temp 1.25",
         "from now on use split loader",
         "remember that my port is 8081",
-        "not NoobAI but Anima",
-        "should be qwen_image_vae not ae.safetensors",
+        "not SQLite but PostgreSQL",
+        "should be config.toml not config.json",
     ])
     def test_matches_preferences(self, text):
         assert _PREFERENCE_RE.search(text), f"Should match: {text}"
@@ -264,11 +264,11 @@ class TestExtractProtectedContent:
 
     def test_extracts_correction(self):
         turns = [
-            {"role": "user", "content": "不是，应该用 qwen_image_vae 而不是 ae.safetensors"},
+            {"role": "user", "content": "不是，应该用 config.toml 而不是 config.json"},
         ]
         items = ContextCompressor._extract_protected_content(turns)
         assert len(items) == 1
-        assert "qwen_image_vae" in items[0]
+        assert "config.toml" in items[0]
 
     def test_skips_non_preference_messages(self):
         turns = [
@@ -333,18 +333,18 @@ class TestExtractProtectedContent:
 class TestExtractActiveTaskState:
     def test_extracts_user_request_and_tool_chain(self):
         turns = [
-            {"role": "user", "content": "帮我检查 ComfyUI 的 Anima 模型配置"},
+            {"role": "user", "content": "帮我检查 PostgreSQL 的数据库配置"},
             {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "tc1", "function": {"name": "read_file", "arguments": "{}"}}
             ]},
             {"role": "tool", "tool_call_id": "tc1", "name": "read_file",
-             "content": "models.yaml: anima_v2, qwen_clip"},
+             "content": "database.yaml: postgresql, connection_pool"},
             {"role": "assistant", "content": "配置看起来正确"},
         ]
         state = ContextCompressor._extract_active_task_state(turns)
-        assert "ComfyUI" in state
+        assert "PostgreSQL" in state
         assert "read_file" in state
-        assert "anima_v2" in state
+        assert "connection_pool" in state
 
     def test_returns_empty_for_no_user(self):
         turns = [
@@ -475,14 +475,14 @@ class TestCompressionProtection:
 
         messages = self._make_messages([
             "我喜欢简洁的界面，以后开发都用这个",
-            "不是，应该用 qwen_image_vae 而不是 ae.safetensors",
+            "不是，应该用 config.toml 而不是 config.json",
         ])
         compressed = run(compressor.compress(messages, max_prompt_tokens=100, force=True))
 
         # Check ALL compressed messages for the preferences
         all_text = " ".join(str(msg.get("content", "")) for msg in compressed)
         assert "简洁的界面" in all_text, "Preference 1 must survive compression"
-        assert "qwen_image_vae" in all_text, "Preference 2 must survive compression"
+        assert "config.toml" in all_text, "Preference 2 must survive compression"
 
     def test_active_task_state_in_prompt(self):
         """Verify active task state is injected into the summary prompt."""

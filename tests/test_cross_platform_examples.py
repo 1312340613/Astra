@@ -202,9 +202,6 @@ def test_guides_document_platform_specific_integrations() -> None:
 
     assert "BROWSER_EXTRACT_CMD" in readme
     assert "WSL_EXTRACT_CMD" in readme
-    assert "COMFYUI_LIFECYCLE" in readme
-    assert "COMFYUI_NATIVE_ROOT" in readme
-    assert "COMFYUI_NATIVE_PYTHON" in readme
     assert "build-sandbox-image.ps1" in readme
     assert "build-sandbox-image.sh" in readme
 

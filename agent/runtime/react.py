@@ -1991,7 +1991,7 @@ class ReActAgent(AgentBase):
         paths = payload.get("image_paths") or payload.get("paths") or []
         if not isinstance(paths, list) or not paths:
             return None
-        if payload.get("type") != "image_attachment" and event.get("name") not in {"read_image", "comfyui_draw"}:
+        if payload.get("type") != "image_attachment" and event.get("name") != "read_image":
             return None
         if not occurrence_id:
             raise self._tool_image_preprocess_error(

@@ -47,19 +47,19 @@ function Fixture({ columns, active = true }: { columns: number; active?: boolean
         expanded={active && columns >= 90}
         tools={active ? [{
           id: "preview-1",
-          name: "comfyui_draw",
-          arguments: "{ preset: monochrome, width: 1024, height: 1024 }",
+          name: "read_image",
+          arguments: "{ path: screenshot.png, detail: original }",
           startedAt: 1_000,
-          progress: { stage: "generating", status: "running", current: 11, unit: "s", message: "job a1b2c3d4" },
+          progress: { stage: "reading", status: "running", current: 11, unit: "s", message: "screenshot.png" },
         }] : []}
         now={now}
         memory={active ? {
-          goal: "Generate and inspect a monochrome character image",
-          progress: "Workflow submitted; waiting for output",
+          goal: "Inspect a screenshot and explain the visible result",
+          progress: "Screenshot located; reading image",
           steps: [
-            { text: "Build workflow", status: "completed" },
-            { text: "Run generation", status: "in_progress" },
-            { text: "Inspect result", status: "pending" },
+            { text: "Locate screenshot", status: "completed" },
+            { text: "Read image", status: "in_progress" },
+            { text: "Explain result", status: "pending" },
           ],
         } : {}}
         model="Qwen3.6-35B-A3B"
@@ -68,7 +68,7 @@ function Fixture({ columns, active = true }: { columns: number; active?: boolean
         contextUsed={16_200}
         contextPct={38}
         contextLimit={196_608}
-        status={active ? "tool comfyui_draw" : "ready"}
+        status={active ? "tool read_image" : "ready"}
         showReasoning
         sessionName="layout_preview"
         columns={columns}

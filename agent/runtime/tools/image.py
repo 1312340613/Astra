@@ -42,7 +42,6 @@ def _resolve_image_path(path: str, root: Path) -> Path:
         elif normalized.startswith("/"):
             distro = (
                 os.getenv("AGENT_WSL_DISTRO", "").strip()
-                or os.getenv("COMFYUI_WSL_DISTRO", "").strip()
                 or "Ubuntu"
             )
             if not re.fullmatch(r"[A-Za-z0-9_.-]+", distro):
@@ -63,7 +62,6 @@ def _resolve_image_path(path: str, root: Path) -> Path:
 def _wsl_distro() -> str:
     distro = (
         os.getenv("AGENT_WSL_DISTRO", "").strip()
-        or os.getenv("COMFYUI_WSL_DISTRO", "").strip()
         or "Ubuntu"
     )
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", distro):

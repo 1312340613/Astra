@@ -151,7 +151,7 @@ def _infer_skill_category(name: str, content: str) -> str:
     text = f"{name} {content}".casefold()
     groups = {
         "coding": ("code", "debug", "test", "workflow", "plan", "review", "agent-dev", "delegate"),
-        "creative": ("comfyui", "lyra", "anima", "image", "prompt", "qwen-mm", "video", "tts"),
+        "creative": ("image", "prompt", "qwen-mm", "video", "tts"),
         "research": ("research", "search", "pdf", "knowledge", "kb-", "citation", "paper"),
         "operations": ("triage", "network", "mcp", "wsl", "huggingface", "deploy", "server", "computer"),
         "personal": ("email", "fitness", "singapore", "dbs", "sillytavern", "session", "hermes"),

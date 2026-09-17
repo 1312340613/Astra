@@ -78,7 +78,6 @@ from agent.runtime.tools.files import register_file_tools
 from agent.runtime.tools.git import register_git_tools
 from agent.runtime.tools.time import register_time_tools
 from agent.runtime.tools.web import register_web_tools, create_browser_extract_fn, create_browser_status_fn
-from agent.runtime.tools.comfyui import register_comfyui_tools
 from agent.runtime.tools.image import register_image_tools, select_vision_tiles_from_holder
 from agent.runtime.tools.computer import register_local_computer_runtime
 from agent.runtime.tools.browser import register_browser_tools
@@ -913,7 +912,6 @@ async def _main(startup_started: float):
     search_provider_state = register_web_tools(
         tools, sandbox, default_provider=resolve_startup_search_provider()
     )
-    register_comfyui_tools(tools, workdir=os.getcwd())
     register_image_tools(
         tools,
         workdir=os.getcwd(),

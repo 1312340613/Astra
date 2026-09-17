@@ -4,7 +4,7 @@
 
 Enable only the services you need. Run shell examples from the installation checkout. Provider credentials belong in your local `.env`.
 
-[Optional OpenAI-compatible API](#optional-openai-compatible-api) · [Native messaging channels](#native-messaging-channels) · [MCP](#mcp) · [Web search](#web-search) · [Conclave multi-expert research](#conclave-multi-expert-research) · [ComfyUI image generation](#comfyui-image-generation) · [Read-only 163 mail](#read-only-163-mail)
+[Optional OpenAI-compatible API](#optional-openai-compatible-api) · [Native messaging channels](#native-messaging-channels) · [MCP](#mcp) · [Web search](#web-search) · [Conclave multi-expert research](#conclave-multi-expert-research) · [Image tools](#image-tools) · [Read-only 163 mail](#read-only-163-mail)
 
 ## Optional OpenAI-compatible API
 
@@ -201,50 +201,18 @@ Use the names offered by the menu.
 
 Configuration is persisted to `~/.config/hermes/conclave.json` automatically.
 
-## ComfyUI image generation
+## Image tools
 
-The image tool group keeps the legacy NoobAI/JANKU route and adds a separate
-Anima/Qwen route:
+The public distribution includes `read_image`, `read_image_tiles`, and
+`inspect_image_metadata`. Image reading and PNG generation-metadata inspection
+work independently of any image-generation service.
 
-- `comfyui_draw`: legacy NoobAI workflow, waits for and downloads its result.
-- `comfyui_start` / `comfyui_stop`: manage the selected WSL or native instance,
-  or report the action required for an externally managed server. Lifecycle
-  success is always verified against the real HTTP API.
-- `comfyui_anima_status`: verifies Anima models, Qwen CLIP/VAE and locked LoRAs.
-- `comfyui_anima_draw`: submits the Anima v2 signature-lineart workflow and
-  returns immediately with a `prompt_id`; it deliberately does not poll.
-- `comfyui_result`: checks a submitted prompt once and, when complete,
-  downloads and attaches the image for visual inspection.
-
-Anima uses `COMFYUI_ANIMA_SERVER` when set and otherwise shares
-`COMFYUI_SERVER`. The locked defaults are Anima v2, Qwen 0.6B CLIP, Qwen Image
-VAE, Turbo 1.0, Aesthetic 0.6, Lyra lineart v2 0.8, 16 steps and CFG 1.0.
-Routine image requests prefer these dedicated tools. Shell and direct API remain
-available for unsupported workflows and targeted diagnosis; a draw submission is
-only considered successful when ComfyUI returns a real `prompt_id`.
-
-Set `COMFYUI_LIFECYCLE` to `auto`, `wsl`, `native`, or `external`. `auto` keeps
-the existing WSL behavior on Windows. On macOS and Linux it selects `native`
-only when both `COMFYUI_NATIVE_ROOT` and `COMFYUI_NATIVE_PYTHON` are configured;
-otherwise Astra treats the server as externally managed. Native mode launches
-the configured `main.py` in its own process group, writes Astra-owned PID
-metadata below the workspace `.astra` directory, and verifies the recorded
-command and process identity before stopping it. `COMFYUI_NATIVE_LOG` optionally
-sets the native log path. In every mode, `/system_stats` remains the authoritative
-readiness and shutdown check.
-
-For a ComfyUI process you start yourself on macOS, leave lifecycle management
-external and point Astra at it:
-
-```dotenv
-COMFYUI_SERVER=http://127.0.0.1:8188
-COMFYUI_LIFECYCLE=external
-```
-
-To let Astra manage a native instance instead, set `COMFYUI_NATIVE_ROOT` to the
-ComfyUI directory and `COMFYUI_NATIVE_PYTHON` to its Python executable (absolute,
-or relative to that root). Do not set native paths on Windows when retaining the
-default WSL lifecycle.
+The bundled ComfyUI generator and its lifecycle tools have been retired from
+the public distribution. Existing generator environment settings no longer
+register tools or start a service. Configure an external image provider through
+[MCP](#mcp) if needed, and keep personal workflows and model settings outside the
+repository. Windows image paths and shell commands use `AGENT_WSL_DISTRO` for
+WSL selection.
 
 ## Read-only 163 mail
 
