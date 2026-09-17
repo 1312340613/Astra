@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
-import React, { useState } from "react";
+import React, { act, useState } from "react";
 import { Box, render } from "ink";
 import stringWidth from "string-width";
 import stripAnsi from "strip-ansi";
@@ -93,21 +93,29 @@ function latestFrameContaining(output: CaptureStream, marker: string): string {
   return stripAnsi(chunk ?? "").trimEnd();
 }
 
+async function updateUI<T>(update: () => T): Promise<T> {
+  let result!: T;
+  await act(async () => {
+    result = update();
+    // Drain stream input, then flush React effects (including Ink's key listener).
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  return result;
+}
+
 const stdin = new TestStdin();
 const stdout = new CaptureStream();
-const instance = render(<CommandMenuShell />, {
+const instance = await updateUI(() => render(<CommandMenuShell />, {
   stdin: stdin as unknown as NodeJS.ReadStream,
   stdout: stdout as unknown as NodeJS.WriteStream,
   stderr: stdout as unknown as NodeJS.WriteStream,
   debug: true,
   patchConsole: false,
   exitOnCtrlC: false,
-});
+}));
 
-await new Promise((resolve) => setTimeout(resolve, 20));
 const openChunkStart = stdout.chunks.length;
-stdin.write("/m");
-await new Promise((resolve) => setTimeout(resolve, 50));
+await updateUI(() => stdin.write("/m"));
 
 const openingFrames = stdout.chunks
   .slice(openChunkStart)
@@ -149,36 +157,36 @@ assert.ok(inputTopBorderIndex > footerIndex, openFrame);
 assert.ok(inputLabelIndex > inputTopBorderIndex, openFrame);
 assert.ok(openLines.length <= stdout.rows, `${openLines.length} physical rows\n${openFrame}`);
 
-stdin.write("\u001b");
-await new Promise((resolve) => setTimeout(resolve, 50));
+const closeChunkStart = stdout.chunks.length;
+await updateUI(() => stdin.write("\u001b"));
+// Require a new closed frame too, rather than matching the initial welcome frame.
+assert.ok(stdout.chunks.slice(closeChunkStart)
+  .some((chunk) => stripAnsi(chunk).includes("ASTRA // OPERATOR CONSOLE")));
 const closedFrame = latestFrameContaining(stdout, "ASTRA // OPERATOR CONSOLE");
 assert.match(closedFrame, /ASTRA \/\/ OPERATOR CONSOLE/);
 assert.doesNotMatch(closedFrame, /\/minimal/);
 assert.deepEqual(visibilityEvents, [true, false]);
 
-instance.unmount();
+await updateUI(() => instance.unmount());
 
 visibilityEvents.length = 0;
 const asyncStdin = new TestStdin();
 const asyncStdout = new CaptureStream();
-const asyncInstance = render(<CommandMenuShell />, {
+const asyncInstance = await updateUI(() => render(<CommandMenuShell />, {
   stdin: asyncStdin as unknown as NodeJS.ReadStream,
   stdout: asyncStdout as unknown as NodeJS.WriteStream,
   stderr: asyncStdout as unknown as NodeJS.WriteStream,
   debug: true,
   patchConsole: false,
   exitOnCtrlC: false,
-});
+}));
 
-await new Promise((resolve) => setTimeout(resolve, 20));
-asyncStdin.write("/model ");
-await new Promise((resolve) => setTimeout(resolve, 20));
+await updateUI(() => asyncStdin.write("/model "));
 const asyncOpenChunkStart = asyncStdout.chunks.length;
-asyncInstance.rerender(<CommandMenuShell modelList={[
+await updateUI(() => asyncInstance.rerender(<CommandMenuShell modelList={[
   { name: "deepseek-v4-flash" },
   { name: "Qwen3.6-35B-A3B" },
-]} />);
-await new Promise((resolve) => setTimeout(resolve, 50));
+]} />));
 
 const asyncOpeningFrames = asyncStdout.chunks
   .slice(asyncOpenChunkStart)
@@ -189,4 +197,4 @@ for (const frame of asyncOpeningFrames) {
   assert.doesNotMatch(frame, /ASTRA \/\/ OPERATOR CONSOLE/, frame);
 }
 assert.deepEqual(visibilityEvents, [true]);
-asyncInstance.unmount();
+await updateUI(() => asyncInstance.unmount());
