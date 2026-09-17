@@ -24,7 +24,7 @@ def test_rebuilds_persisted_dynamic_model_from_configured_provider(monkeypatch):
         id="omlx",
         label="OMLX · 8000",
         profile=ModelProfile(
-            base_url="http://192.168.1.18:8000/v1",
+            base_url="http://192.0.2.10:8000/v1",
             context_limit=262_144,
             api_key_env="OMLX_API_KEY",
             capabilities=frozenset({"tools", "vision", "streaming"}),
@@ -38,7 +38,7 @@ def test_rebuilds_persisted_dynamic_model_from_configured_provider(monkeypatch):
     assert entry is not None
     assert entry.key == "omlx::last-live-model"
     assert entry.model_id == "last-live-model"
-    assert entry.base_url == "http://192.168.1.18:8000/v1"
+    assert entry.base_url == "http://192.0.2.10:8000/v1"
     assert entry.profile.context_limit == 262_144
 
 

@@ -55,7 +55,7 @@ Task 8 的确定性 `computer_apps` → `computer_get_app_state` contract covers
 
 Record the returned PNG, ordinary AX, and optional Smart detail as one transaction. Target or action invalidation clears all snapshot/action authority; a Smart approval is one-time and target-bound. Bounded errors are fail-closed. On `unsafe_artifact`, call `computer_close`, start a fresh session, and restart with new `computer_apps` and `computer_get_app_state` calls. Never reuse old refs, an old artifact, or a partial result.
 
-The Task 10 live operator must populate the [Task 10 transactional app-state matrix](macos-app-state-acceptance.md), then commit the measured update to that exact file. It is the canonical per-cell evidence. The final report must reference this matrix as its input, not create a competing output.
+The Task 10 live operator must copy the [Task 10 transactional app-state matrix](macos-app-state-acceptance.md) into an ignored local evidence directory and populate that local copy. Do not commit the populated matrix or raw run metadata. It is the canonical per-cell evidence for the local run. The final report must reference this local matrix as its input, not create a competing output. Public documentation may contain only a redacted summary of the measured behavior and limitations.
 
 ## 4. 建立本轮证据目录
 
@@ -67,6 +67,7 @@ umask 077
 astra_run_id="$(date +%Y%m%d-%H%M%S)"
 astra_evidence_dir="/tmp/astra-computer-acceptance-${astra_run_id}"
 mkdir -m 700 "$astra_evidence_dir"
+cp docs/macos-app-state-acceptance.md "$astra_evidence_dir/app-state-matrix.md"
 printf 'run_id=%s\nevidence_dir=%s\n' "$astra_run_id" "$astra_evidence_dir"
 git rev-parse HEAD | tee "$astra_evidence_dir/git-head.txt"
 git status --short --branch | tee "$astra_evidence_dir/git-status-before.txt"
@@ -354,10 +355,11 @@ printf 'registry_unchanged=%s registry_matches_head=%s\n' \
 
 ## 12. 最终报告格式
 
-Task 10 must first populate and commit the measured [transactional app-state
+Task 10 must first populate the local copy of the [transactional app-state
 matrix](macos-app-state-acceptance.md).
-The final-report tables below summarize its rows and link their evidence; they
-do not duplicate or replace the matrix.
+The final-report tables below summarize its rows and link their local evidence;
+they do not duplicate or replace the matrix. Keep this report in ignored local
+storage. Only a redacted summary belongs in the public repository.
 
 将报告保存为：
 

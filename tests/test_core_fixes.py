@@ -483,12 +483,12 @@ def test_backend_extracts_multiple_pasted_image_paths_as_attachments(tmp_path):
 
 
 def test_backend_extracts_concatenated_windows_image_paths(monkeypatch, tmp_path):
-    first = tmp_path / "V2_12.png"
-    second = tmp_path / "main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png"
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
     first.write_bytes(b"\x89PNG\r\n\x1a\n")
     second.write_bytes(b"\x89PNG\r\n\x1a\n")
-    first_win = "D:\\cards\\V2_12.png"
-    second_win = "D:\\cards\\main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png"
+    first_win = "D:\\images\\first.png"
+    second_win = "D:\\images\\second.png"
 
     mapping = {first_win: first, second_win: second}
     monkeypatch.setattr("agent.cli.images._resolve_path", lambda path: mapping.get(path, Path(path)))
@@ -497,8 +497,8 @@ def test_backend_extracts_concatenated_windows_image_paths(monkeypatch, tmp_path
 
     assert blocks[0].data["text"] == "Describe this image."
     assert [block.type for block in blocks[1:]] == ["image_url", "image_url"]
-    assert blocks[1].data["source_path"].endswith("V2_12.png")
-    assert blocks[2].data["source_path"].endswith("main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png")
+    assert blocks[1].data["source_path"].endswith("first.png")
+    assert blocks[2].data["source_path"].endswith("second.png")
 
 
 def test_backend_extracts_multiple_image_paths_from_image_command_text(tmp_path):
@@ -2308,7 +2308,7 @@ def test_git_tools_reject_path_escape(tmp_path):
 def test_git_runner_uses_blocking_subprocess_for_unicode_cwd(monkeypatch, tmp_path):
     from agent.runtime.tools import git as git_tools
 
-    unicode_cwd = tmp_path / "桌面-Agent_Lab"
+    unicode_cwd = tmp_path / "测试工作区"
 
     captured = {}
 

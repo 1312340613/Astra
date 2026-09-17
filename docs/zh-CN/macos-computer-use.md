@@ -194,7 +194,7 @@ ASTRA_MACOS_COMPUTER_E2E=1 .venv/bin/python -m pytest tests/macos_computer_e2e -
 
 未设置开关时会说明跳过原因；启用后缺应用或权限是带诊断的失败，不能当通过。AppKit 控件/画布、WPS、Electron、Chromium 分别报告，缺失或失败不能折算成另一项通过。
 
-仓库的确定性测试覆盖协议、审批、覆盖层、缓存和显示器捕获。真实 WPS 通过必须是当前签名辅助程序在本轮通过精确审批生成新的测试 DOCX 和可搜索 PDF。跳过、旧产物或安全拒绝停止均不算验收。[2026-08-29 兼容记录（英文）](../macos-computer-compatibility-evidence.md) 保留历史证据，确定性和实机结果分别报告。
+仓库的确定性测试覆盖协议、审批、覆盖层、缓存和显示器捕获。真实 WPS 通过必须是当前签名辅助程序在本轮通过精确审批生成新的测试 DOCX 和可搜索 PDF。跳过、旧产物或安全拒绝停止均不算验收。[脱敏兼容摘要（英文）](../macos-computer-compatibility-evidence.md) 保留历史结果的边界，确定性和实机结果分别报告。原始测量记录只保存在被 Git 忽略的本地证据目录。
 
 [Smart Snapshot 只读 WPS 测量说明（英文）](../macos-smart-snapshot-runbook.md) 衡量当前 AX 子树对可见/屏幕外文本是否有用，不滚动、不改变焦点、不输入。它不是实现验证，也不能把 `coverage=reported_ax_subtree` 提升为完整性保证。
 

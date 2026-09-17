@@ -119,7 +119,7 @@ evals/coding/results/
 .superpowers/
 .worktrees/
 *.inspect.ndjson
-Polypharmacy_Knowledge_Graph.pptx
+/*.pptx
 
 # Runtime artifacts
 output/

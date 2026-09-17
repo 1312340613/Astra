@@ -1,4 +1,4 @@
-"""Check installed wheel contents offline without editable/source import fallback.
+"""Check source archives and installed wheels offline.
 
 Run after locked dependency installation has populated uv's build cache. Runtime
 dependencies come from the current interpreter's site-packages, but Python starts
@@ -11,10 +11,51 @@ from __future__ import annotations
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import tempfile
-from pathlib import Path
+import tomllib
+from pathlib import Path, PurePosixPath
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def check_source_distribution(path: Path) -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    included = config["tool"]["hatch"]["build"]["targets"]["sdist"]["only-include"]
+    blocked_parts = {
+        ".git", ".hg", ".venv", ".venv-wsl", ".logs", ".tmp", ".worktrees",
+        ".build", ".swiftpm", "node_modules", "__pycache__", ".pytest_cache",
+    }
+    names = set()
+    with tarfile.open(path) as archive:
+        for member in archive:
+            parts = PurePosixPath(member.name).parts
+            if member.isdir():
+                continue
+            relative = PurePosixPath(*parts[1:]).as_posix()
+            name = PurePosixPath(relative).name
+            allowed = relative == "PKG-INFO" or any(
+                relative == entry or relative.startswith(f"{entry}/") for entry in included
+            )
+            private = (
+                bool(blocked_parts.intersection(parts))
+                or name == "persona.local.json"
+                or (name.startswith(".env") and name != ".env.example")
+                or PurePosixPath(relative).suffix in {".pem", ".p12", ".pfx", ".key"}
+                or relative.startswith(("docs/superpowers/", "docs/validation/", "ui-tui/dist/", "evals/coding/results/"))
+            )
+            if not member.isfile() or ".." in parts or member.name.startswith("/") or not allowed or private:
+                raise SystemExit(f"Source distribution contains a non-public path: {relative}")
+            names.add(relative)
+    required = {
+        "agent/cli/main.py", "agent/runtime/prompts.py", "config/models.yaml",
+        "ui-tui/src/index.tsx", "astra.py", "README.md", "pyproject.toml",
+    }
+    if missing := required - names:
+        raise SystemExit(f"Source distribution is missing public inputs: {sorted(missing)}")
+    print("Source distribution smoke passed: public inputs present; local artifacts excluded")
+
+
 SMOKE_CODE = r"""
 import importlib
 import importlib.metadata
@@ -72,9 +113,13 @@ def main() -> int:
         wheels = root / "wheels"
         installed = root / "installed"
         run([
-            "uv", "build", "--wheel", "--offline", "--no-python-downloads",
+            "uv", "build", "--sdist", "--wheel", "--offline", "--no-python-downloads",
             "--python", sys.executable, "--out-dir", str(wheels), str(PROJECT_ROOT),
         ], cwd=root)
+        sources = list(wheels.glob("*.tar.gz"))
+        if len(sources) != 1:
+            raise SystemExit("Distribution smoke expected exactly one freshly built source archive")
+        check_source_distribution(sources[0])
         candidates = list(wheels.glob("*.whl"))
         if len(candidates) != 1:
             raise SystemExit("Wheel smoke expected exactly one freshly built wheel")

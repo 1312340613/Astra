@@ -65,7 +65,7 @@ def test_active_proxy_bypasses_local_and_no_proxy_hosts(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not probe")),
     )
 
-    assert network.active_proxy_for_url("http://192.168.1.18:8000/v1") is None
+    assert network.active_proxy_for_url("http://192.168.0.1:8000/v1") is None
     assert network.active_proxy_for_url("https://api.deepseek.com/v1") is None
     assert network.active_proxy_for_url("https://docs.example.cn/page") is None
 

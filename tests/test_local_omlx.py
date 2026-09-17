@@ -184,7 +184,7 @@ def test_explicit_windows_lan_provider_is_unchanged_without_auto_detection(
 providers:
   omlx:
     label: OMLX LAN · 8000
-    base_url: http://192.168.1.18:8000/v1
+    base_url: http://192.0.2.10:8000/v1
     api_key_env: OMLX_API_KEY
     context_limit: 262144
 models: {}
@@ -200,7 +200,7 @@ models: {}
     assert len(endpoints) == 1
     assert endpoints[0].id == "omlx"
     assert endpoints[0].label == "OMLX LAN · 8000"
-    assert endpoints[0].profile.base_url == "http://192.168.1.18:8000/v1"
+    assert endpoints[0].profile.base_url == "http://192.0.2.10:8000/v1"
 
 
 def test_local_omlx_discovery_authenticates_and_redacts_catalog_event(

@@ -124,13 +124,13 @@ def test_federated_provider_keeps_builtin_first_and_deduplicates(tmp_path):
     store = MemoryStore(tmp_path / "memory.db", core_dir=tmp_path / "memory")
     builtin = store.add_record(
         kind="user_fact",
-        content="User lives in Singapore",
+        content="Test user lives in Example City",
         source_session_id="session-a",
     )
     client = FakeRecallClient([
         SimpleNamespace(
             id="duplicate",
-            text="User lives in Singapore",
+            text="Test user lives in Example City",
             type="observation",
             occurred_start=None,
             mentioned_at=None,
@@ -140,7 +140,7 @@ def test_federated_provider_keeps_builtin_first_and_deduplicates(tmp_path):
         ),
         SimpleNamespace(
             id="extra",
-            text="User previously discussed opening a local bank account",
+            text="Test user previously discussed opening a library account",
             type="observation",
             occurred_start=None,
             mentioned_at=None,
@@ -156,10 +156,10 @@ def test_federated_provider_keeps_builtin_first_and_deduplicates(tmp_path):
     )
     provider = FederatedMemoryProvider(BuiltinMemoryProvider(store), external)
 
-    records = asyncio.run(provider.recall("Singapore account", limit=4))
+    records = asyncio.run(provider.recall("Example City account", limit=4))
 
     assert records[0].record_id == builtin.record_id
-    assert [record.content for record in records].count("User lives in Singapore") == 1
+    assert [record.content for record in records].count("Test user lives in Example City") == 1
     assert any(record.record_id == "hs-extra" for record in records)
 
 

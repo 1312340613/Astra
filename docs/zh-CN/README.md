@@ -59,8 +59,8 @@
 | 可复现的 Mac 实机检查 | [实机测试说明（英文）](../macos-computer-use-real-machine-test-runbook.md) |
 | WPS 文本观察实验 | [Smart Snapshot 测量（英文）](../macos-smart-snapshot-runbook.md) |
 | Windows 辅助程序构建、测试与限制 | [Windows helper（英文）](../../native/windows-computer-helper/README.md) |
-| 应用状态事务的历史验收 | [验收矩阵（英文）](../macos-app-state-acceptance.md) |
-| 具体版本和动作的历史兼容证据 | [兼容记录（英文）](../macos-computer-compatibility-evidence.md) |
+| 应用状态事务的本地验收 | [空白验收模板（英文）](../macos-app-state-acceptance.md) |
+| 历史兼容结果及证据边界 | [脱敏兼容摘要（英文）](../macos-computer-compatibility-evidence.md) |
 
 ## 文档维护
 

@@ -1,10 +1,50 @@
 from pathlib import Path
+import io
 import subprocess
 import sys
+import tarfile
 
 import pytest
 
 from scripts import phase_t_gate, wheel_smoke
+
+
+def _source_archive(tmp_path, names):
+    path = tmp_path / "source.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        for name in names:
+            member = tarfile.TarInfo(f"example-source/{name}")
+            archive.addfile(member, io.BytesIO())
+    return path
+
+
+@pytest.mark.parametrize("relative", [
+    ".git", ".env", ".astra/approvals.db", ".logs/backend.log",
+    ".astra/skills/personal/private-note/SKILL.md", "personal-notes.md",
+    "ui-tui/node_modules/example/index.js", "ui-tui/dist/app.mjs",
+    "agent/.env.local", "agent/persona.local.json", "agent/private.key",
+    "native/appshot-core/.build/private.txt", "docs/superpowers/private.md",
+    "docs/validation/private.md", "evals/coding/results/private.json",
+])
+def test_source_distribution_refuses_private_or_generated_files(tmp_path, relative):
+    path = _source_archive(tmp_path, [relative])
+    with pytest.raises(SystemExit, match="non-public path"):
+        wheel_smoke.check_source_distribution(path)
+
+
+def test_source_distribution_keeps_public_cli_tui_and_configuration(tmp_path):
+    path = _source_archive(tmp_path, [
+        "agent/cli/main.py", "agent/runtime/prompts.py", "config/models.yaml",
+        "ui-tui/src/index.tsx", "astra.py", "README.md", "pyproject.toml", "PKG-INFO",
+        ".env.example", ".astra/skills/operations/using-computer-use/SKILL.md",
+    ])
+    wheel_smoke.check_source_distribution(path)
+
+
+def test_source_distribution_rejects_incomplete_public_inputs(tmp_path):
+    path = _source_archive(tmp_path, ["README.md"])
+    with pytest.raises(SystemExit, match="missing public inputs"):
+        wheel_smoke.check_source_distribution(path)
 
 
 def test_resolve_tool_paths_uses_windows_virtualenv_layout():

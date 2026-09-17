@@ -278,23 +278,23 @@ def test_structured_record_retains_provenance_and_is_not_blindly_injected(tmp_pa
 
     record = store.add_record(
         kind="user_fact",
-        content="User plans to apply to a Singapore university in 2026",
+        content="Test user plans to apply to Northstar University in 2030",
         source_session_id="session-1",
         source_message_id="message-7",
         confidence=0.95,
         salience=0.8,
-        tags=["education", "singapore"],
+        tags=["education", "northstar"],
         metadata={"retained_by": "explicit-user-statement"},
     )
-    recalled = store.recall_records("Singapore", kinds=["user_fact"])
+    recalled = store.recall_records("Northstar", kinds=["user_fact"])
 
     assert [item.record_id for item in recalled] == [record.record_id]
     assert recalled[0].source_session_id == "session-1"
     assert recalled[0].source_message_id == "message-7"
     assert recalled[0].confidence == 0.95
-    assert recalled[0].tags == ("education", "singapore")
+    assert recalled[0].tags == ("education", "northstar")
     assert recalled[0].metadata["retained_by"] == "explicit-user-statement"
-    assert "Singapore university" not in store.format_prompt("session-1")
+    assert "Northstar University" not in store.format_prompt("session-1")
 
 
 def test_supersede_marks_old_fact_inactive_and_links_replacement(tmp_path):

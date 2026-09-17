@@ -154,7 +154,7 @@ def _infer_skill_category(name: str, content: str) -> str:
         "creative": ("image", "prompt", "qwen-mm", "video", "tts"),
         "research": ("research", "search", "pdf", "knowledge", "kb-", "citation", "paper"),
         "operations": ("triage", "network", "mcp", "wsl", "huggingface", "deploy", "server", "computer"),
-        "personal": ("email", "fitness", "singapore", "dbs", "sillytavern", "session", "hermes"),
+        "personal": ("email", "fitness", "calendar", "finance", "health", "personal"),
     }
     scores = {
         category: sum(1 for token in tokens if token.casefold() in text)

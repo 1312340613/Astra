@@ -169,7 +169,7 @@ def test_legacy_search_preserves_sender_limit_window_and_folder_alias(
 
     assert (
         check_163.main(
-            ["--search", "solar", "--from", "nus.edu.sg", "--recent", "8", "--window", "100", "--folder", "sent"]
+            ["--search", "invoice", "--from", "billing.example.com", "--recent", "8", "--window", "100", "--folder", "sent"]
         )
         == 0
     )
@@ -178,8 +178,8 @@ def test_legacy_search_preserves_sender_limit_window_and_folder_alias(
         (
             "search",
             {
-                "query": "solar",
-                "sender": "nus.edu.sg",
+                "query": "invoice",
+                "sender": "billing.example.com",
                 "folder": "已发送",
                 "limit": 8,
                 "window": 100,

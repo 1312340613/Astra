@@ -10,25 +10,25 @@ import {
 } from "./image-command.js";
 
 assert.deepEqual(
-  parseImageInput('/image "D:\\桌面\\Agent_Lab\\agent-system\\f4e6e7dbe2337184.png" 这张图是什么？'),
+  parseImageInput('/image "D:\\测试资料\\图片\\sample.png" 这张图是什么？'),
   {
-    path: "D:\\桌面\\Agent_Lab\\agent-system\\f4e6e7dbe2337184.png",
+    path: "D:\\测试资料\\图片\\sample.png",
     prompt: "这张图是什么？",
   },
 );
 
 assert.deepEqual(
-  parseImageInput('"D:\\桌面\\Agent_Lab\\agent-system\\f4e6e7dbe2337184.png"'),
+  parseImageInput('"D:\\测试资料\\图片\\sample.png"'),
   {
-    path: "D:\\桌面\\Agent_Lab\\agent-system\\f4e6e7dbe2337184.png",
+    path: "D:\\测试资料\\图片\\sample.png",
     prompt: "Describe this image.",
   },
 );
 
 assert.deepEqual(
-  parseImageInput('"D:\\桌面\\Agent_Lab\\agent-system\\f4e6e7dbe2337184.png" 分析这张图'),
+  parseImageInput('"D:\\测试资料\\图片\\sample.png" 分析这张图'),
   {
-    path: "D:\\桌面\\Agent_Lab\\agent-system\\f4e6e7dbe2337184.png",
+    path: "D:\\测试资料\\图片\\sample.png",
     prompt: "分析这张图",
   },
 );
@@ -38,14 +38,14 @@ assert.deepEqual(parseImageInput("/image"), null);
 
 assert.equal(
   formatImageInputDisplay(
-    "D:\\桌面\\SillyTavern-fresh\\角色卡\\V2_12.pngD:\\桌面\\SillyTavern-fresh\\角色卡\\main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png",
+    "D:\\测试资料\\图片\\first.pngD:\\测试资料\\图片\\second.png",
   ),
   "[Image #1] [Image #2]",
 );
 
 assert.equal(
   formatImageInputDisplay(
-    "/image D:\\桌面\\SillyTavern-fresh\\角色卡\\V2_12.pngD:\\桌面\\SillyTavern-fresh\\角色卡\\main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png 分析这两张图",
+    "/image D:\\测试资料\\图片\\first.pngD:\\测试资料\\图片\\second.png 分析这两张图",
   ),
   "分析这两张图\n[Image #1] [Image #2]",
 );
@@ -53,53 +53,53 @@ assert.equal(
 assert.equal(formatImageInputDisplay("hello.png is a file name in text"), null);
 
 const normalized = normalizeImageInputValue(
-  "D:\\cards\\V2_12.pngD:\\cards\\main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png",
+  "D:\\images\\first.pngD:\\images\\second.png",
 );
 assert.deepEqual(normalized, {
   displayText: "[Image #1] [Image #2]",
   attachments: [
-    { label: "[Image #1]", path: "D:\\cards\\V2_12.png" },
-    { label: "[Image #2]", path: "D:\\cards\\main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png" },
+    { label: "[Image #1]", path: "D:\\images\\first.png" },
+    { label: "[Image #2]", path: "D:\\images\\second.png" },
   ],
 });
 
 assert.equal(
   resolveImageInputSubmitText("[Image #1] [Image #2] 分析这两张图", normalized?.attachments ?? []),
-  "D:\\cards\\V2_12.png D:\\cards\\main_reitia-overwritten-rabbit-30a97d6be1ef_spec_v2.png 分析这两张图",
+  "D:\\images\\first.png D:\\images\\second.png 分析这两张图",
 );
 
-const appended = updateImageInputValue("[Image #1] D:\\cards\\second.png", [
-  { label: "[Image #1]", path: "D:\\cards\\first.png" },
+const appended = updateImageInputValue("[Image #1] D:\\images\\second.png", [
+  { label: "[Image #1]", path: "D:\\images\\first.png" },
 ]);
 assert.deepEqual(appended, {
   displayText: "[Image #1] [Image #2]",
   attachments: [
-    { label: "[Image #1]", path: "D:\\cards\\first.png" },
-    { label: "[Image #2]", path: "D:\\cards\\second.png" },
+    { label: "[Image #1]", path: "D:\\images\\first.png" },
+    { label: "[Image #2]", path: "D:\\images\\second.png" },
   ],
 });
 
 assert.equal(
   resolveImageInputSubmitText(`${appended.displayText} 逐个分析`, appended.attachments),
-  "D:\\cards\\first.png D:\\cards\\second.png 逐个分析",
+  "D:\\images\\first.png D:\\images\\second.png 逐个分析",
 );
 
 assert.deepEqual(
   updateImageInputValue("[Image #1] [Image #2", appended.attachments),
   {
     displayText: "[Image #1]",
-    attachments: [{ label: "[Image #1]", path: "D:\\cards\\first.png" }],
+    attachments: [{ label: "[Image #1]", path: "D:\\images\\first.png" }],
   },
 );
 
 assert.equal(
-  shouldNormalizeImageInputValue("[Image #1] 读取", [{ label: "[Image #1]", path: "D:\\cards\\first.png" }]),
+  shouldNormalizeImageInputValue("[Image #1] 读取", [{ label: "[Image #1]", path: "D:\\images\\first.png" }]),
   false,
 );
 
 assert.equal(
-  shouldNormalizeImageInputValue("[Image #1] D:\\cards\\second.png", [
-    { label: "[Image #1]", path: "D:\\cards\\first.png" },
+  shouldNormalizeImageInputValue("[Image #1] D:\\images\\second.png", [
+    { label: "[Image #1]", path: "D:\\images\\first.png" },
   ]),
   true,
 );

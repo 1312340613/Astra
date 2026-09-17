@@ -254,23 +254,24 @@ def test_computer_use_skill_links_the_current_compatibility_report():
     assert COMPATIBILITY_REPORT_RELATIVE_PATH in _skill_content()
 
 
-def test_current_compatibility_report_records_exact_fail_closed_evidence():
+def test_current_compatibility_report_preserves_result_without_raw_machine_evidence():
     assert COMPATIBILITY_REPORT_PATH.is_file()
     content = COMPATIBILITY_REPORT_PATH.read_text(encoding="utf-8")
 
-    for exact_cell in (
-        "`dev.astra.computer-fixture` | `1.0.0`",
-        "`com.kingsoft.wpsoffice.mac` | `12.1.26026`",
-        "`com.microsoft.VSCode` | `1.134.0`",
-        "`com.microsoft.edgemac` | `151.0.4129.107`",
+    for bundle_id in (
+        "dev.astra.computer-fixture",
+        "com.kingsoft.wpsoffice.mac",
+        "com.microsoft.VSCode",
+        "com.microsoft.edgemac",
     ):
-        assert exact_cell in content
+        assert f"`{bundle_id}` | FAIL_CLOSED before input" in content
     for required in (
         "AX tree preparation/selection",
         "before input",
         "real pointer did not move",
-        "exactly empty",
-        '"applications": []',
+        "redacted historical summary",
+        "private local evidence",
+        "../config/macos_computer_compatibility.json",
     ):
         assert required in content
 
@@ -435,11 +436,10 @@ def test_runbook_links_task_10_operator_to_the_transactional_template():
         "[Task 10 transactional app-state matrix]"
         "(macos-app-state-acceptance.md)"
     ) in runbook
-    assert re.search(
-        r"Task 10.*(?:populate|update).*matrix.*commit.*measured update",
-        runbook,
-        re.IGNORECASE | re.DOTALL,
-    )
+    assert "ignored local evidence directory" in runbook
+    assert "populate that local copy" in runbook
+    assert "Do not commit the populated matrix or raw run metadata" in runbook
+    assert 'cp docs/macos-app-state-acceptance.md "$astra_evidence_dir/app-state-matrix.md"' in content
     assert re.search(
         r"final report.*reference.*matrix.*not.*competing output",
         runbook,
@@ -478,6 +478,23 @@ def test_transactional_app_state_acceptance_template_records_matrix_evidence():
         assert field.lower() in lower
     for result in ("`PASS`", "`WARN`", "`FAIL`", "`NOT RUN`"):
         assert result in result_rules
+
+
+def test_public_acceptance_template_stays_unfilled_and_keeps_identifiers_local():
+    content = APP_STATE_ACCEPTANCE_TEMPLATE_PATH.read_text(encoding="utf-8")
+    assert "unfilled template, not an executed run" in content
+    assert "ignored local" in content
+    matrix = _markdown_section(content, "## Transactional app-state matrix")
+    rows = [line for line in matrix.splitlines() if line.startswith("| ")][2:]
+    assert len(rows) == 5
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        assert cells[1:6] == [""] * 5
+        assert cells[6] == "NOT RUN"
+    for path in (APP_STATE_ACCEPTANCE_TEMPLATE_PATH, COMPATIBILITY_REPORT_PATH):
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"\b(?:app|win)_[0-9a-f-]{36}\b", text)
+        assert not re.search(r"\b[0-9a-f]{40,64}\b", text)
 
 
 def test_wps_ax_omission_is_warn_not_appshot_equivalent_pass():

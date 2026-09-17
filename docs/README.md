@@ -55,10 +55,10 @@ labelled in the Chinese navigation.
   covers the narrower WPS observation experiment.
 - The [Windows helper guide](../native/windows-computer-helper/README.md)
   covers its build, tests and platform limits.
-- The [transactional app-state matrix](macos-app-state-acceptance.md) and
-  [compatibility evidence](macos-computer-compatibility-evidence.md) retain exact
-  dated observations used by regression checks. Read their dates and scope:
-  they are not a current compatibility guarantee for every app or build.
+- The [transactional app-state template](macos-app-state-acceptance.md) supports
+  local evidence collection; the [compatibility summary](macos-computer-compatibility-evidence.md)
+  records historical limitations. Keep populated matrices and raw run metadata
+  in ignored local storage; publish only redacted summaries.
 
 ## Maintaining documentation
 

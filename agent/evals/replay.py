@@ -499,7 +499,7 @@ def _print_report(report: ReplayReport) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run deterministic Agent_Lab replay evaluations")
+    parser = argparse.ArgumentParser(description="Run deterministic Astra replay evaluations")
     parser.add_argument("--suite", default=str(DEFAULT_SUITE), help="JSONL replay suite")
     parser.add_argument("--category", default="", help="Only run one category")
     parser.add_argument("--case", dest="case_id", default="", help="Only run one case id")

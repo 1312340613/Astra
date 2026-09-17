@@ -308,7 +308,7 @@ assert.equal(completeSlashCommand("/perm", 0), "/permissions ");
 assert.deepEqual(slashCommandSuggestions("/dct").map((item) => item.command), ["/doctor"]);
 
 const models = [
-  { name: "deepseek-v4-flash", current: true, provider: "OMLX · 8000", endpoint: "http://192.168.1.18:8000/v1" },
+  { name: "deepseek-v4-flash", current: true, provider: "OMLX · 8000", endpoint: "http://192.0.2.10:8000/v1" },
   { name: "deepseek-v4-pro" },
   { name: "Qwen3.6-35B-A3B" },
   { name: "gemma-4-12B-it" },
@@ -326,7 +326,7 @@ assert.equal(completeSlashCommand("/model deepseek-v4-p", 0, [], models), "/mode
 assert.equal(submitSlashCommand("/model deepseek-v4-p", 0, [], models), "/model deepseek-v4-pro");
 const currentModel = slashCommandSuggestions("/model ", [], models)[0];
 assert.equal(currentModel.command, "deepseek-v4-flash");
-assert.equal(currentModel.description, "current · OMLX · 8000 · http://192.168.1.18:8000/v1");
+assert.equal(currentModel.description, "current · OMLX · 8000 · http://192.0.2.10:8000/v1");
 
 // Reasoning intensity replaces both old mode selectors.
 assert.deepEqual(slashCommandSuggestions("/mode ").map((item) => item.command), ["low", "high", "max"]);

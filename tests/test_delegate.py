@@ -490,7 +490,7 @@ def test_remote_worker_uses_independent_bounded_client(monkeypatch):
     )
     assert _worker_llm(local, {}) is local
     lan = LLMClient(
-        LLMConfig(base_url="http://192.168.1.18:8000/v1", max_concurrent_requests=1),
+        LLMConfig(base_url="http://192.0.2.10:8000/v1", max_concurrent_requests=1),
         provider=provider,
     )
     assert _worker_llm(lan, {}) is lan

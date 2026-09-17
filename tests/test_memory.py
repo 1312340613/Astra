@@ -62,7 +62,7 @@ def test_markdown_core_is_the_direct_source_of_truth(tmp_path):
     path = tmp_path / "memory.db"
     core_dir = tmp_path / "core"
     memory_entries = ("First durable agent decision", "Second environment fact " + "x" * 700)
-    user_entries = ("User prefers Chinese", "User is preparing for NUS")
+    user_entries = ("User prefers Chinese", "Test user is preparing for Northstar University")
     write_legacy_core(core_dir, memory=memory_entries, user=user_entries)
     before = {name: (core_dir / name).read_bytes() for name in ("MEMORY.md", "USER.md")}
 
