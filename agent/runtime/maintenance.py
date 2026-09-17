@@ -24,19 +24,25 @@ def _requires_content_fingerprint() -> bool:
 
 
 def _file_signature(metadata: os.stat_result) -> tuple[int, ...]:
+    # Windows stat/fstat can disagree on ctime's meaning in Python 3.12.
+    # Use creation time for that comparison; keep POSIX metadata change time.
+    timestamp = getattr(metadata, "st_birthtime_ns", metadata.st_ctime_ns) if os.name == "nt" else metadata.st_ctime_ns
     return (
         metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
-        metadata.st_mtime_ns, metadata.st_ctime_ns,
+        metadata.st_mtime_ns, timestamp,
     )
 
 
 def _content_fingerprint(path: Path, metadata: os.stat_result) -> str:
     expected = _file_signature(metadata)
     with path.open("rb") as stream:
-        if _file_signature(os.fstat(stream.fileno())) != expected:
+        opened = os.fstat(stream.fileno())
+        if _file_signature(opened) != expected:
             raise OSError("candidate changed before content verification")
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        if _file_signature(os.fstat(stream.fileno())) != expected:
+        verified = os.fstat(stream.fileno())
+        # ctime remains comparable between two handle reads, even on Windows.
+        if _file_signature(verified) != expected or verified.st_ctime_ns != opened.st_ctime_ns:
             raise OSError("candidate changed during content verification")
     return digest
 

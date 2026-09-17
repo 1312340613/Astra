@@ -12,6 +12,7 @@ on:
       - 'agent/cli/backend.py'
       - 'agent/cli/session_lifecycle.py'
       - 'agent/runtime/self_protection.py'
+      - 'agent/runtime/maintenance.py'
       - 'agent/runtime/session_wakeup.py'
       - 'agent/runtime/browser*.py'
       - 'agent/runtime/cdp_backend.py'
@@ -25,6 +26,8 @@ on:
       - 'tests/test_browser*.py'
       - 'tests/test_mcp*.py'
       - 'tests/test_self_protection.py'
+      - 'tests/test_runtime_maintenance.py'
+      - 'tests/test_backend_conversation_commands.py'
       - 'tests/test_graceful_restart.py'
       - 'tests/test_session_lifecycle_protocol.py'
       - 'tests/test_session_wakeup*.py'
@@ -49,6 +52,7 @@ on:
       - 'agent/cli/backend.py'
       - 'agent/cli/session_lifecycle.py'
       - 'agent/runtime/self_protection.py'
+      - 'agent/runtime/maintenance.py'
       - 'agent/runtime/session_wakeup.py'
       - 'agent/runtime/browser*.py'
       - 'agent/runtime/cdp_backend.py'
@@ -62,6 +66,8 @@ on:
       - 'tests/test_browser*.py'
       - 'tests/test_mcp*.py'
       - 'tests/test_self_protection.py'
+      - 'tests/test_runtime_maintenance.py'
+      - 'tests/test_backend_conversation_commands.py'
       - 'tests/test_graceful_restart.py'
       - 'tests/test_session_lifecycle_protocol.py'
       - 'tests/test_session_wakeup*.py'
@@ -126,6 +132,8 @@ jobs:
           tests/test_backend_handshake.py tests/test_cross_platform_examples.py tests/test_production_foundations.py
           tests/test_public_image_boundary.py
           tests/test_self_protection.py tests/test_graceful_restart.py tests/test_session_wakeup.py
+          tests/test_runtime_maintenance.py
+          tests/test_browser_upload.py tests/test_backend_conversation_commands.py
           tests/test_session_lifecycle_protocol.py tests/test_session_wakeup_protocol.py
           tests/test_browser_lifecycle.py tests/test_browser_child_environment.py tests/test_mcp_recovery.py
           tests/test_browser_backend_router.py tests/test_browser_control_transport.py

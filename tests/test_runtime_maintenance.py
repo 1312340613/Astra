@@ -3,6 +3,7 @@ import sqlite3
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,39 @@ from agent.runtime import maintenance as maintenance_module
 def _age(path: Path, days: int) -> None:
     timestamp = time.time() - days * 86_400
     os.utime(path, (timestamp, timestamp))
+
+
+@pytest.mark.parametrize("platform_name", ["nt", "posix"])
+def test_file_signature_keeps_platform_specific_identity_timestamp(monkeypatch, platform_name):
+    monkeypatch.setattr(maintenance_module, "os", SimpleNamespace(name=platform_name))
+    fields = dict(st_dev=1, st_ino=2, st_mode=0o100600, st_size=3, st_mtime_ns=40)
+    path_stat = SimpleNamespace(**fields, st_ctime_ns=50, st_birthtime_ns=50)
+    fd_stat = SimpleNamespace(**fields, st_ctime_ns=60, st_birthtime_ns=50)
+
+    if platform_name == "nt":
+        assert maintenance_module._file_signature(path_stat) == maintenance_module._file_signature(fd_stat)
+        replacement = SimpleNamespace(**fields, st_ctime_ns=60, st_birthtime_ns=70)
+        assert maintenance_module._file_signature(path_stat) != maintenance_module._file_signature(replacement)
+    else:
+        assert maintenance_module._file_signature(path_stat) != maintenance_module._file_signature(fd_stat)
+
+    # Python 3.11 Windows exposes creation time only through ctime.
+    legacy_stat = SimpleNamespace(**fields, st_ctime_ns=50)
+    assert maintenance_module._file_signature(legacy_stat) == maintenance_module._file_signature(path_stat)
+
+
+def test_windows_content_fingerprint_retains_handle_change_time_check(tmp_path, monkeypatch):
+    path = tmp_path / "candidate"
+    path.write_bytes(b"old")
+    fields = dict(st_dev=1, st_ino=2, st_mode=0o100600, st_size=3, st_mtime_ns=40, st_birthtime_ns=50)
+    path_stat = SimpleNamespace(**fields, st_ctime_ns=50)
+    handle_stats = iter([SimpleNamespace(**fields, st_ctime_ns=60), SimpleNamespace(**fields, st_ctime_ns=70)])
+    monkeypatch.setattr(maintenance_module, "os", SimpleNamespace(name="nt", fstat=lambda _fd: next(handle_stats)))
+
+    # The path and handle initially disagree on ctime, but two handle reads
+    # must still agree. Same-size rewrites with restored mtime remain detectable.
+    with pytest.raises(OSError, match="changed during"):
+        maintenance_module._content_fingerprint(path, path_stat)
 
 
 def test_maintenance_preview_is_bounded_and_read_only(tmp_path):

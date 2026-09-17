@@ -46,6 +46,9 @@ def test_local_file_with_distinct_creation_and_modification_times(tmp_path):
 def test_local_file_identity_and_empty_list(tmp_path):
     path = tmp_path / "file.txt"
     path.write_bytes(b"file contents")
+    # Same-size writes can share a Windows clock tick; make the observed
+    # metadata transition explicit instead of depending on wall-clock timing.
+    os.utime(path, ns=(1_600_000_000_000_000_000, 1_600_000_000_000_000_000))
     files = inspect_files(["file.txt"], tmp_path)
     assert files[0].metadata() == {"name": "file.txt", "size": 13, "type": "text/plain"}
     assert read_files(files) == [b"file contents"]

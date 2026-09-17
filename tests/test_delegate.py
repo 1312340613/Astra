@@ -2184,11 +2184,12 @@ def test_background_completion_is_delivered_once_through_mailbox(process_manager
     asyncio.run(scenario())
 
 
-def test_background_completion_follows_session_across_parent_tasks(process_manager):
+@pytest.mark.parametrize("response_delay", [0.02, 0.1])
+def test_background_completion_follows_session_across_parent_tasks(process_manager, response_delay):
     class BriefLLM:
         async def chat(self, **kwargs):
             del kwargs
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(response_delay)
             return {"content": "cross-turn evidence", "tool_calls": []}
 
     async def scenario():
@@ -2198,13 +2199,19 @@ def test_background_completion_follows_session_across_parent_tasks(process_manag
             llm_getter=BriefLLM,
             session_id_getter=lambda: "session-a",
         )
-        await registry.execute(
+        started = await registry.execute(
             "delegate_task",
             {"goal": "finish after parent", "background": True, "timeout": 5},
             task_id="old-parent-task",
         )
-        await asyncio.sleep(0.05)
+        assert not started["error"], started
+        process = process_manager.get(json.loads(started["output"])["process_id"])
+        # Wait without delegate_poll, which acknowledges/consumes the mailbox
+        # result. A fixed sleep does not guarantee completion on a busy runner.
+        assert await process_manager.wait(process, 5000)
+        assert process_manager.status(process) == "completed"
 
+        assert mailbox.drain_for("another-task", "session-b") == []
         envelopes = mailbox.drain_for("new-parent-task", "session-a")
 
         assert len(envelopes) == 1

@@ -31,19 +31,57 @@ def protocol(tmp_path, request, monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ApprovalOpenAIHandler)
     server.call_number = 1  # Plain replies only, never execute a tool.
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    proc, _, seen, wait_for = _start_question_protocol_backend(tmp_path, server.server_port, "work")
-
-    def send(payload):
-        proc.stdin.write(json.dumps(payload) + "\n")
-        proc.stdin.flush()
-
-    wait_for(lambda e: e.get("type") == "model_info")
+    proc = None
     try:
+        proc, _, seen, wait_for = _start_question_protocol_backend(tmp_path, server.server_port, "work")
+
+        def send(payload):
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
+
+        # Cold imports/startup may exceed the ordinary command-event budget on
+        # busy Windows runners. Keep startup bounded and clean up even on failure.
+        wait_for(lambda e: e.get("type") == "model_info", timeout=30)
         yield SimpleNamespace(send=send, wait=wait_for, seen=seen, server=server)
     finally:
-        _stop_protocol_backend(proc)
-        server.shutdown()
-        server.server_close()
+        try:
+            if proc is not None:
+                _stop_protocol_backend(proc)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+@pytest.mark.parametrize("failure_phase", ["spawn", "ready"])
+def test_protocol_setup_failure_cleans_up_owned_resources(tmp_path, monkeypatch, failure_phase):
+    cleaned = []
+    proc = object()
+    server = SimpleNamespace(
+        server_port=12345,
+        serve_forever=lambda: None,
+        shutdown=lambda: cleaned.append("server_shutdown"),
+        server_close=lambda: cleaned.append("server_close"),
+    )
+
+    def failed_ready(*_args, **_kwargs):
+        raise AssertionError("fixture startup failed")
+
+    def start(*_args, **_kwargs):
+        if failure_phase == "spawn":
+            raise AssertionError("fixture startup failed")
+        return proc, None, [], failed_ready
+
+    def stop(actual):
+        assert actual is proc
+        cleaned.append("backend_stop")
+
+    monkeypatch.setattr(f"{__name__}.ThreadingHTTPServer", lambda *_args: server)
+    monkeypatch.setattr(f"{__name__}._start_question_protocol_backend", start)
+    monkeypatch.setattr(f"{__name__}._stop_protocol_backend", stop)
+    setup = protocol.__wrapped__(tmp_path, SimpleNamespace(param="public"), monkeypatch)
+    with pytest.raises(AssertionError, match="fixture startup failed"):
+        next(setup)
+    assert cleaned == (["backend_stop"] if failure_phase == "ready" else []) + ["server_shutdown", "server_close"]
 
 
 def _command(protocol, command):
