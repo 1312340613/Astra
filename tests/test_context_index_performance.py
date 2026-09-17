@@ -402,7 +402,7 @@ def test_native_long_chinese_recall_has_evidence_within_source_deadline(producti
 def test_warm_semantic_search_over_5000_vectors_stays_bounded(monkeypatch, production_fixture, tmp_path):
     """Fixed 4096-D vectors measure search/revalidation only, not model quality."""
     pytest.importorskip("numpy")
-    from agent.runtime.context_index import embedder
+    from agent.runtime.context_index import embedder, semantic_index
     from agent.runtime.context_index.query import plan_query
     from agent.runtime.context_index.query_embedding import QueryEmbedding, current_embedding
     from agent.runtime.context_index.semantic_index import rebuild_source, read_snapshot
@@ -418,7 +418,15 @@ def test_warm_semantic_search_over_5000_vectors_stays_bounded(monkeypatch, produ
     vectors = tmp_path / "vectors.db"
     report = rebuild_source(session_db, vectors, "session", backend=encoder)
     assert report["encoded"] == 5000
-    rows, _ = read_snapshot(vectors, "session", session_db)
+    # Populate the immutable cache before measuring warm search. Loading the
+    # entire 4096-D fixture is setup, not one of the interactive queries below;
+    # cold-load latency has its own benchmark. Restore the real reader/deadline
+    # before all timed rounds instead of spending their 75 ms budget on setup.
+    open_readonly = semantic_index.open_readonly
+    with monkeypatch.context() as warmup:
+        warmup.setattr(semantic_index, "open_readonly",
+                      lambda path, **_kwargs: open_readonly(path, deadline_ms=10_000))
+        rows, _ = read_snapshot(vectors, "session", session_db)
     assert len(rows) == 5000
     reader = SemanticReader(session_db, vectors)
     plan = plan_query("换一种说法寻找相关历史", _NOW)
