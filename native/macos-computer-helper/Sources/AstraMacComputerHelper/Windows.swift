@@ -2095,31 +2095,24 @@ final class SystemWindowObserver: WindowObserving {
             logActionRejected("observation_validation=ax_inventory_unreadable")
             throw WindowObservationError.axSerializationFailed
         }
+        let screenWindows = content.windows.map {
+            PIDScreenCaptureWindowObservation(pid: $0.owningApplication?.processID,
+                windowID: $0.windowID, bounds: $0.frame, title: $0.title, isOnScreen: $0.isOnScreen)
+        }
         let mapped: [TargetAXWindowRecord]? = mapCompleteAXElements(elements) { element in
-            guard let bounds = AXNodeReader.frameAttribute(element) else { return nil }
+            guard observedAXPID(element) == target.pid,
+                  let bounds = AXNodeReader.frameAttribute(element) else { return nil }
             let title = accessibilityWindowName(element)
-            guard title.status == .complete else { return nil }
             let role = AXNodeReader.stringAttribute(element, kAXRoleAttribute)
             let subrole = AXNodeReader.stringAttribute(element, kAXSubroleAttribute)
-            let matchingWindows = content.windows.filter { window in
-                window.owningApplication?.processID == target.pid &&
-                    window.isOnScreen &&
-                    screenCaptureBoundsMatchAXBounds(
-                        screenCapture: window.frame,
-                        accessibility: bounds
-                    ) &&
-                    windowTitlesMatch(
-                        screenCaptureTitle: window.title ?? "",
-                        accessibilityTitle: title.value ?? ""
-                    )
-            }
-            let windowID = matchingWindows.count == 1 ? matchingWindows[0].windowID : nil
+            let windowID = matchingScreenWindow(pid: target.pid, bounds: bounds, title: title,
+                windowID: observedAXWindowID(element), windows: screenWindows)?.windowID
             if windowID == nil {
                 let sameBounds = content.windows.filter {
                     $0.owningApplication?.processID == target.pid &&
                     screenCaptureBoundsMatchAXBounds(screenCapture: $0.frame, accessibility: bounds)
                 }
-                logActionRejected("ax_sibling_mapping bounds_match=\(!sameBounds.isEmpty) visible_bounds_match=\(sameBounds.contains { $0.isOnScreen }) ambiguous_exact_match=\(matchingWindows.count > 1)")
+                logActionRejected("ax_sibling_mapping bounds_match=\(!sameBounds.isEmpty) visible_bounds_match=\(sameBounds.contains { $0.isOnScreen })")
             }
             let visualMatches = visibleWindows.filter {
                 $0.pid == target.pid && $0.windowID == windowID
@@ -2166,10 +2159,7 @@ final class SystemWindowObserver: WindowObserving {
         let siblingOrdering = backgroundSiblingOrderingProof(
             targetPID: target.pid, targetWindowID: current.windowID, targetBounds: current.frame,
             axWindows: axWindows,
-            screenWindows: content.windows.map {
-                PIDScreenCaptureWindowObservation(pid: $0.owningApplication?.processID,
-                    windowID: $0.windowID, bounds: $0.frame, title: $0.title, isOnScreen: $0.isOnScreen)
-            },
+            screenWindows: screenWindows,
             visibleWindows: visibleWindows
         )
         if siblingOrdering != nil {
@@ -3259,11 +3249,14 @@ final class SystemWindowObserver: WindowObserving {
 
     private func matchingAXWindow(in app: AXUIElement, target: WindowTarget) -> AXUIElement? {
         let matches = (completeObservedAXWindows(app) ?? []).filter { element in
+            guard observedAXPID(element) == target.pid else { return false }
             guard let frame = AXNodeReader.frameAttribute(element) else { return false }
             guard screenCaptureBoundsMatchAXBounds(
                 screenCapture: target.bounds,
                 accessibility: frame
             ) else { return false }
+            let windowID = observedAXWindowID(element)
+            if let windowID, windowID != target.windowID { return false }
             if let expectedIdentity = target.axIdentity, CFHash(element) != expectedIdentity { return false }
             if let expectedElement = target.axElement {
                 // An exact retained AX object identifies this window across title
@@ -3271,6 +3264,7 @@ final class SystemWindowObserver: WindowObserving {
                 // when no retained object is available.
                 return CFEqual(element, expectedElement)
             }
+            if windowID != nil { return true }
             let titleResult = accessibilityWindowName(element)
             guard titleResult.status == .complete else { return false }
             let title = titleResult.value ?? ""
@@ -3362,7 +3356,8 @@ final class SystemWindowObserver: WindowObserving {
             bounds: focusedBounds,
             axIdentity: CFHash(focused),
             title: title.status == .complete ? (title.value ?? "") : nil,
-            isProvenSheet: provenSheet
+            isProvenSheet: provenSheet,
+            windowID: observedAXWindowID(focused)
         )
     }
 
@@ -3528,6 +3523,7 @@ struct PIDAXFocusedWindowObservation: Equatable {
     let axIdentity: CFHashCode
     let title: String?
     var isProvenSheet: Bool = false
+    var windowID: CGWindowID? = nil
 }
 
 struct PIDScreenCaptureWindowObservation: Equatable {
@@ -3585,10 +3581,18 @@ struct ForegroundPIDActionStateFactory {
 
     private func mappedFocusedWindow(targetPID: pid_t) -> PIDFocusedWindowObservation? {
         guard let focused = focusedAXWindow(),
-              focused.pid == targetPID,
-              let focusedTitle = focused.title
+              focused.pid == targetPID
         else { return nil }
-        let candidates = screenCaptureWindows().filter { candidate in
+        let windows = screenCaptureWindows()
+        if let windowID = focused.windowID {
+            guard let window = matchingScreenWindow(pid: focused.pid, bounds: focused.bounds,
+                title: BoundedAXStringResult(value: focused.title, status: .complete),
+                windowID: windowID, windows: windows) else { return nil }
+            return PIDFocusedWindowObservation(pid: focused.pid, windowID: window.windowID,
+                axBounds: focused.bounds, screenCaptureBounds: window.bounds, axIdentity: focused.axIdentity)
+        }
+        guard let focusedTitle = focused.title else { return nil }
+        let candidates = windows.filter { candidate in
             candidate.pid == focused.pid &&
                 candidate.isOnScreen &&
                 approximatelyEqual(candidate.bounds, focused.bounds)

@@ -167,20 +167,26 @@ struct CatalogAXWindowRecord {
     let element: AXUIElement
     let bounds: CGRect
     let title: BoundedAXStringResult
+    var windowID: CGWindowID? = nil
 }
 
 func catalogAXWindowRecords(pid: pid_t) -> [CatalogAXWindowRecord] {
     (completeObservedAXWindows(AXUIElementCreateApplication(pid)) ?? []).compactMap {
-        guard let bounds = AXNodeReader.frameAttribute($0) else { return nil }
-        return CatalogAXWindowRecord(element: $0, bounds: bounds, title: accessibilityWindowName($0))
+        guard observedAXPID($0) == pid, let bounds = AXNodeReader.frameAttribute($0) else { return nil }
+        return CatalogAXWindowRecord(element: $0, bounds: bounds, title: accessibilityWindowName($0),
+                                     windowID: observedAXWindowID($0))
     }
 }
 
 func matchingCatalogAXWindow(target: WindowTarget, records: [CatalogAXWindowRecord]) -> AXUIElement? {
-    let matches = records.filter {
+    guard target.windowID != 0 else { return nil }
+    let exact = records.filter { $0.windowID == target.windowID }
+    guard exact.count <= 1 else { return nil }
+    let candidates = exact.isEmpty ? records.filter { $0.windowID == nil } : exact
+    let matches = candidates.filter {
         screenCaptureBoundsMatchAXBounds(screenCapture: target.bounds, accessibility: $0.bounds) &&
-        $0.title.status == .complete &&
-        windowTitlesMatch(screenCaptureTitle: target.title, accessibilityTitle: $0.title.value ?? "") &&
+        ($0.windowID != nil || ($0.title.status == .complete &&
+        windowTitlesMatch(screenCaptureTitle: target.title, accessibilityTitle: $0.title.value ?? ""))) &&
         (target.axIdentity == nil || target.axIdentity == CFHash($0.element)) &&
         (target.axElement == nil || CFEqual(target.axElement!, $0.element))
     }
