@@ -21,7 +21,11 @@ CHUNK_BYTES = 256 * 1024
 
 
 def identity(info: os.stat_result) -> tuple[int, ...]:
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+    # Windows stat/fstat can disagree on ctime's meaning in Python 3.12.
+    # Prefer explicit creation time there; pre-3.12 Windows exposes it as ctime.
+    # POSIX ctime tracks metadata changes and must remain part of the fingerprint.
+    timestamp = getattr(info, "st_birthtime_ns", info.st_ctime_ns) if os.name == "nt" else info.st_ctime_ns
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, timestamp
 
 
 @dataclass(frozen=True)

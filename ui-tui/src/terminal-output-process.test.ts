@@ -28,6 +28,7 @@ test("owned writer handles real descriptors; redirection preserves stream identi
     restore();
     assert.equal(stream.write, original);
     closeSync(fd);
-    await rm(directory, { recursive: true, force: true });
+    // The writer's inherited descriptor can take a moment to close on Windows.
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

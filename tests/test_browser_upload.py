@@ -2,12 +2,45 @@ import asyncio
 import base64
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from agent.runtime.browser_upload import CHUNK_BYTES, MAX_FILE_BYTES, inspect_files, read_files
 from agent.runtime.extension_browser_backend import ExtensionBrowserBackend
 from agent.runtime.browser_control_transport import BrowserControlTransport, MAX_FRAME
+
+
+@pytest.mark.parametrize(("platform", "has_birthtime", "timestamp"), [
+    ("nt", True, "st_birthtime_ns"),
+    ("nt", False, "st_ctime_ns"),
+    ("posix", True, "st_ctime_ns"),
+    ("posix", False, "st_ctime_ns"),
+])
+def test_identity_uses_platform_consistent_timestamp(monkeypatch, platform, has_birthtime, timestamp):
+    from agent.runtime import browser_upload
+
+    fields = dict(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4, st_ctime_ns=5)
+    if has_birthtime:
+        fields["st_birthtime_ns"] = 6
+    # Replace only this module's os reference, not the interpreter's os.name.
+    monkeypatch.setattr(browser_upload, "os", SimpleNamespace(name=platform))
+    fingerprint = browser_upload.identity(SimpleNamespace(**fields))
+    assert fingerprint == (1, 2, 3, 4, fields[timestamp])
+    for field in fields:
+        changed = browser_upload.identity(SimpleNamespace(**{**fields, field: fields[field] + 10}))
+        assert (changed != fingerprint) == (field in {"st_dev", "st_ino", "st_size", "st_mtime_ns", timestamp})
+
+
+def test_local_file_with_distinct_creation_and_modification_times(tmp_path):
+    path = tmp_path / "binary.dat"
+    data = b"binary\r\n\x1a\x00\xff" * 100
+    path.write_bytes(data)
+    modified_ns = 1_600_000_000_000_000_000
+    os.utime(path, ns=(modified_ns, modified_ns))
+    files = inspect_files([str(path)], tmp_path)
+    assert read_files(files) == [data]
+    assert files[0].unchanged()
 
 
 def test_local_file_identity_and_empty_list(tmp_path):

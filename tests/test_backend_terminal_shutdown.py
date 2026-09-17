@@ -17,12 +17,17 @@ from test_backend_task_protocol import (
 
 def test_terminal_failure_persists_interruption_and_restores_without_tool_replay(tmp_path, monkeypatch):
     monkeypatch.setenv("ASTRA_HOME", str(tmp_path / "state"))
+    # Keep the target outside the backend workspace even with a repo-local basetemp.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ApprovalOpenAIHandler)
     server.call_number = 0
     server.target_path = tmp_path / "must-not-be-written.txt"
     server.target_content = "not authorized"
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    proc, _, _, wait = _start_question_protocol_backend(tmp_path, server.server_port, "terminal-interruption")
+    proc, _, _, wait = _start_question_protocol_backend(
+        tmp_path, server.server_port, "terminal-interruption", workdir=workspace,
+    )
     restored = None
     try:
         wait(lambda e: e.get("type") == "model_info")
@@ -43,6 +48,7 @@ def test_terminal_failure_persists_interruption_and_restores_without_tool_replay
         resume_root.mkdir()
         restored, _, _, wait_restored = _start_question_protocol_backend(
             resume_root, server.server_port, "terminal-interruption",
+            workdir=workspace,
             env_overrides={"AGENT_SESSION_DIR": str(tmp_path / "sessions"),
                            "AGENT_TASK_DB": str(tmp_path / "tasks.db")},
         )

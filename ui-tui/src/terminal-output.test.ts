@@ -3,7 +3,7 @@ import test from "node:test";
 import { TerminalOutput, type AsyncWrite } from "./terminal-output.js";
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-test("partial writes preserve bytes and callbacks in order; idle time is not a stall", async () => {
+test("partial writes preserve bytes and callbacks in order; idle time is not a stall", { timeout: 5000 }, async () => {
   const chunks: Buffer[] = [];
   const calls: number[] = [];
   const write: AsyncWrite = (buffer, offset, length, callback) => {
@@ -11,12 +11,20 @@ test("partial writes preserve bytes and callbacks in order; idle time is not a s
     chunks.push(buffer.subarray(offset, offset + count));
     setTimeout(() => callback(null, count), 1);
   };
-  const output = new TerminalOutput(write, { stallMs: 40 });
-  output.write("中文👩‍💻", () => calls.push(1));
-  output.write("\u001b[2Knext", () => calls.push(2));
-  await delay(80);
+  const stallMs = 200;
+  const output = new TerminalOutput(write, { stallMs });
+  // Windows timer granularity can make the partial writes take over 80 ms.
+  // Await the write callbacks, not an assumed total duration.
+  await Promise.all(["中文👩‍💻", "\u001b[2Knext"].map((text, index) => new Promise<void>((resolve, reject) => {
+    output.write(text, error => {
+      if (error) { reject(error); return; }
+      calls.push(index + 1);
+      resolve();
+    });
+  })));
   assert.equal(Buffer.concat(chunks).toString(), "中文👩‍💻\u001b[2Knext");
   assert.deepEqual(calls, [1, 2]);
+  await delay(stallMs + 40);
   assert.equal(output.fault, undefined);
   assert.equal(await output.close(), true);
 });
