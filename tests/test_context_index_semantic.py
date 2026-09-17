@@ -199,29 +199,35 @@ def test_cold_backend_preserves_lexical_results_and_never_loads(archive, monkeyp
     assert pack.rows and TEXT in pack.rendered
 
 
-def test_slow_semantics_cannot_discard_completed_lexical_results(archive):
+def test_slow_semantics_cannot_discard_completed_lexical_results(archive, monkeypatch):
     release = threading.Event()
     class SlowEncoder:
         def encode(self, texts):
             release.wait(5)
             return [[1.0, 0.0]]
-    original = embedder.ready_embedder
-    embedder.ready_embedder = lambda: SlowEncoder()
+    monkeypatch.setattr(embedder, "ready_embedder", lambda: SlowEncoder())
     broker = create_context_index_broker(SimpleNamespace(mode="session", char_budget=900), Path.cwd())
     broker.source_deadline_seconds = 0.08
+    query = "下班后发邮件"
+    # This contract starts with completed lexical work. Keep the real archive
+    # lookup outside the semantic timeout race, including cold Windows disk I/O.
+    lexical = broker.session_source.recommend(
+        query, WORKSPACE, "current", frozenset(), NOW.timestamp(), plan_query(query, NOW),
+    )
+    assert lexical.availability == "available" and lexical.relevance
+    monkeypatch.setattr(broker.session_source, "recommend", lambda *_args: lexical)
 
     async def run():
         start = time.monotonic()
         try:
-            pack = await broker.build("下班后发邮件", "slow", "current", WORKSPACE, NOW, frozenset())
+            pack = await broker.build(query, "slow", "current", WORKSPACE, NOW, frozenset())
             assert time.monotonic() - start < 0.3
-            assert pack.rows and broker.last_trace.semantic_status["session"] == "timeout"
+            assert pack.rows and TEXT in pack.rendered
+            assert broker.last_trace.source_status["session"] == "available"
+            assert broker.last_trace.semantic_status["session"] == "timeout"
         finally:
             release.set()
-    try:
-        asyncio.run(run())
-    finally:
-        embedder.ready_embedder = original
+    asyncio.run(run())
 
 
 def test_embedding_count_mismatch_does_not_mark_pending_records_indexed(archive):

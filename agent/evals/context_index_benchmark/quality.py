@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import closing
 from dataclasses import asdict
 from datetime import UTC, datetime
 import hashlib
@@ -78,9 +79,9 @@ def _archives(root: Path, scenario: dict, source: str) -> tuple[Path, Path, dict
             else:
                 record = store.add_record(kind="observation", content=content)
                 identities[record.record_id] = document_id
-        with sqlite3.connect(sessions) as db:
+        with closing(sqlite3.connect(sessions)) as db, db:
             db.execute("UPDATE messages SET timestamp=?", (NOW.timestamp() - 60,))
-        with sqlite3.connect(memory) as db:
+        with closing(sqlite3.connect(memory)) as db, db:
             for column in ("created_at", "valid_from", "last_confirmed_at"):
                 db.execute(f"UPDATE memory_records SET {column}=?", ("2026-09-09T09:00:00+00:00",))
     finally:

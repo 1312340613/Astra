@@ -1,3 +1,9 @@
+import sqlite3
+from types import SimpleNamespace
+
+import pytest
+
+from agent.evals.context_index_benchmark import quality
 from agent.evals.context_index_benchmark.quality_metrics import QualityObservation, quality_metrics
 from agent.evals.context_index_benchmark.quality import load_fixture, replay
 
@@ -44,3 +50,34 @@ def test_quality_replay_exercises_sources_without_live_archives_or_models(monkey
     assert len(rows) == 16
     assert all(row.displayed and row.displayed[0] == "target" for row in lexical)
     assert all(not row.displayed for row in negatives)
+
+
+@pytest.mark.parametrize("fail_update", [False, True])
+def test_quality_archive_setup_closes_connections_before_cleanup(tmp_path, monkeypatch, fail_update):
+    opened = []
+
+    class Connection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if fail_update and sql.startswith("UPDATE memory_records"):
+                raise sqlite3.OperationalError("fixture update failed")
+            return super().execute(sql, parameters)
+
+    def connect(path):
+        db = sqlite3.connect(path, factory=Connection)
+        opened.append(db)  # Retain handles so garbage collection cannot mask leaks.
+        return db
+
+    monkeypatch.setattr(quality, "sqlite3", SimpleNamespace(connect=connect))
+    try:
+        if fail_update:
+            with pytest.raises(sqlite3.OperationalError, match="fixture update failed"):
+                quality._archives(tmp_path, load_fixture()["scenarios"][0], "memory")
+        else:
+            quality._archives(tmp_path, load_fixture()["scenarios"][0], "memory")
+        assert len(opened) == 2
+        for db in opened:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+                db.execute("SELECT 1")
+    finally:
+        for db in opened:
+            db.close()
