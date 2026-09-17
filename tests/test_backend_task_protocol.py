@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
@@ -952,8 +953,15 @@ def _start_question_protocol_backend(
     repo_root = Path(__file__).resolve().parents[1]
     if workdir is not None:
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(repo_root), env.get("PYTHONPATH", "")]))
+    # Startup diagnostics must be drained too: a full stderr pipe can prevent
+    # a child from ever publishing model_info. Keep a bounded tail for failures.
+    diagnostic_bootstrap = (
+        "import faulthandler, runpy\n"
+        "faulthandler.dump_traceback_later(10, repeat=True)\n"
+        + (bootstrap_code or "runpy.run_module('agent.cli.backend', run_name='__main__')")
+    )
     proc = subprocess.Popen(
-        [sys.executable, "-c", bootstrap_code] if bootstrap_code else [sys.executable, "-m", "agent.cli.backend"],
+        [sys.executable, "-c", diagnostic_bootstrap],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -966,6 +974,15 @@ def _start_question_protocol_backend(
     assert proc.stdout is not None
     events: Queue[dict] = Queue()
     seen: list[dict] = []
+    stderr_tail: deque[str] = deque(maxlen=64)
+
+    def read_stderr():
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stderr_tail.append(line[-4096:])
+
+    stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+    stderr_reader.start()
 
     def read_events():
         assert proc.stdout is not None
@@ -981,7 +998,8 @@ def _start_question_protocol_backend(
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if proc.poll() is not None:
-                stderr = proc.stderr.read() if proc.stderr is not None else ""
+                stderr_reader.join(timeout=1)
+                stderr = "".join(stderr_tail)
                 raise AssertionError(f"Backend exited with {proc.returncode}: {stderr}; seen={seen}")
             try:
                 event = events.get(timeout=0.25)
@@ -990,7 +1008,7 @@ def _start_question_protocol_backend(
             seen.append(event)
             if predicate(event):
                 return event
-        raise AssertionError(f"Timed out waiting for event; seen={seen}")
+        raise AssertionError(f"Timed out waiting for event; seen={seen}; stderr={''.join(stderr_tail)}")
 
     return proc, events, seen, wait_for
 
@@ -1006,6 +1024,41 @@ def _stop_protocol_backend(proc: subprocess.Popen):
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
+
+
+def test_protocol_fixture_drains_stderr_during_startup(tmp_path: Path):
+    bootstrap = """
+import json, sys
+print(json.dumps({'type': 'backend_hello', 'protocol_version': 1}), flush=True)
+sys.stderr.write('startup warning\\n' * 16384)
+sys.stderr.flush()
+print(json.dumps({'type': 'model_info'}), flush=True)
+sys.stdin.readline()
+"""
+    proc, _, _, wait_for = _start_question_protocol_backend(
+        tmp_path, 9, "stderr-startup", bootstrap_code=bootstrap,
+    )
+    try:
+        wait_for(lambda event: event.get("type") == "model_info", timeout=3)
+    finally:
+        _stop_protocol_backend(proc)
+
+
+def test_protocol_fixture_keeps_startup_failure_diagnostics(tmp_path: Path):
+    bootstrap = "import sys; print('fixture startup failure', file=sys.stderr); raise SystemExit(13)"
+    proc, _, _, wait_for = _start_question_protocol_backend(
+        tmp_path, 9, "stderr-failure", bootstrap_code=bootstrap,
+    )
+    try:
+        try:
+            wait_for(lambda event: event.get("type") == "model_info", timeout=3)
+        except AssertionError as exc:
+            assert "Backend exited with 13" in str(exc)
+            assert "fixture startup failure" in str(exc)
+        else:
+            raise AssertionError("The failed backend must not be considered ready")
+    finally:
+        _stop_protocol_backend(proc)
 
 
 def test_backend_forwards_provider_counted_generation_stats(tmp_path: Path):
