@@ -417,3 +417,33 @@ def test_non_streaming_reply_records_without_events(tmp_path, monkeypatch):
     manifest = stores[0].manifest(0)
     assert manifest is not None
     assert any(c.path == "quiet.txt" for c in manifest.files)
+
+
+def test_previous_turn_snapshots_are_immutable(tmp_path, monkeypatch):
+    """Later edits must not rewrite a previous turn's ledger snapshots."""
+    (tmp_path / "hist.txt").write_text("a\n", encoding="utf-8")
+    agent, stores = make_turn_agent(tmp_path, [
+        call("edit_file", {"path": "hist.txt", "old": "a", "new": "b"}, call_id="h1"),
+        DONE,
+        call("edit_file", {"path": "hist.txt", "old": "b", "new": "c"}, call_id="h2"),
+        DONE,
+    ], monkeypatch)
+    run(collect_stream(agent, Msg(content=[ContentBlock.text("turn one")], id="m-hist-1")))
+
+    session_dir = tmp_path / "tc-root" / "default"
+    turn1_manifest = (session_dir / "turn-1" / "manifest.json").read_bytes()
+    assert (session_dir / "turn-1" / "before.0.bin").read_bytes() == b"a\n"
+    assert (session_dir / "turn-1" / "after.0.bin").read_bytes() == b"b\n"
+
+    run(collect_stream(agent, Msg(content=[ContentBlock.text("turn two")], id="m-hist-2")))
+
+    # The first turn's artifacts stay byte-identical after the second turn.
+    assert (session_dir / "turn-1" / "manifest.json").read_bytes() == turn1_manifest
+    assert (session_dir / "turn-1" / "before.0.bin").read_bytes() == b"a\n"
+    assert (session_dir / "turn-1" / "after.0.bin").read_bytes() == b"b\n"
+    # The second turn has its own, newer snapshot.
+    assert (session_dir / "turn-2" / "before.0.bin").read_bytes() == b"b\n"
+    assert (session_dir / "turn-2" / "after.0.bin").read_bytes() == b"c\n"
+
+    assert stores[0].manifest(0) is not None
+    assert stores[0].manifest(1) is not None
