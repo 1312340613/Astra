@@ -1065,7 +1065,105 @@ def test_cancel_before_any_diff_degrades_every_entry(tmp_path: Path) -> None:
     change = manifest.files[0]
     assert (change.compare, change.added, change.removed) == (store.COMPARE_NONE, None, None)
     assert change.reason == REASON_CANCELLED
-    assert change.state == store.STATE_MODIFIED  # 存在性/字节已确认，只是无计数
+    # 取消后不再读取 after；before 侧已登记，条目降级保留（非计数）
+    assert change.state == store.STATE_MODIFIED
+
+
+def test_cancelled_seal_never_reads_source_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R6：预先取消时停止新的可放弃捕获——seal 不读取任何 after."""
+    limits = store.TurnChangeLimits(compute_budget_ms=20)
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    subject.begin_turn("req-1")
+    for index in range(5):
+        path = tmp_path / f"note-{index}.txt"
+        path.write_bytes(b"after\n")
+        subject.note_capture(path.name, b"before\n")
+
+    reads: list[str] = []
+    original = store._read_bytes_bounded
+
+    def counting_read(path: Path, limit: int) -> bytes:
+        reads.append(path.name)
+        return original(path, limit)
+
+    monkeypatch.setattr(store, "_read_bytes_bounded", counting_read)
+
+    start = time.perf_counter()
+    manifest = subject.seal(cancelled=lambda: True)
+    elapsed = time.perf_counter() - start
+
+    assert manifest is not None
+    assert reads == []
+    assert elapsed < 0.5
+    assert [change.path for change in manifest.files] == [f"note-{i}.txt" for i in range(5)]
+    assert all(change.compare == store.COMPARE_NONE for change in manifest.files)
+    assert all(change.added is None and change.removed is None for change in manifest.files)
+    assert all(change.reason == REASON_CANCELLED for change in manifest.files)
+    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.files)
+    assert all(change.state == store.STATE_MODIFIED for change in manifest.files)
+
+
+def test_expired_budget_stops_further_source_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R6：收尾预算覆盖读取路径；过期后不再发起新的读取."""
+    clock = FakeClock()
+    limits = store.TurnChangeLimits(compute_budget_ms=100, diff_deadline_ms=50)
+    subject = make_store(tmp_path, "sess-1", clock=clock, limits=limits)
+    subject.begin_turn("req-1")
+    for index in range(6):
+        path = tmp_path / f"f{index}.txt"
+        path.write_bytes(b"after\n")
+        subject.note_capture(path.name, b"before\n")
+
+    reads: list[str] = []
+    original = store._read_bytes_bounded
+
+    def slow_read(path: Path, limit: int) -> bytes:
+        reads.append(path.name)
+        clock.advance(60)  # 每次读取 60ms（模拟慢 I/O）
+        return original(path, limit)
+
+    monkeypatch.setattr(store, "_read_bytes_bounded", slow_read)
+
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert reads == ["f0.txt", "f1.txt"]  # 预算 100ms：第二次读取后过期
+    confirmed = [change for change in manifest.files if change.compare == store.COMPARE_FULL]
+    degraded = [change for change in manifest.files if change.compare == store.COMPARE_NONE]
+    assert [change.path for change in confirmed] == ["f0.txt"]
+    assert [change.path for change in degraded] == [f"f{i}.txt" for i in range(1, 6)]
+    assert all(change.reason == REASON_TIMEOUT for change in degraded)
+
+
+def test_bounded_read_caps_the_read_size(tmp_path: Path) -> None:
+    """R6：读取有字节上限（limit+1），不整份读入."""
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"x" * 64)
+
+    assert store._read_bytes_bounded(target, 16) == b"x" * 17
+
+
+def test_after_read_growing_past_the_limit_degrades_as_quota(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6：stat 与 read 之间文件增长越限时按配额降级（有界读取兜底）."""
+    limits = store.TurnChangeLimits(max_file_bytes=16)
+    (tmp_path / "grow.txt").write_bytes(b"initial")
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    subject.begin_turn("req-1")
+    subject.note_capture("grow.txt", b"before\n")
+
+    monkeypatch.setattr(store, "_read_bytes_bounded", lambda path, limit: b"x" * (limit + 1))
+
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert manifest.files == []
+    change = manifest.unknown[0]
+    assert change.state == store.STATE_UNKNOWN
+    assert change.after_state == store.SIDE_UNCAPTURED
+    assert change.reason == store.REASON_QUOTA
 
 
 def test_count_only_downgrades_by_the_differ(tmp_path: Path) -> None:

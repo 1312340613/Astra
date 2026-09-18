@@ -4464,10 +4464,29 @@ class ReActAgent(AgentBase):
         scope_cm.__enter__()
         return store, scope_cm
 
+    def _turn_cancel_probe(self) -> "Callable[[], bool] | None":
+        """Synchronous cancellation channel for the done-path seal (review R6).
+
+        The seal runs synchronously, so a pending asyncio cancellation is only
+        delivered at the next await; this probe lets the store observe it and
+        stop new discardable reads during that window.
+        """
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            return None
+        cancel_count = getattr(task, "cancelling", None)
+        if not callable(cancel_count):
+            return None
+        return lambda: bool(cancel_count())
+
     def _seal_turn_changes(self, store, *, cancelled: "Callable[[], bool] | None" = None) -> None:
         """Seal the active turn (idempotent) and stash a publish-ready payload."""
         if store is None:
             return
+        if cancelled is None:
+            # 正常收尾同样给出同步取消通道（review R6）
+            cancelled = self._turn_cancel_probe()
         try:
             manifest = store.seal(cancelled=cancelled)
         except Exception:

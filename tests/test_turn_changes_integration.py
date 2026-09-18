@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent.core.msg import ContentBlock, Msg
@@ -509,6 +510,108 @@ def test_turn_budget_exhaustion_still_publishes_once(tmp_path, monkeypatch):
     payload = events[types.index("turn_changes")]
     assert any(
         f["path"] == "budget.txt" and f["state"] == "added" for f in payload["files"]
+    )
+
+
+def test_real_task_cancellation_keeps_the_write_and_degrades_counts(tmp_path, monkeypatch):
+    """R6：真实 asyncio 取消——保留已完成写入，取消后不再读取 after、计数降级."""
+    agent, stores = make_turn_agent(
+        tmp_path,
+        [
+            call("write_file", {"path": "cancel.txt", "content": "kept\n"}),
+            DONE,
+        ],
+        monkeypatch,
+        llm_delays={2: 30},
+    )
+
+    async def scenario():
+        events = []
+        written = asyncio.Event()
+
+        async def consume():
+            async for event in agent.reply_stream(Msg(content=[ContentBlock.text("write")], id="m-cancel")):
+                events.append(event)
+                if event["type"] == "tool_result":
+                    written.set()
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(written.wait(), 3)
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.wait_for(task, 3)
+        return events
+
+    events = run(scenario())
+    types = [event["type"] for event in events]
+    assert types.count("turn_changes") == 1, f"seen={types}"
+    assert "done" in types
+    assert any(event.get("cancelled") for event in events if event["type"] == "error")
+
+    manifest = stores[0].manifest()
+    assert manifest is not None
+    change = manifest.files[0]
+    assert change.path == "cancel.txt"
+    assert change.state == tcs.STATE_ADDED
+    assert change.before_state == tcs.SIDE_ABSENT
+    assert change.after_state == tcs.SIDE_UNCAPTURED  # 取消后不再读取 after
+    assert (change.compare, change.added, change.removed) == (tcs.COMPARE_NONE, None, None)
+    assert change.reason == "cancelled"
+    assert (tmp_path / "cancel.txt").read_text(encoding="utf-8") == "kept\n"
+
+
+def test_pending_task_cancel_during_seal_stops_new_source_reads(tmp_path, monkeypatch):
+    """R6：正常收尾（同步执行）期间挂起的 asyncio 取消会停止新的 after 读取."""
+    agent, stores = make_turn_agent(
+        tmp_path,
+        [
+            call("write_file", {"path": "a.txt", "content": "a\n"}, call_id="c1"),
+            call("write_file", {"path": "b.txt", "content": "b\n"}, call_id="c2"),
+            call("write_file", {"path": "c.txt", "content": "c\n"}, call_id="c3"),
+            DONE,
+        ],
+        monkeypatch,
+    )
+
+    reads = []
+    original = tcs._read_bytes_bounded
+
+    def cancel_on_first_read(path, limit):
+        reads.append(Path(path).name)
+        if len(reads) == 1:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()  # 模拟收尾同步执行期间挂起的取消请求
+        return original(path, limit)
+
+    monkeypatch.setattr(tcs, "_read_bytes_bounded", cancel_on_first_read)
+
+    async def scenario():
+        events = []
+        try:
+            async for event in agent.reply_stream(
+                Msg(content=[ContentBlock.text("three files")], id="m-sync-cancel")
+            ):
+                events.append(event)
+        except asyncio.CancelledError:
+            pass
+        return events
+
+    try:
+        run(scenario())
+    except asyncio.CancelledError:
+        # 挂起的取消可能在事件循环收尾时才被投递；seal 已同步完成
+        pass
+
+    assert reads == ["a.txt"], f"pending cancel must stop new reads; reads={reads}"
+    manifest = stores[0].manifest()
+    assert manifest is not None
+    by_path = {change.path: change for change in manifest.files}
+    assert set(by_path) == {"a.txt", "b.txt", "c.txt"}
+    assert all(change.reason == "cancelled" for change in by_path.values())
+    assert all(
+        (change.compare, change.added, change.removed) == (tcs.COMPARE_NONE, None, None)
+        for change in by_path.values()
     )
 
 

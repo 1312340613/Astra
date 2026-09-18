@@ -683,6 +683,11 @@ class TurnChangeStore:
         deadline: float,
         cancelled: Callable[[], bool] | None,
     ) -> _ResolvedEntry | None:
+        if entry.before_state or entry.tracked is None:
+            # 该路径会读取 after；取消/过期后停止新的可放弃捕获（review R6）
+            stop_reason = self._stop_reason(deadline, cancelled)
+            if stop_reason:
+                return self._degraded_without_read(entry, stop_reason)
         if entry.before_state:
             return self._resolve_snapshot(entry, deadline, cancelled)
         if entry.tracked is not None:
@@ -725,11 +730,18 @@ class TurnChangeStore:
             # 超限的 after 字节绝不落盘
             return SIDE_UNCAPTURED, None, reason
         try:
-            data = path.read_bytes()
+            data = _read_bytes_bounded(path, self.limits.max_file_bytes)
         except OSError as exc:
             self._turn_bytes -= size
             logger.warning("turn-change store: cannot read %s (%s)", entry.path, exc)
             return SIDE_UNCAPTURED, None, REASON_ERROR
+        if len(data) > self.limits.max_file_bytes:
+            # 读取期间增长越过单文件上限：有界读取兜底，超限字节不落盘
+            self._turn_bytes -= size
+            logger.warning(
+                "turn-change store: %s grew past the byte limit while reading", entry.path
+            )
+            return SIDE_UNCAPTURED, None, REASON_QUOTA
         if len(data) != size:  # 读取期间被改写：按实际字节数重新结算
             self._turn_bytes -= size
             state, reason = self._accept_snapshot(len(data))
@@ -899,6 +911,31 @@ class TurnChangeStore:
             after_bytes=after,
         )
 
+    def _degraded_without_read(self, entry: _PathEntry, reason: str) -> _ResolvedEntry:
+        """取消/过期：停止新的可放弃捕获，不读取 after；条目按 before 侧降级保留."""
+        if entry.before_state == SIDE_ABSENT:
+            state = STATE_ADDED
+        elif entry.before_state == SIDE_CAPTURED:
+            state = STATE_MODIFIED
+        else:
+            state = STATE_UNKNOWN
+        return _ResolvedEntry(
+            change=FileChange(
+                path=entry.path,
+                display=entry.path,
+                state=state,
+                before_state=entry.before_state or SIDE_UNCAPTURED,
+                after_state=SIDE_UNCAPTURED,
+                added=None,
+                removed=None,
+                compare=COMPARE_NONE,
+                reason=reason,
+                checkpoint_ids=list(entry.checkpoint_ids),
+            ),
+            before_bytes=entry.before,
+            after_bytes=None,
+        )
+
     def _no_change(self, entry: _PathEntry, before_state: str, after_state: str) -> FileChange:
         return FileChange(
             path=entry.path,
@@ -958,6 +995,12 @@ def _tracked_state(before_fp: str | None, after_fp: str | None) -> str | None:
     if after_fp is None:
         return STATE_MODIFIED
     return STATE_UNKNOWN  # pragma: no cover - 穷尽分支
+
+
+def _read_bytes_bounded(path: Path, limit: int) -> bytes:
+    """Read at most ``limit + 1`` bytes so a growing file cannot be pulled in."""
+    with path.open("rb") as handle:
+        return handle.read(limit + 1)
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
