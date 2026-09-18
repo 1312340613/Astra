@@ -817,7 +817,7 @@ class TurnChangeStore:
             dir_name = self._record_dir(turn_seq)
             if dir_name is None:
                 return None
-            payload = self._read_manifest_payload(self.session_dir / dir_name)
+            payload = self._read_manifest_payload(self.session_dir / dir_name, expect_seq=turn_seq)
             if payload is None:
                 return None
         return _manifest_from_payload(payload)
@@ -837,7 +837,7 @@ class TurnChangeStore:
             if dir_name is None:
                 return missing
             turn_dir = self.session_dir / dir_name
-            payload = self._read_manifest_payload(turn_dir)
+            payload = self._read_manifest_payload(turn_dir, expect_seq=turn_seq)
             if payload is None:
                 return missing
             combined = [
@@ -1417,7 +1417,14 @@ class TurnChangeStore:
             return []
         return stale
 
-    def _read_manifest_payload(self, turn_dir: Path) -> dict[str, Any] | None:
+    def _read_manifest_payload(
+        self, turn_dir: Path, *, expect_seq: int | None = None
+    ) -> dict[str, Any] | None:
+        """Read one turn manifest; ``expect_seq`` binds it to the indexed turn (R2).
+
+        索引说 ``turn_seq`` 对应 ``turn-N``，而目录里的 manifest 自报别的回合时，
+        该目录内容不可信（换入/串号），一律当作不可用，不返回其中的字节。
+        """
         try:
             payload = json.loads(
                 _read_all_bytes(
@@ -1427,7 +1434,16 @@ class TurnChangeStore:
         except (OSError, ValueError, TypeError, UnicodeDecodeError) as exc:
             logger.warning("turn-change store: unreadable turn manifest %s (%s)", turn_dir, exc)
             return None
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        if expect_seq is not None and _optional_int(payload.get("turn_seq")) != int(expect_seq):
+            logger.warning(
+                "turn-change store: turn manifest %s does not belong to turn %s",
+                turn_dir,
+                expect_seq,
+            )
+            return None
+        return payload
 
     def _load_side(self, turn_dir: Path, name: Any, state: Any) -> tuple[bytes | None, str]:
         if state == SIDE_ABSENT:

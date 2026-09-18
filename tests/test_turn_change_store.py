@@ -2542,3 +2542,196 @@ def test_index_read_refuses_a_replaced_session_directory(tmp_path: Path) -> None
     assert read.ok is False
     assert read.records == []
     assert subject.manifest_for(9) is None
+
+
+# ---------------------------------------------------------------------------
+# per-entry identity reads (M3 · review R2) — "/changes <n>" addressing
+# ---------------------------------------------------------------------------
+
+def test_load_sides_for_reads_same_display_twins_by_entry_index(tmp_path: Path) -> None:
+    """同 display、不同绝对路径的两条：按 entry_index 各读各的（display 不选条）."""
+    workspace = tmp_path / "files"
+    elsewhere = tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    (workspace / "a.txt").write_bytes(b"mine\n")
+    (elsewhere / "a.txt").write_bytes(b"theirs\n")
+    subject = make_store(workspace)
+    subject.begin_turn("req-1")
+    subject.note_capture(elsewhere / "a.txt", b"old-elsewhere\n", display="a.txt")
+    subject.note_capture(workspace / "a.txt", b"old-workspace\n", display="a.txt")
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert [change.display for change in manifest.files] == ["a.txt", "a.txt"]
+    turn_seq = manifest.turn_seq
+    first = subject.load_sides_for(turn_seq, 0)
+    second = subject.load_sides_for(turn_seq, 1)
+
+    assert (first.before, first.after) == (b"old-elsewhere\n", b"theirs\n")
+    assert (second.before, second.after) == (b"old-workspace\n", b"mine\n")
+    # 兼容口径仍是"首条匹配、命令不使用"（review R2 明示）
+    assert subject.load_sides(0, "a.txt").before == b"old-elsewhere\n"
+
+
+def test_load_sides_for_numbers_unknown_entries_after_files(tmp_path: Path) -> None:
+    """合并序 = files 在前、unknown 在后，与展示编号一致（展示编号 = index + 1）."""
+    subject = make_store(tmp_path)
+    (tmp_path / "real.txt").write_bytes(b"new\n")
+    (tmp_path / "ghost.py").write_bytes(b"ghost-content\n")
+    subject.begin_turn("req-1")
+    subject.note_capture("real.txt", b"old\n")
+    subject.note_paths(["ghost.py"])  # 仅候选：未取得 before 快照 → unknown 区
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert [change.path for change in manifest.files] == ["real.txt"]
+    assert [change.path for change in manifest.unknown] == ["ghost.py"]
+    turn_seq = manifest.turn_seq
+
+    confirmed = subject.load_sides_for(turn_seq, 0)
+    candidate = subject.load_sides_for(turn_seq, 1)
+
+    assert (confirmed.before, confirmed.after) == (b"old\n", b"new\n")
+    assert candidate.before_state == store.SIDE_UNCAPTURED
+    assert candidate.after == b"ghost-content\n"
+    assert subject.load_sides_for(turn_seq, 2).before_state == store.SIDE_UNCAPTURED
+
+
+def test_load_sides_for_is_stable_after_the_on_disk_file_changes(tmp_path: Path) -> None:
+    """回合结束后改盘上文件不影响回看：读的是持久化快照，不读实时目标."""
+    subject = make_store(tmp_path)
+    manifest = seal_modified_turn(subject, tmp_path, request_id="req-1")
+    (tmp_path / "a.txt").write_bytes(b"edited long after the turn\n")
+
+    sides = subject.load_sides_for(manifest.turn_seq, 0)
+
+    assert (sides.before, sides.after) == (b"old\n", b"new\n")
+    (tmp_path / "a.txt").unlink()
+    assert subject.load_sides_for(manifest.turn_seq, 0).after == b"new\n"
+
+
+def test_load_sides_for_does_not_invent_bytes_for_uncaptured_entries(tmp_path: Path) -> None:
+    """配额导致 uncaptured 的条目：如实返回 uncaptured，不误读相邻条目/实时文件."""
+    limits = store.TurnChangeLimits(max_file_bytes=16)
+    (tmp_path / "big.txt").write_bytes(b"small\n")
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    subject.begin_turn("req-1")
+    subject.note_capture("big.txt", b"BIG-SNAPSHOT-" * 8)
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert manifest.files == []
+    sides = subject.load_sides_for(manifest.turn_seq, 0)
+
+    assert sides.before is None
+    assert sides.before_state == store.SIDE_UNCAPTURED
+    assert sides.after == b"small\n"
+
+
+def test_load_sides_for_is_unavailable_when_the_index_is_unusable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """索引不可用 → 不按 offset/display 猜条目，一律 uncaptured（review R1/R2）."""
+    subject = make_store(tmp_path)
+    manifest = seal_modified_turn(subject, tmp_path, request_id="req-1")
+    index_path = session_dir(tmp_path) / store.INDEX_NAME
+    index_path.write_text("{not json", encoding="utf-8")
+
+    broken = subject.load_sides_for(manifest.turn_seq, 0)
+
+    assert broken == store.LoadedSides(
+        None, None, store.SIDE_UNCAPTURED, store.SIDE_UNCAPTURED
+    )
+    assert subject.load_sides_for(-1, 0).before is None
+    assert subject.load_sides_for(manifest.turn_seq, -1).before is None
+
+    index_path.write_text(
+        json.dumps({"version": store.INDEX_VERSION, "records": []}), encoding="utf-8"
+    )
+    assert subject.load_sides_for(manifest.turn_seq, 0).before is None
+
+
+def test_load_sides_for_rejects_a_directory_whose_manifest_is_another_turn(
+    tmp_path: Path,
+) -> None:
+    """索引指向的目录内容若属于别的回合（身份不符）→ 不采信、不返回其字节."""
+    subject = make_store(tmp_path)
+    manifest = seal_modified_turn(subject, tmp_path, request_id="req-1")
+    (tmp_path / "a.txt").write_bytes(b"second\n")
+    subject.begin_turn("req-2")
+    subject.note_capture("a.txt", b"first\n")
+    assert subject.seal() is not None
+    area = session_dir(tmp_path)
+    # 目录自称属于别的回合（换入/串号）：manifest 自报 turn_seq 与索引不一致
+    decoy = json.loads((area / "turn-2" / "manifest.json").read_text(encoding="utf-8"))
+    decoy["turn_seq"] = 1
+    (area / "turn-2" / "manifest.json").write_text(json.dumps(decoy), encoding="utf-8")
+
+    sides = subject.load_sides_for(2, 0)
+    wrong = subject.load_sides_for(manifest.turn_seq, 0)
+
+    assert sides.before_state == store.SIDE_UNCAPTURED
+    assert sides.before is None and sides.after is None
+    assert subject.manifest_for(2) is None  # 身份不符：不冒充该回合的清单
+    assert wrong.after == b"new\n"  # 原回合（turn-1）仍可正常回看
+
+
+def test_load_sides_for_is_guarded_by_directory_identity(tmp_path: Path) -> None:
+    """目录身份被替换 → 条目读取降级 uncaptured，不采信换入者内容（锚/所有权守卫）."""
+    subject = make_store(tmp_path, "review")
+    manifest = seal_modified_turn(subject, tmp_path, request_id="req-1")
+    held = tmp_path / "review-held"
+    subject.session_dir.rename(held)
+    impostor = subject.session_dir
+    (impostor / "turn-1").mkdir(parents=True)
+    (impostor / "turn-1" / "before.0.bin").write_bytes(b"IMPOSTOR-BEFORE\n")
+    (impostor / "turn-1" / "after.0.bin").write_bytes(b"IMPOSTOR-AFTER\n")
+    (impostor / "turn-1" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "session_id": "review",
+                "request_id": "impostor",
+                "turn_seq": 1,
+                "created_at": 0.0,
+                "files": [
+                    {
+                        "path": "a.txt",
+                        "display": "a.txt",
+                        "state": "modified",
+                        "before_state": "captured",
+                        "after_state": "captured",
+                        "before_file": "before.0.bin",
+                        "after_file": "after.0.bin",
+                    }
+                ],
+                "unknown": [],
+                "totals": {"files": 1, "added": 1, "removed": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (impostor / store.INDEX_NAME).write_text(
+        json.dumps(
+            {
+                "version": store.INDEX_VERSION,
+                "records": [
+                    {
+                        "turn_seq": 1,
+                        "request_id": "impostor",
+                        "created_at": 0.0,
+                        "dir": "turn-1",
+                        "empty": False,
+                        "files": 1,
+                        "unknown": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sides = subject.load_sides_for(manifest.turn_seq, 0)
+
+    assert sides.before is None and sides.after is None
+    assert sides.before_state == store.SIDE_UNCAPTURED
