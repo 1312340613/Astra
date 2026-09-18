@@ -557,6 +557,53 @@ def test_relative_and_absolute_paths_deduplicate(tmp_path: Path) -> None:
     assert [change.path for change in manifest.files] == ["a.txt"]
 
 
+def test_capture_target_outside_the_workspace_uses_the_stable_identity(tmp_path: Path) -> None:
+    """R4：display 只是展示名；before/after 以传入的稳定绝对路径为目标."""
+    files = tmp_path / "files"
+    sandbox = tmp_path / "sandbox"
+    files.mkdir()
+    sandbox.mkdir()
+    (files / "note.txt").write_bytes(b"after\n")
+    (sandbox / "note.txt").write_bytes(b"UNRELATED\n")
+    subject = make_store(sandbox, "review")
+    subject.begin_turn("req-1")
+
+    subject.note_capture(str(files / "note.txt"), b"before\n", display="note.txt")
+
+    manifest = subject.seal()
+    assert manifest is not None
+    change = manifest.files[0]
+    assert (change.path, change.display) == ("note.txt", "note.txt")
+    assert change.state == store.STATE_MODIFIED
+    assert subject.load_sides(0, "note.txt").after == b"after\n"
+
+
+def test_target_directory_swap_degrades_the_after_read(tmp_path: Path) -> None:
+    """R4/R1：目标目录被换成符号链接时，after 不跟随替换路径，安全降级."""
+    workspace = tmp_path / "files"
+    workspace.mkdir()
+    (workspace / "note.txt").write_bytes(b"before\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "note.txt").write_bytes(b"SWAPPED\n")
+    subject = make_store(tmp_path)
+    subject.begin_turn("req-1")
+    subject.note_capture(str(workspace / "note.txt"), b"before\n", display="note.txt")
+
+    workspace.rename(tmp_path / "files-held")
+    workspace.symlink_to(elsewhere)
+
+    manifest = subject.seal()
+    assert manifest is not None
+    assert manifest.files == []
+    change = manifest.unknown[0]
+    assert (change.path, change.state) == ("note.txt", store.STATE_UNKNOWN)
+    assert change.before_state == store.SIDE_CAPTURED
+    assert change.after_state == store.SIDE_UNCAPTURED
+    assert change.reason == store.REASON_ERROR
+    assert subject.load_sides(0, "note.txt").after is None
+
+
 def test_path_budget_truncates_candidates(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     limits = store.TurnChangeLimits(max_paths_per_turn=2)
     for name in ("a.txt", "b.txt", "c.txt"):

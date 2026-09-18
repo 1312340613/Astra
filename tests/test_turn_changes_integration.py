@@ -95,6 +95,35 @@ def test_file_tool_create_records_absent_before(tmp_path):
     assert change.removed == 0
 
 
+def test_capture_reads_the_file_tool_target_when_roots_differ(tmp_path):
+    """R4：file tool 工作区与 store 工作区不同时，before/after 仍是同一份文件."""
+    workspace = tmp_path / "files"
+    sandbox = tmp_path / "sandbox"
+    workspace.mkdir()
+    sandbox.mkdir()
+    (workspace / "note.txt").write_text("before\n", encoding="utf-8")
+    (sandbox / "note.txt").write_text("UNRELATED-SANDBOX-CONTENT\n", encoding="utf-8")
+    registry = ToolRegistry()
+    register_file_tools(registry, workdir=str(workspace))
+    registry.yolo = True
+    store = tcs.TurnChangeStore(sandbox, "review", root=tmp_path / "ledger")
+    store.begin_turn("edit-in-files")
+
+    with tcs.turn_store_scope(store):
+        result = run(registry.execute("edit_file", {"path": "note.txt", "old": "before", "new": "after"}))
+    assert not result.get("error"), result
+
+    manifest = store.seal()
+    assert manifest is not None
+    change = manifest.files[0]
+    assert (change.path, change.state) == ("note.txt", tcs.STATE_MODIFIED)
+
+    sides = store.load_sides(0, "note.txt")
+    assert sides.after == b"after\n"
+    assert (workspace / "note.txt").read_text(encoding="utf-8") == "after\n"
+    assert (sandbox / "note.txt").read_text(encoding="utf-8") == "UNRELATED-SANDBOX-CONTENT\n"
+
+
 # ---------------------------------------------------------------------------
 # Slice 2: turn lifecycle + event order (react.py wiring)
 # ---------------------------------------------------------------------------

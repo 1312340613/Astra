@@ -407,10 +407,21 @@ def _note_turn_capture(pending, checkpoint_id: str) -> None:
         if store is None or pending is None:
             return
         for captured in pending.files:
+            # 传文件策略根解析出的绝对路径（稳定身份），并用策略相对名做展示名；
+            # store 的 after 读取因此始终指向被编辑的那一份文件（review R4）。
             if captured.existed:
-                store.note_capture(captured.relative, captured.before, checkpoint_id=checkpoint_id)
+                store.note_capture(
+                    captured.path,
+                    captured.before,
+                    checkpoint_id=checkpoint_id,
+                    display=captured.relative,
+                )
             else:
-                store.note_absent(captured.relative, checkpoint_id=checkpoint_id)
+                store.note_absent(
+                    captured.path,
+                    checkpoint_id=checkpoint_id,
+                    display=captured.relative,
+                )
     except Exception:
         logger.exception("Failed to note turn-change capture")
 

@@ -130,6 +130,8 @@ class _PathEntry:
 
     path: str
     resolved: Path
+    # 目标目录身份（读取 after 前核验，防止跟随被替换的目录；R1/R4）
+    anchor: tuple[int, int] | None = None
     before_state: str = ""            # "" = 尚未登记（仅候选）；SIDE_* = 已登记
     before_reason: str = ""
     before: bytes | None = None
@@ -221,9 +223,21 @@ class TurnChangeStore:
             for raw_path in paths:
                 self._register(raw_path)
 
-    def note_capture(self, path: str, before: bytes, *, checkpoint_id: str = "") -> None:
+    def note_capture(
+        self,
+        path: str | os.PathLike[str],
+        before: bytes,
+        *,
+        checkpoint_id: str = "",
+        display: str | None = None,
+    ) -> None:
+        """登记首份 before 字节；``display`` 为展示名（默认相对 store 工作区）.
+
+        ``path`` 是可信的稳定身份：传绝对路径（如文件策略根解析出的
+        ``captured.path``）时，before/after 都以它为目标（review R4）。
+        """
         with self._lock:
-            entry = self._register(path)
+            entry = self._register(path, display=display)
             if entry is None:
                 return
             self._remember_checkpoint(entry, checkpoint_id)
@@ -239,9 +253,15 @@ class TurnChangeStore:
                 entry.before_state = SIDE_UNCAPTURED
                 entry.before_reason = reason
 
-    def note_absent(self, path: str, *, checkpoint_id: str = "") -> None:
+    def note_absent(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        checkpoint_id: str = "",
+        display: str | None = None,
+    ) -> None:
         with self._lock:
-            entry = self._register(path)
+            entry = self._register(path, display=display)
             if entry is None:
                 return
             self._remember_checkpoint(entry, checkpoint_id)
@@ -587,9 +607,14 @@ class TurnChangeStore:
             )
         return self._active
 
-    def _register(self, raw_path: str | os.PathLike[str]) -> _PathEntry | None:
+    def _register(
+        self,
+        raw_path: str | os.PathLike[str],
+        *,
+        display: str | None = None,
+    ) -> _PathEntry | None:
         active = self._require_active()
-        key, display, resolved = self._key(raw_path)
+        key, derived_display, resolved = self._key(raw_path)
         existing = active.get(key)
         if existing is not None:
             return existing
@@ -601,7 +626,12 @@ class TurnChangeStore:
                     self.limits.max_paths_per_turn,
                 )
             return None
-        entry = _PathEntry(path=display, resolved=resolved)
+        entry = _PathEntry(path=display or derived_display, resolved=resolved)
+        # 记录目标目录身份；读取 after 前核验，目录被替换/换成符号链接时降级
+        try:
+            entry.anchor = _open_dir_anchor(resolved.parent)
+        except OSError:
+            entry.anchor = None
         active[key] = entry
         return entry
 
@@ -668,6 +698,17 @@ class TurnChangeStore:
                 self._workspace_raw,
             )
             return SIDE_UNCAPTURED, None, REASON_ERROR
+        if entry.anchor is not None:
+            try:
+                current = _open_dir_anchor(entry.resolved.parent)
+            except OSError:
+                current = None
+            if current != entry.anchor:
+                logger.warning(
+                    "turn-change store: target directory identity changed for %s; skipping read",
+                    entry.path,
+                )
+                return SIDE_UNCAPTURED, None, REASON_ERROR
         path = entry.resolved
         try:
             size = path.stat().st_size
