@@ -708,7 +708,12 @@ class TurnChangeStore:
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> None:
-        """Index-only persist for turns without a manifest (空回合) (review R1)."""
+        """Index-only persist for turns without a manifest (空回合) (review R1).
+
+        与 ``_persist`` 相同的两段式复核：锁外先验一次，取得会话锁后再次
+        ``_ensure_session_dir()``（内部锁内复核 owner 快照与目录身份）——
+        取锁与写入之间失去所有权时保守停为未落定，不发布索引（review R1-fix）。
+        """
         if not self._ensure_session_dir():
             self._index_unsettled = True
             return
@@ -718,6 +723,13 @@ class TurnChangeStore:
             if not locked:
                 logger.warning(
                     "turn-change store: session lock unavailable; completed-turn index stays unsettled"
+                )
+                self._index_unsettled = True
+                return
+            if not self._ensure_session_dir():
+                logger.warning(
+                    "turn-change store: session ownership changed while waiting; "
+                    "completed-turn index stays unsettled"
                 )
                 self._index_unsettled = True
                 return

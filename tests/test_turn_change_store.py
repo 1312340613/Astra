@@ -2285,6 +2285,43 @@ def test_missing_index_is_unavailable_for_a_later_instance_too(tmp_path: Path) -
     assert read.records == []
 
 
+def test_empty_turn_index_write_rechecks_owner_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空回合索引发布必须在会话锁内复核 owner（review R1）.
+
+    注入：``_ensure_session_dir()`` 成功返回后、取得持久化锁之前，换入一个
+    合法格式的另一 owner token（pid 存活）。本实例已失去会话所有权 → 索引
+    不得写入，保守停为未落定。
+    """
+    subject = make_store(tmp_path)
+    subject.begin_turn("empty-after-owner-change")
+    original_ensure = subject._ensure_session_dir
+    replacement = {
+        "session_id": subject.session_id,
+        "pid": os.getpid(),
+        "token": "replacement-owner",
+        "created_at": time.time(),
+    }
+
+    def ensure_then_replace() -> bool:
+        ok = original_ensure()
+        if ok:
+            (subject.session_dir / store.OWNER_NAME).write_text(
+                json.dumps(replacement), encoding="utf-8"
+            )
+        return ok
+
+    monkeypatch.setattr(subject, "_ensure_session_dir", ensure_then_replace)
+
+    assert subject.seal() is None  # 空回合
+    assert subject._owner_is_ours() is False
+    assert not (subject.session_dir / store.INDEX_NAME).exists()
+    read = subject.completed_turns()
+    assert read.ok is False
+    assert read.records == []
+
+
 def test_empty_turn_is_indexed_and_consumes_a_sequence(tmp_path: Path) -> None:
     """空回合不落 manifest，但仍占号并留下 dir=null 的记录."""
     subject = make_store(tmp_path)
