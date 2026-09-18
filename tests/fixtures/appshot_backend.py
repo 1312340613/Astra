@@ -24,6 +24,8 @@ async def main():
     # Actual OpenAI adapter request builder, with no network client constructed.
     provider = object.__new__(OpenAICompatibleProvider)
     provider.config = config
+    # Match the real estimator's initial state without constructing a network client.
+    provider._estimate_calibration = 1.0
     llm = LLMClient(config, provider=provider)
     agent = ReActAgent(
         "fixture",
