@@ -44,7 +44,7 @@ test("files present renders count and totals", () => {
       totals: { files: 2, added: 12, removed: 3 },
     }),
   );
-  assert.equal(line, "✎ 本轮 2 个文件 +12 −3");
+  assert.equal(line, "✎ 本轮 2 个文件 +12 −3 · /changes 查看");
 });
 
 test("summary uses U+2212 minus and no ASCII hyphen", () => {
@@ -57,14 +57,14 @@ test("unknown_count appends confirmation hint", () => {
   const line = formatTurnChangesSummary(
     event({ totals: { files: 1, added: 5, removed: 2 }, unknown_count: 3 }),
   );
-  assert.equal(line, "✎ 本轮 1 个文件 +5 −2 · 另有 3 个路径未能确认");
+  assert.equal(line, "✎ 本轮 1 个文件 +5 −2 · 另有 3 个路径未能确认 · /changes 查看");
 });
 
 test("unknown only renders unknown hint without file count", () => {
   const line = formatTurnChangesSummary(
     event({ files: [], totals: { files: 0, added: 0, removed: 0 }, unknown_count: 2 }),
   );
-  assert.equal(line, "✎ 另有 2 个路径未能确认");
+  assert.equal(line, "✎ 另有 2 个路径未能确认 · /changes 查看");
 });
 
 test("no files and no unknown renders nothing", () => {
@@ -82,7 +82,7 @@ test("missing totals fall back to zero counts", () => {
     files: [file()],
     unknown_count: 0,
   }));
-  assert.equal(line, "✎ 本轮 1 个文件 +0 −0");
+  assert.equal(line, "✎ 本轮 1 个文件 +0 −0 · /changes 查看");
 });
 
 test("non numeric totals fall back to zero counts", () => {
@@ -94,7 +94,7 @@ test("non numeric totals fall back to zero counts", () => {
     unknown_count: 0,
     totals: { files: 2, added: "7", removed: null },
   }));
-  assert.equal(line, "✎ 本轮 2 个文件 +0 −0");
+  assert.equal(line, "✎ 本轮 2 个文件 +0 −0 · /changes 查看");
 });
 
 test("non array files degrade to unknown only or null", () => {
@@ -108,7 +108,7 @@ test("non array files degrade to unknown only or null", () => {
   );
   assert.equal(
     formatTurnChangesSummary(malformed({ files: undefined, unknown_count: 1 })),
-    "✎ 另有 1 个路径未能确认",
+    "✎ 另有 1 个路径未能确认 · /changes 查看",
   );
 });
 
@@ -121,7 +121,7 @@ test("non numeric unknown_count is treated as zero", () => {
     unknown_count: "2",
     totals: { files: 1, added: 1, removed: 1 },
   }));
-  assert.equal(line, "✎ 本轮 1 个文件 +1 −1");
+  assert.equal(line, "✎ 本轮 1 个文件 +1 −1 · /changes 查看");
 });
 
 test("string entries in files do not throw and still count", () => {
@@ -133,7 +133,7 @@ test("string entries in files do not throw and still count", () => {
     unknown_count: 0,
     totals: { files: 2, added: 2, removed: 2 },
   }));
-  assert.equal(line, "✎ 本轮 2 个文件 +2 −2");
+  assert.equal(line, "✎ 本轮 2 个文件 +2 −2 · /changes 查看");
 });
 
 test("malformed root object does not throw", () => {
@@ -145,14 +145,14 @@ test("cancelled turn with files renders like a normal turn", () => {
   const line = formatTurnChangesSummary(
     event({ files: [file({ reason: "cancelled" })], totals: { files: 1, added: 4, removed: 1 } }),
   );
-  assert.equal(line, "✎ 本轮 1 个文件 +4 −1");
+  assert.equal(line, "✎ 本轮 1 个文件 +4 −1 · /changes 查看");
 });
 
 test("cancelled turn with unknown only renders unknown hint", () => {
   const line = formatTurnChangesSummary(
     event({ files: [], unknown_count: 2, totals: { files: 0, added: 0, removed: 0 } }),
   );
-  assert.equal(line, "✎ 另有 2 个路径未能确认");
+  assert.equal(line, "✎ 另有 2 个路径未能确认 · /changes 查看");
 });
 
 // --------------------------------------------------------------------- gate

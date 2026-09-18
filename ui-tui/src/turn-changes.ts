@@ -38,6 +38,9 @@ function asFileArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+/** Suffix appended to a non-empty summary line: the command that shows details. */
+const CHANGES_HINT = " · /changes 查看";
+
 /**
  * Format the one-line summary for a completed turn.
  *
@@ -61,11 +64,11 @@ export function formatTurnChangesSummary(event: TurnChangesEventData): string | 
     if (unknownCount > 0) {
       line += ` · 另有 ${unknownCount} 个路径未能确认`;
     }
-    return line;
+    return line + CHANGES_HINT;
   }
 
   if (unknownCount > 0) {
-    return `✎ 另有 ${unknownCount} 个路径未能确认`;
+    return `✎ 另有 ${unknownCount} 个路径未能确认` + CHANGES_HINT;
   }
 
   return null;

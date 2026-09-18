@@ -73,7 +73,7 @@ test("turn_changes renders one summary line with totals", async () => {
     h.child.event({ type: "done" });
     await settle();
     const display = h.display();
-    assert.match(display, /✎ 本轮 3 个文件 \+42 −7/, display);
+    assert.match(display, /✎ 本轮 3 个文件 \+42 −7 · \/changes 查看/, display);
     assert.equal(occurrences(h.latestFrame(), "✎ 本轮"), 1, h.latestFrame());
   } finally { h.app.unmount(); }
 });
@@ -102,7 +102,7 @@ test("turn_changes with unknown only renders the confirmation hint", async () =>
     h.child.event({ type: "done" });
     await settle();
     const display = h.display();
-    assert.match(display, /✎ 另有 2 个路径未能确认/, display);
+    assert.match(display, /✎ 另有 2 个路径未能确认 · \/changes 查看/, display);
     assert.equal(occurrences(h.latestFrame(), "✎"), 1, h.latestFrame());
   } finally { h.app.unmount(); }
 });
@@ -121,7 +121,7 @@ test("cancelled turn still renders files and unknown hint", async () => {
     h.child.event({ type: "done" });
     await settle();
     const display = h.display();
-    assert.match(display, /✎ 本轮 2 个文件 \+42 −7 · 另有 1 个路径未能确认/, display);
+    assert.match(display, /✎ 本轮 2 个文件 \+42 −7 · 另有 1 个路径未能确认 · \/changes 查看/, display);
     assert.equal(occurrences(h.latestFrame(), "✎ 本轮"), 1, h.latestFrame());
   } finally { h.app.unmount(); }
 });
@@ -154,7 +154,7 @@ test("turn_changes from another session is ignored until the current session rep
     h.child.event(turnChanges());
     await settle();
     const display = h.display();
-    assert.match(display, /✎ 本轮 3 个文件 \+42 −7/, display);
+    assert.match(display, /✎ 本轮 3 个文件 \+42 −7 · \/changes 查看/, display);
     assert.equal(occurrences(h.latestFrame(), "✎ 本轮"), 1, h.latestFrame());
   } finally { h.app.unmount(); }
 });
