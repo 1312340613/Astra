@@ -203,6 +203,9 @@ class TurnChangeStore:
         self._truncated = False
         # 本实例所有权令牌：owner.json 记录 (pid, token, session_id)（review R7）
         self._owner_token = os.urandom(16).hex()
+        # 存储目录链身份：workspace → root → session dir（review F2）
+        self._root_anchor: tuple[int, int] | None = None
+        self._session_anchor: tuple[int, int] | None = None
         # 会话目录创建后、写入任何快照内容前，立即写 owner.json（行为要求 10）
         self._ensure_session_dir()
 
@@ -390,7 +393,7 @@ class TurnChangeStore:
             self._active = None
             self._request_id = ""
             self._turn_bytes = 0
-            if self._anchor_ok() and self._owner_is_ours():
+            if self._storage_ok() and self._owner_is_ours():
                 shutil.rmtree(self.session_dir, ignore_errors=True)
 
     @staticmethod
@@ -408,6 +411,10 @@ class TurnChangeStore:
             return removed
         probe = is_alive if is_alive is not None else _pid_alive
         for child in children:
+            if child.is_symlink():
+                # 符号链接目录项：绝不跟随（F2）
+                logger.warning("turn-change store: skip %s (symbolic link)", child)
+                continue
             try:
                 owner = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
@@ -455,7 +462,8 @@ class TurnChangeStore:
         """Create the session area and establish/take over its ownership marker.
 
         所有权身份 = (pid, token, session_id)：活跃占用（其他存活实例）一律
-        拒绝写入；旧实例已退出则原子接管（review R7）。
+        拒绝写入；旧实例已退出则原子接管（review R7）。建立与校验绑定
+        workspace → root → session 目录链身份；路径被替换时不写任何字节（F2）。
         """
         if not self._anchor_ok():
             logger.warning(
@@ -463,14 +471,72 @@ class TurnChangeStore:
                 self._workspace_raw,
             )
             return False
-        try:
-            self.session_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
+        if self._root_anchor is not None and not self._root_ok():
             logger.warning(
-                "turn-change store: cannot prepare snapshot area %s (%s)", self.session_dir, exc
+                "turn-change store: snapshot root identity changed for %s; refusing to write",
+                self.root,
             )
             return False
+        try:
+            current = _open_dir_anchor(self.session_dir)
+        except OSError:
+            current = None
+        if current is None:
+            if os.path.lexists(self.session_dir):
+                logger.warning(
+                    "turn-change store: session path %s is not a plain directory; refusing to write",
+                    self.session_dir,
+                )
+                return False
+            try:
+                self.session_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "turn-change store: cannot prepare snapshot area %s (%s)", self.session_dir, exc
+                )
+                return False
+        elif self._session_anchor is not None and current != self._session_anchor:
+            logger.warning(
+                "turn-change store: session directory identity changed for %s; refusing to write",
+                self.session_dir,
+            )
+            return False
+        if self._root_anchor is None:
+            self._root_anchor = _safe_dir_anchor(self.root)
+        self._session_anchor = current if current is not None else _safe_dir_anchor(self.session_dir)
         return self._claim_ownership()
+
+    def _root_ok(self) -> bool:
+        if self._root_anchor is None:
+            return True
+        return _safe_dir_anchor(self.root) == self._root_anchor
+
+    def _session_dir_ok(self) -> bool:
+        if self._session_anchor is None:
+            return True
+        return _safe_dir_anchor(self.session_dir) == self._session_anchor
+
+    def _storage_ok(self) -> bool:
+        """Verify the snapshot path chain before storage I/O (F2)."""
+        if not self._anchor_ok():
+            logger.warning(
+                "turn-change store: workspace identity changed for %s; refusing storage I/O",
+                self._workspace_raw,
+            )
+            return False
+        if not self._root_ok():
+            logger.warning(
+                "turn-change store: snapshot root identity changed for %s; refusing storage I/O",
+                self.root,
+            )
+            return False
+        if not self._session_dir_ok():
+            logger.warning(
+                "turn-change store: session directory identity changed for %s; refusing storage I/O",
+                self.session_dir,
+            )
+            return False
+        return True
 
     def _claim_ownership(self) -> bool:
         owner_path = self.session_dir / OWNER_NAME
@@ -591,6 +657,9 @@ class TurnChangeStore:
         while not condition():
             turns = self._turn_dirs()
             if not turns:
+                break
+            if not self._storage_ok():
+                # 目录链身份已变（被替换/换成符号链接）：不再删除任何回合目录（F2）
                 break
             if not self._owner_is_ours():
                 # 未核验到同一 owner 身份前，不删除任何回合目录（review R7）
@@ -790,15 +859,22 @@ class TurnChangeStore:
                 return SIDE_UNCAPTURED, None, REASON_ERROR
         path = entry.resolved
         try:
-            size = path.stat().st_size
+            st = os.stat(path, follow_symlinks=False)
         except FileNotFoundError:
             return SIDE_ABSENT, None, ""
         except OSError as exc:
             logger.warning("turn-change store: cannot stat %s (%s)", entry.path, exc)
             return SIDE_UNCAPTURED, None, REASON_ERROR
-        if not path.is_file():
+        if stat.S_ISLNK(st.st_mode):
+            # 最终组件被换成符号链接：不跟随（F2）
+            logger.warning(
+                "turn-change store: %s is a symbolic link; refusing to follow", entry.path
+            )
+            return SIDE_UNCAPTURED, None, REASON_ERROR
+        if not stat.S_ISREG(st.st_mode):
             logger.warning("turn-change store: %s is not a regular file", entry.path)
             return SIDE_UNCAPTURED, None, REASON_ERROR
+        size = st.st_size
         state, reason = self._accept_snapshot(size)
         if state != SIDE_CAPTURED:
             # 超限的 after 字节绝不落盘
@@ -1072,9 +1148,25 @@ def _tracked_state(before_fp: str | None, after_fp: str | None) -> str | None:
 
 
 def _read_bytes_bounded(path: Path, limit: int) -> bytes:
-    """Read at most ``limit + 1`` bytes so a growing file cannot be pulled in."""
-    with path.open("rb") as handle:
-        return handle.read(limit + 1)
+    """Read at most ``limit + 1`` bytes without following a final symlink.
+
+    Bounded so a growing file cannot be pulled in, and bound to the opened
+    handle so a path that is swapped for a symlink after the caller's checks
+    cannot redirect the read (review F2/R6).
+    """
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
@@ -1131,6 +1223,14 @@ def _change_from_payload(raw: Any) -> FileChange:
         reason=str(raw.get("reason") or ""),
         checkpoint_ids=[str(item) for item in checkpoint_ids] if isinstance(checkpoint_ids, list) else [],
     )
+
+
+def _safe_dir_anchor(path: Path) -> tuple[int, int] | None:
+    """Best-effort directory identity; ``None`` when it cannot be read safely."""
+    try:
+        return _open_dir_anchor(path)
+    except OSError:
+        return None
 
 
 def _open_dir_anchor(path: Path) -> tuple[int, int]:

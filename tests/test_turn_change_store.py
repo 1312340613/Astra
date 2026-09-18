@@ -1518,3 +1518,61 @@ def test_store_stops_writing_after_the_workspace_is_swapped(tmp_path: Path) -> N
 
     ledger.close()
     assert not (outside / ".astra").exists()
+
+
+def test_seal_refuses_storage_after_the_snapshot_root_is_swapped(tmp_path: Path) -> None:
+    """F2：快照目录链（.astra）被换成符号链接后，封存不得在链外创建任何文件.
+
+    探针形状：构造并开始回合后，把 ``workspace/.astra`` 改名，再把 ``.astra``
+    指向外部目录。工作区 inode 未变（旧检查仍通过），但存储链身份已变，必须
+    拒绝写入而不是跟随链接。
+    """
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / "note.txt").write_bytes(b"new\n")
+
+    subject = store.TurnChangeStore(workspace, "review")
+    subject.begin_turn("symlink-storage")
+    subject.note_absent("note.txt")
+
+    (workspace / ".astra").rename(workspace / ".astra-original")
+    (workspace / ".astra").symlink_to(outside, target_is_directory=True)
+
+    manifest = subject.seal()
+
+    assert manifest is not None  # 内存清单仍返回（落盘被拒绝）
+    created = sorted(
+        str(path.relative_to(outside)) for path in outside.rglob("*") if path.is_file()
+    )
+    assert created == []
+
+
+def test_after_read_refuses_a_symlinked_target(tmp_path: Path) -> None:
+    """F2：after 读取不跟随符号链接，降级 unknown 且不复制外部内容."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    target = workspace / "note.txt"
+    target.write_bytes(b"before\n")
+    private = outside / "private.txt"
+    private.write_bytes(b"SYNTHETIC-OUTSIDE-CONTENT\n")
+
+    subject = store.TurnChangeStore(workspace, "review", root=tmp_path / "ledger")
+    subject.begin_turn("swap-after-capture")
+    subject.note_capture(target, b"before\n")
+
+    target.unlink()
+    target.symlink_to(private)
+
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert manifest.files == []  # 未读到最终状态 → 不进已确认清单（F5 同口径）
+    change = manifest.unknown[0]
+    assert change.path == "note.txt"
+    assert change.after_state == store.SIDE_UNCAPTURED
+    assert change.reason == store.REASON_ERROR
+    assert subject.load_sides(0, "note.txt").after is None
