@@ -408,6 +408,11 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
         output, error = execute_budget_command(agent, cmd[len("/budget"):].strip())
         print(f"  {error or output}\n")
 
+    elif command == "/changes":
+        from agent.cli.turn_changes_command import execute_changes_command
+        output, error = execute_changes_command(agent, cmd[len("/changes"):].strip())
+        print(f"  {error or output}\n")
+
     elif command == "/think":
         agent.context.show_reasoning = not agent.context.show_reasoning
         state = "ON" if agent.context.show_reasoning else "OFF"
@@ -785,6 +790,7 @@ async def handle_slash(cmd: str, agent: ReActAgent) -> Msg | None:
     /compress           — Force context compression (LLM summary)
     /think              — Toggle thinking (reasoning) display
     /budget [secs|off]   — Set a shared wall-clock budget for subsequent turns
+    /changes [@k] [n|path] — Review the change ledger of recent turns
     /prompt             — View system prompt
     /prompt ...         — Set system prompt
     /persona [name]     — View / switch saved prompt persona

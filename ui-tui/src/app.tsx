@@ -1907,7 +1907,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
           addMessage("system", [
             "Shortcuts: Ctrl+L activity dock · Ctrl+O tool details · Ctrl+Y YOLO · Ctrl+C cancel/exit",
             "YOLO: /yolo [on|off|status] works during replies. Ctrl+Y also works in approval panels.",
-            `CHAT     /image  /bar  /minimal${localMode ? `  ${localMode.command}` : ""}  /reset  /compress  /undo  /retry  /think`,
+            `CHAT     /image  /bar  /minimal${localMode ? `  ${localMode.command}` : ""}  /reset  /compress  /undo  /retry  /changes  /think`,
             "MODEL    /model  /connect  /persona",
             "TOOLS    /search  /tool  /memory  /skills  /learn  /tools  /browser  /computer  /conclave",
             "SESSION  /tasks  /resume  /cancel  /session  /handoff",

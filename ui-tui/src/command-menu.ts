@@ -40,6 +40,7 @@ const SLASH_COMMANDS: SlashCommandSuggestion[] = [
   { command: "/compress", description: "compress context via LLM summary", group: "CHAT" },
   { command: "/undo", description: "remove the last model reply or the last N exchanges", takesArgs: true, group: "CHAT" },
   { command: "/retry", description: "remove the last reply and resend the last request", group: "CHAT" },
+  { command: "/changes", description: "review the change ledger of recent turns", takesArgs: true, group: "CHAT" },
   { command: "/think", description: "toggle reasoning display", group: "CHAT" },
   { command: "/model", description: "show or switch model", takesArgs: true, group: "MODEL" },
   { command: "/mode", description: "set reasoning effort (low/high/max)", takesArgs: true, group: "MODEL" },
