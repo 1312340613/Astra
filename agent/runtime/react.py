@@ -608,8 +608,27 @@ class ReActAgent(AgentBase):
                 paths.add(self._normalize_workflow_path(match.group(1)))
         return {path for path in paths if path}
 
+    def _tool_raw_paths(self, name: str, args: dict) -> set[str]:
+        """Path arguments exactly as the tool received them (no normalization).
+
+        The ledger resolves these through the file policy to the capture-chain
+        identity, so case, absolute roots and hidden-file prefixes must survive
+        (M2 P2 follow-up); workflow classification keeps the normalized variant
+        from ``_tool_mutation_paths``.
+        """
+        paths: set[str] = set()
+        for key in ("path", "file_path"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                paths.add(value.strip())
+        if name == "apply_patch":
+            patch = str(args.get("patch") or args.get("input") or "")
+            for match in re.finditer(r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$", patch, re.MULTILINE):
+                paths.add(match.group(1).strip())
+        return {path for path in paths if path}
+
     def _ledger_identity_paths(self, paths: set[str]) -> set[str]:
-        """Resolve tool-reported paths to the capture-chain identity.
+        """Resolve raw tool-reported paths to the capture-chain identity.
 
         The ledger resolves relative candidate paths against its sandbox
         workspace while the file tools resolve against their filesystem-policy
@@ -2740,7 +2759,7 @@ class ReActAgent(AgentBase):
             turn_store = current_turn_change_store()
             if turn_store is not None and write_paths:
                 try:
-                    turn_store.note_paths(self._ledger_identity_paths(write_paths))
+                    turn_store.note_paths(self._ledger_identity_paths(self._tool_raw_paths(name, args)))
                 except Exception:
                     logger.exception("turn-change candidate note failed")
         if mutation_paths:

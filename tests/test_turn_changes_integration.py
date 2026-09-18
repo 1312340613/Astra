@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent.core.msg import ContentBlock, Msg
 from agent.runtime import turn_change_store as tcs
 from agent.runtime.llm import LLMConfig, LLMResponseError
@@ -981,3 +983,56 @@ def test_same_root_create_has_no_unknown_paths(tmp_path, monkeypatch):
     assert payloads[0]["unknown_count"] == 0
     assert [item["path"] for item in payloads[0]["files"]] == ["a.txt"]
     assert stores and stores[0].manifest(0) is not None
+
+
+# ---------------------------------------------------------------------------
+# Raw-path identity shapes (M2 P2 follow-up): the ledger must resolve the raw
+# path (case, absolute root and hidden prefix preserved) through the file
+# policy, while workflow classification keeps the normalized variant.
+# ---------------------------------------------------------------------------
+
+def _raw_path_case(files, form):
+    """The three raw path shapes models emit: absolute, hidden, mixed case."""
+    if form == "absolute":
+        return str(files / "abs.txt"), "abs.txt"
+    if form == "hidden":
+        return ".memo.txt", ".memo.txt"
+    if form == "mixed":
+        return "MixedCase.txt", "MixedCase.txt"
+    raise AssertionError(form)
+
+
+@pytest.mark.parametrize("path_form", ["absolute", "hidden", "mixed"])
+def test_cross_root_raw_path_forms_create_no_unknown(tmp_path, monkeypatch, path_form):
+    """P2：绝对/隐藏/大小写混排路径的新建，不得产生 phantom unknown."""
+    arg, name = _raw_path_case(tmp_path / "files", path_form)
+    agent, files, _sandbox = make_cross_root_agent(
+        tmp_path, [call("write_file", {"path": arg, "content": "hello\n"})]
+    )
+    monkeypatch.chdir(files)
+    events = run(collect_stream(agent, Msg(content=[ContentBlock.text("create raw path")], id=f"p2-raw-create-{path_form}")))
+
+    payloads = [event for event in events if event["type"] == "turn_changes"]
+    assert len(payloads) == 1, events
+    assert [item["path"] for item in payloads[0]["files"]] == [name]
+    assert payloads[0]["unknown_count"] == 0, payloads[0]
+    assert (files / name).read_text(encoding="utf-8") == "hello\n"
+
+
+@pytest.mark.parametrize("path_form", ["absolute", "hidden", "mixed"])
+def test_cross_root_raw_path_forms_revert_no_event(tmp_path, monkeypatch, path_form):
+    """P2：绝对/隐藏/大小写混排路径改回原样，不得发布事件."""
+    arg, name = _raw_path_case(tmp_path / "files", path_form)
+    agent, files, _sandbox = make_cross_root_agent(
+        tmp_path,
+        [
+            call("edit_file", {"path": arg, "old": "original", "new": "changed"}, call_id=f"p2-raw-{path_form}-1"),
+            call("edit_file", {"path": arg, "old": "changed", "new": "original"}, call_id=f"p2-raw-{path_form}-2"),
+        ],
+    )
+    (files / name).write_text("original\n", encoding="utf-8")
+    monkeypatch.chdir(files)
+    events = run(collect_stream(agent, Msg(content=[ContentBlock.text("edit raw path then revert")], id=f"p2-raw-revert-{path_form}")))
+
+    assert [event for event in events if event["type"] == "turn_changes"] == [], events
+    assert (files / name).read_text(encoding="utf-8") == "original\n"
