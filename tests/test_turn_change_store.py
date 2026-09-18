@@ -1184,6 +1184,135 @@ def test_unread_after_never_claims_a_net_change(tmp_path: Path, reason: str) -> 
     assert subject.load_sides(0, "reverted.txt").after is None  # 未读最终字节
 
 
+def test_cancelled_seal_starts_no_snapshot_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F4：已取消的收尾不启动快照写入，清单照常落盘（写入受预算门控）."""
+    limits = store.TurnChangeLimits(compute_budget_ms=20)
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    subject.begin_turn("req-1")
+    for index in range(5):
+        path = tmp_path / f"note-{index}.txt"
+        path.write_bytes(b"after\n")
+        subject.note_capture(path.name, b"before\n")
+
+    writes: list[str] = []
+    original = store._write_bytes
+
+    def slow_write(path, data):
+        writes.append(Path(path).name)
+        time.sleep(0.04)  # 受控慢 I/O（注入延迟，不是机器基准）
+        original(path, data)
+
+    monkeypatch.setattr(store, "_write_bytes", slow_write)
+
+    start = time.perf_counter()
+    manifest = subject.seal(cancelled=lambda: True)
+    elapsed = time.perf_counter() - start
+
+    assert manifest is not None
+    assert writes == []  # 取消后不启动任何快照写入
+    assert elapsed < 0.15
+    assert (subject.session_dir / "turn-1" / "manifest.json").exists()  # 台账仍落盘
+    assert manifest.files == []
+    assert all(change.reason == "cancelled" for change in manifest.unknown)
+
+
+def test_cancelled_seal_skips_eviction(tmp_path: Path) -> None:
+    """F4：取消的收尾不淘汰旧回合（淘汰属于可放弃工作）."""
+    limits = store.TurnChangeLimits(compute_budget_ms=60_000, max_turns_retained=1)
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    for index in range(2):
+        subject.begin_turn(f"old-{index}")
+        (tmp_path / f"old-{index}.txt").write_bytes(b"new\n")
+        subject.note_absent(f"old-{index}.txt")
+        assert subject.seal() is not None
+    assert len(subject._turn_dirs()) == 1  # 正常收尾：FIFO 只留最新一个
+
+    subject.begin_turn("cancelled")
+    (tmp_path / "cancelled.txt").write_bytes(b"new\n")
+    subject.note_absent("cancelled.txt")
+    assert subject.seal(cancelled=lambda: True) is not None
+
+    # 取消的收尾不淘汰：旧回合保留，FIFO 推迟到下一次正常收尾
+    assert len(subject._turn_dirs()) == 2
+
+
+def test_normal_seal_still_writes_snapshots_without_delay(tmp_path: Path) -> None:
+    """F4：无取消/无过期时快照照常写入（门控不得误伤正常收尾）."""
+    subject = make_store(tmp_path, "sess-1")
+    subject.begin_turn("req-1")
+    (tmp_path / "a.txt").write_bytes(b"after\n")
+    subject.note_capture("a.txt", b"before\n")
+
+    manifest = subject.seal()
+
+    assert manifest is not None
+    turn_dir = subject.session_dir / "turn-1"
+    assert sorted(path.name for path in turn_dir.iterdir()) == [
+        "after.0.bin",
+        "before.0.bin",
+        "manifest.json",
+    ]
+    assert subject.load_sides(0, "a.txt").after == b"after\n"
+
+
+def test_external_cancel_is_processed_during_cooperative_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4：事件循环上排期的取消能在合作式收尾中得到处理，读取随即停止.
+
+    复现口径：10ms 后 `call_later` 触发 task.cancel()，每次 after 读取注入
+    40ms 延迟。同步 seal 会让取消回调直到收尾结束才运行；合作式 seal_async
+    在条目之间让出控制权，取消在让出点投递并停止剩余读取。
+    """
+    import asyncio
+
+    limits = store.TurnChangeLimits(compute_budget_ms=60_000, diff_deadline_ms=60_000)
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    subject.begin_turn("external-cancel")
+    for index in range(5):
+        path = tmp_path / f"note-{index}.txt"
+        path.write_bytes(b"after\n")
+        subject.note_capture(path.name, b"before\n")
+
+    reads: list[str] = []
+    original = store._read_bytes_bounded
+
+    def slow_read(path, limit):
+        reads.append(Path(path).name)
+        time.sleep(0.04)  # 受控慢 I/O
+        return original(path, limit)
+
+    monkeypatch.setattr(store, "_read_bytes_bounded", slow_read)
+    observed: dict[str, float] = {}
+
+    async def scenario():
+        task = asyncio.current_task()
+        assert task is not None
+        start = time.monotonic()
+
+        def request_cancel() -> None:
+            observed["cancel_callback_ms"] = (time.monotonic() - start) * 1000.0
+            task.cancel()
+
+        asyncio.get_running_loop().call_later(0.01, request_cancel)
+        manifest = await subject.seal_async(cancelled=lambda: bool(task.cancelling()))
+        observed["seal_return_ms"] = (time.monotonic() - start) * 1000.0
+        await asyncio.sleep(0)
+        return manifest
+
+    manifest = asyncio.run(scenario())
+
+    assert manifest is not None
+    # 取消在让出点投递：剩余的读取全部停止（只允许在途的最后一个条目算完）
+    assert 1 <= len(reads) <= 3, f"external cancel must stop new reads; reads={reads}"
+    assert observed["cancel_callback_ms"] < observed["seal_return_ms"]  # 收尾期间处理
+    assert subject.seal_stopped_by_cancel is True
+    assert len(manifest.files) == len(reads)  # 已读条目：两侧已确定 → 主清单
+    assert len(manifest.unknown) == 5 - len(reads)  # 未读条目 → 未知区
+    assert all(change.reason == "cancelled" for change in manifest.unknown)
+    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.unknown)
+
+
 def test_bounded_read_caps_the_read_size(tmp_path: Path) -> None:
     """R6：读取有字节上限（limit+1），不整份读入."""
     target = tmp_path / "big.bin"

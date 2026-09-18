@@ -4495,6 +4495,26 @@ class ReActAgent(AgentBase):
         if manifest is not None:
             self._turn_changes_ready = self._turn_changes_event(manifest)
 
+    async def _seal_turn_changes_async(
+        self, store, *, cancelled: "Callable[[], bool] | None" = None
+    ) -> None:
+        """Cooperative seal for the streaming done path (review F4).
+
+        收尾在条目之间把控制权交还事件循环：排期的外部取消能在其中得到投递，
+        剩余可放弃工作（读取/写入/淘汰）随即停止。
+        """
+        if store is None:
+            return
+        if cancelled is None:
+            cancelled = self._turn_cancel_probe()
+        try:
+            manifest = await store.seal_async(cancelled=cancelled)
+        except Exception:
+            logger.exception("turn-change seal failed")
+            return
+        if manifest is not None:
+            self._turn_changes_ready = self._turn_changes_event(manifest)
+
     def _take_turn_changes_payload(self) -> dict | None:
         payload = self._turn_changes_ready
         self._turn_changes_ready = None
@@ -4505,6 +4525,15 @@ class ReActAgent(AgentBase):
         store = getattr(self, "_turn_change_store", None)
         if store is not None:
             self._seal_turn_changes(store, cancelled=(lambda: True) if cancelled else None)
+        return self._take_turn_changes_payload()
+
+    async def _degraded_turn_changes_payload_async(self, *, cancelled: bool) -> dict | None:
+        """Aborted-turn seal (idempotent) that yields to the loop while sealing (F4)."""
+        store = getattr(self, "_turn_change_store", None)
+        if store is not None:
+            await self._seal_turn_changes_async(
+                store, cancelled=(lambda: True) if cancelled else None
+            )
         return self._take_turn_changes_payload()
 
     def _end_turn_changes(self, store, scope_cm) -> None:
@@ -4549,7 +4578,7 @@ class ReActAgent(AgentBase):
             try:
                 async for event in react_events:
                     if event["type"] == "done":
-                        self._seal_turn_changes(turn_store)
+                        await self._seal_turn_changes_async(turn_store)
                         payload = self._take_turn_changes_payload()
                         if payload is not None:
                             yield payload
@@ -4563,7 +4592,7 @@ class ReActAgent(AgentBase):
                     await source.aclose()
         except TurnBudgetExceeded as exc:
             await self._record_turn_budget_exhaustion(msg, exc)
-            payload = self._degraded_turn_changes_payload(cancelled=False)
+            payload = await self._degraded_turn_changes_payload_async(cancelled=False)
             if payload is not None:
                 yield payload
             yield {
@@ -4576,7 +4605,7 @@ class ReActAgent(AgentBase):
             logger.warning("react stream cancelled request_id=%s", msg.metadata.get("request_id") or msg.id)
             self.context.sanitize_tool_history()
             await self.context.save_async()
-            payload = self._degraded_turn_changes_payload(cancelled=True)
+            payload = await self._degraded_turn_changes_payload_async(cancelled=True)
             if payload is not None:
                 yield payload
             yield {
@@ -4592,7 +4621,7 @@ class ReActAgent(AgentBase):
         except LLMResponseError as exc:
             self.context.sanitize_tool_history()
             await self.context.save_async()
-            payload = self._degraded_turn_changes_payload(cancelled=False)
+            payload = await self._degraded_turn_changes_payload_async(cancelled=False)
             if payload is not None:
                 yield payload
             yield {
@@ -4603,7 +4632,7 @@ class ReActAgent(AgentBase):
             yield {"type": "done", "request_id": msg.metadata.get("request_id") or msg.id}
         except LLMIdleTimeout as exc:
             logger.warning("react stream idle timeout request_id=%s", msg.metadata.get("request_id") or msg.id)
-            payload = self._degraded_turn_changes_payload(cancelled=False)
+            payload = await self._degraded_turn_changes_payload_async(cancelled=False)
             if payload is not None:
                 yield payload
             yield {
@@ -4617,7 +4646,7 @@ class ReActAgent(AgentBase):
             yield {"type": "done", "request_id": msg.metadata.get("request_id") or msg.id}
         except LLMOverallTimeout as exc:
             logger.warning("react stream overall timeout request_id=%s", msg.metadata.get("request_id") or msg.id)
-            payload = self._degraded_turn_changes_payload(cancelled=False)
+            payload = await self._degraded_turn_changes_payload_async(cancelled=False)
             if payload is not None:
                 yield payload
             yield {
@@ -4645,6 +4674,7 @@ class ReActAgent(AgentBase):
             async for event in react_events:
                 if event["type"] == "done":
                     last_text = event.get("content", "")
+            await self._seal_turn_changes_async(turn_store)
         except TurnBudgetExceeded as exc:
             await self._record_turn_budget_exhaustion(msg, exc)
             raise

@@ -22,6 +22,7 @@ by ``tests/test_turn_change_store.py``):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -62,6 +63,13 @@ COMPARE_NONE = "none"
 REASON_QUOTA = "quota"
 REASON_TRACKED = "tracked"
 REASON_ERROR = "error"
+
+
+def _always_cancelled() -> bool:
+    return True
+
+
+_ALWAYS_CANCELLED: Callable[[], bool] = _always_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +214,8 @@ class TurnChangeStore:
         self._owner_token = os.urandom(16).hex()
         # 接管决策时看到的 owner 快照：锁内复核"持有人未变"后才写入（F1）
         self._owner_expectation: Any = None
+        # 最近一次合作式收尾是否在让出点收到了真实取消（review F4）
+        self.seal_stopped_by_cancel = False
         # 存储目录链身份：workspace → root → session dir（review F2）
         self._root_anchor: tuple[int, int] | None = None
         self._session_anchor: tuple[int, int] | None = None
@@ -299,8 +309,47 @@ class TurnChangeStore:
         """净判定 + 配额 + 落盘 + FIFO；空回合返回 None。
 
         每文件 ``deadline = min(now + diff_deadline_ms, 回合截止时间)``；``cancelled``
-        原样贯通给 differ。超预算/取消的未完成条目只降级计数，``seal`` 不抛错。
+        原样贯通给 differ。超预算/取消时不再读取 after（未确认条目进未知区），
+        ``seal`` 不抛错。
         """
+        state = self._begin_seal()
+        if state is None:
+            return None
+        active, request_id, deadline = state
+        resolved = self._resolve_entries(active, deadline, cancelled)
+        return self._finish_seal(request_id, deadline, cancelled, resolved)
+
+    async def seal_async(
+        self, *, cancelled: Callable[[], bool] | None = None
+    ) -> TurnChangesManifest | None:
+        """合作式收尾：条目之间把控制权交还事件循环（review F4）.
+
+        真实外部取消（事件循环上排期的 cancel）会在让出点得到投递；收到后停止
+        剩余可放弃的读取/写入/淘汰，清单与落盘仍完成，并把
+        ``seal_stopped_by_cancel`` 置 True 供调用方观察。
+        """
+        state = self._begin_seal()
+        if state is None:
+            return None
+        active, request_id, deadline = state
+        effective = cancelled
+        resolved: list[_ResolvedEntry] = []
+        for entry in active.values():
+            if effective is not _ALWAYS_CANCELLED:
+                try:
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    # 取消在让出点被处理：不再启动新的可放弃工作（review F4）
+                    effective = _ALWAYS_CANCELLED
+            outcome = self._resolve_entry(entry, deadline, effective)
+            if outcome is not None:
+                resolved.append(outcome)
+        manifest = self._finish_seal(request_id, deadline, effective, resolved)
+        self.seal_stopped_by_cancel = effective is _ALWAYS_CANCELLED
+        return manifest
+
+    def _begin_seal(self) -> tuple[dict[str, _PathEntry], str, float] | None:
+        """Take the active turn out of the store and compute this seal's deadline."""
         with self._lock:
             active = self._active
             if active is None:
@@ -309,15 +358,42 @@ class TurnChangeStore:
             self._active = None
             self._request_id = ""
             deadline = self._clock() + self.limits.compute_budget_ms / 1000.0
+        return active, request_id, deadline
+
+    def _resolve_entries(
+        self,
+        active: dict[str, _PathEntry],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> list[_ResolvedEntry]:
         resolved: list[_ResolvedEntry] = []
         for entry in active.values():
-            outcome = self._resolve(entry, deadline, cancelled)
-            if outcome is None:
-                continue
-            if outcome.change.state == STATE_UNCHANGED:
-                # 净变化为零：主清单与未知区都不出现（行为要求 3，review R9）
-                continue
-            resolved.append(outcome)
+            outcome = self._resolve_entry(entry, deadline, cancelled)
+            if outcome is not None:
+                resolved.append(outcome)
+        return resolved
+
+    def _resolve_entry(
+        self,
+        entry: _PathEntry,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> _ResolvedEntry | None:
+        outcome = self._resolve(entry, deadline, cancelled)
+        if outcome is None:
+            return None
+        if outcome.change.state == STATE_UNCHANGED:
+            # 净变化为零：主清单与未知区都不出现（行为要求 3，review R9）
+            return None
+        return outcome
+
+    def _finish_seal(
+        self,
+        request_id: str,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+        resolved: list[_ResolvedEntry],
+    ) -> TurnChangesManifest | None:
         if not resolved:
             return None
         files = [
@@ -340,7 +416,7 @@ class TurnChangeStore:
             unknown=unknown,
             totals=totals,
         )
-        self._persist(manifest, resolved)
+        self._persist(manifest, resolved, deadline=deadline, cancelled=cancelled)
         return manifest
 
     # -- 读取（M2/M3 用；M1 供测试） --
@@ -683,7 +759,9 @@ class TurnChangeStore:
             logger.warning("turn-change store: cannot remove stale turn area %s (%s)", turn_dir, exc)
             return False
 
-    def _evict_until(self, condition: Callable[[], bool]) -> bool:
+    def _evict_until(
+        self, condition: Callable[[], bool], *, stop: Callable[[], bool] | None = None
+    ) -> bool:
         """Bounded FIFO eviction; stops as soon as a removal makes no progress.
 
         Locked or permission-protected directories degrade the caller (quota
@@ -699,6 +777,9 @@ class TurnChangeStore:
                 turns = self._turn_dirs()
                 if not turns:
                     break
+                if stop is not None and stop():
+                    # 已取消/过期：淘汰同样属于可放弃工作（review F4）
+                    break
                 if not self._storage_ok():
                     # 目录链身份已变（被替换/换成符号链接）：不再删除任何回合目录（F2）
                     break
@@ -711,13 +792,14 @@ class TurnChangeStore:
                     break  # no measurable progress; stop instead of looping
             return condition()
 
-    def _enforce_retention(self) -> None:
+    def _enforce_retention(self, *, stop: Callable[[], bool] | None = None) -> None:
         """FIFO: 只保留最近 max_turns_retained 个回合；会话超量先淘汰最旧回合."""
         keep = max(1, int(self.limits.max_turns_retained))
-        self._evict_until(lambda: len(self._turn_dirs()) <= keep)
+        self._evict_until(lambda: len(self._turn_dirs()) <= keep, stop=stop)
         self._evict_until(
             lambda: len(self._turn_dirs()) <= 1
-            or self._session_bytes() <= self.limits.max_session_bytes
+            or self._session_bytes() <= self.limits.max_session_bytes,
+            stop=stop,
         )
 
     @staticmethod
@@ -743,7 +825,14 @@ class TurnChangeStore:
             logger.warning("turn-change store: unreadable snapshot %s (%s)", name, exc)
             return None, SIDE_UNCAPTURED
 
-    def _persist(self, manifest: TurnChangesManifest, entries: list[_ResolvedEntry]) -> None:
+    def _persist(
+        self,
+        manifest: TurnChangesManifest,
+        entries: list[_ResolvedEntry],
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
         """尽力落盘；写入门控在会话锁内完成（review F1）."""
         # 先核验目录链与持有人再触碰锁目录：目录被替换时连锁都不落（F2/F1）
         if not self._ensure_session_dir():
@@ -755,10 +844,15 @@ class TurnChangeStore:
                     manifest.turn_seq,
                 )
                 return
-            self._persist_locked(manifest, entries)
+            self._persist_locked(manifest, entries, deadline=deadline, cancelled=cancelled)
 
     def _persist_locked(
-        self, manifest: TurnChangesManifest, entries: list[_ResolvedEntry]
+        self,
+        manifest: TurnChangesManifest,
+        entries: list[_ResolvedEntry],
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         """尽力落盘；任何失败只降级（调用方仍拿到内存 manifest）."""
         turn_dir = self.session_dir / f"turn-{manifest.turn_seq}"
@@ -768,16 +862,33 @@ class TurnChangeStore:
             turn_dir.mkdir(parents=True, exist_ok=True)
             by_identity = {id(item.change): item for item in entries}
             payload_entries: list[dict[str, Any]] = []
+            stop = self._stop_predicate(deadline, cancelled)
             for index, change in enumerate([*manifest.files, *manifest.unknown]):
                 item = by_identity.get(id(change))
                 sides: dict[str, str | None] = {"before": None, "after": None}
-                if item is not None and item.before_bytes is not None:
-                    sides["before"] = f"before.{index}.bin"
-                    _write_bytes(turn_dir / sides["before"], item.before_bytes)
-                if item is not None and item.after_bytes is not None:
-                    sides["after"] = f"after.{index}.bin"
-                    _write_bytes(turn_dir / sides["after"], item.after_bytes)
-                payload_entries.append(_change_payload(change, sides))
+                if stop is None or not stop():
+                    if item is not None and item.before_bytes is not None:
+                        sides["before"] = f"before.{index}.bin"
+                        _write_bytes(turn_dir / sides["before"], item.before_bytes)
+                    if item is not None and item.after_bytes is not None:
+                        sides["after"] = f"after.{index}.bin"
+                        _write_bytes(turn_dir / sides["after"], item.after_bytes)
+                payload_entries.append(
+                    _change_payload(
+                        change,
+                        sides,
+                        before_state=(
+                            SIDE_UNCAPTURED
+                            if change.before_state == SIDE_CAPTURED and sides["before"] is None
+                            else change.before_state
+                        ),
+                        after_state=(
+                            SIDE_UNCAPTURED
+                            if change.after_state == SIDE_CAPTURED and sides["after"] is None
+                            else change.after_state
+                        ),
+                    )
+                )
             _write_json_atomic(
                 turn_dir / MANIFEST_NAME,
                 {
@@ -790,7 +901,7 @@ class TurnChangeStore:
                     "totals": dict(manifest.totals),
                 },
             )
-            self._enforce_retention()
+            self._enforce_retention(stop=stop)
         except Exception as exc:  # noqa: BLE001 - ledger never breaks the turn
             logger.warning(
                 "turn-change store: cannot persist turn %s (%s: %s)",
@@ -799,6 +910,14 @@ class TurnChangeStore:
                 exc,
             )
             self._remove_turn(turn_dir)
+
+    def _stop_predicate(
+        self, deadline: float | None, cancelled: Callable[[], bool] | None
+    ) -> Callable[[], bool] | None:
+        """收尾期间是否已取消/过期（None = 不做门控）（review F4）."""
+        if deadline is None:
+            return None
+        return lambda: bool(self._stop_reason(deadline, cancelled))
 
     def _require_active(self) -> dict[str, _PathEntry]:
         if self._active is None:
@@ -1232,13 +1351,19 @@ def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _change_payload(change: FileChange, sides: dict[str, str | None]) -> dict[str, Any]:
+def _change_payload(
+    change: FileChange,
+    sides: dict[str, str | None],
+    *,
+    before_state: str | None = None,
+    after_state: str | None = None,
+) -> dict[str, Any]:
     return {
         "path": change.path,
         "display": change.display,
         "state": change.state,
-        "before_state": change.before_state,
-        "after_state": change.after_state,
+        "before_state": before_state if before_state is not None else change.before_state,
+        "after_state": after_state if after_state is not None else change.after_state,
         "added": change.added,
         "removed": change.removed,
         "compare": change.compare,
