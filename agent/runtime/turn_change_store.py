@@ -218,6 +218,8 @@ class TurnChangeStore:
         self.seal_stopped_by_cancel = False
         # 收尾完成但取消已传播的清单，供调用方取回（review G2）
         self._stopped_manifest: TurnChangesManifest | None = None
+        # 本实例最后写入的 owner 内容：删除会话区前复核仍是它（review H1）
+        self._owner_payload: dict[str, Any] | None = None
         # 存储目录链身份：workspace → root → session dir（review F2）
         self._root_anchor: tuple[int, int] | None = None
         self._session_anchor: tuple[int, int] | None = None
@@ -527,7 +529,7 @@ class TurnChangeStore:
                     self._remove_session_dir()
 
     def _remove_session_dir(self) -> None:
-        """Delete the session area through verified handles (G1)."""
+        """Delete the session area through verified handles (G1); the final child is re-verified (H1)."""
         if not _HANDLE_IO_OK:
             shutil.rmtree(self.session_dir, ignore_errors=True)
             self._session_anchor = None
@@ -539,20 +541,24 @@ class TurnChangeStore:
                 "turn-change store: cannot reach session area %s (%s)", self.session_dir, exc
             )
             return
+        removed = False
         try:
             try:
-                _remove_tree_at(parent_fd, name)
+                # 要删除的最终目录必须仍是此前核验过的那个（identity + owner，同一句柄）（review H1）
+                with _remove_expectation_scope(self._session_anchor, self._owner_payload):
+                    _remove_tree_at(parent_fd, name)
+                removed = True
             except FileNotFoundError:
-                pass
+                removed = True
             except OSError as exc:
                 logger.warning(
                     "turn-change store: cannot remove session area %s (%s)", self.session_dir, exc
                 )
-                return
         finally:
             os.close(parent_fd)
-        # 目录已删：下一次建立时重新锚定，避免 close 后无法重新 begin_turn
-        self._session_anchor = None
+        if removed:
+            # 目录已删：下一次建立时重新锚定，避免 close 后无法重新 begin_turn
+            self._session_anchor = None
 
     @staticmethod
     def cleanup_orphans(
@@ -863,14 +869,15 @@ class TurnChangeStore:
                 )
                 return False
             try:
+                payload = {
+                    "session_id": self.session_id,
+                    "pid": os.getpid(),
+                    "token": self._owner_token,
+                    "created_at": time.time(),
+                }
                 _write_json_atomic(
                     owner_path,
-                    {
-                        "session_id": self.session_id,
-                        "pid": os.getpid(),
-                        "token": self._owner_token,
-                        "created_at": time.time(),
-                    },
+                    payload,
                     anchors=self._storage_anchors(),
                 )
             except OSError as exc:
@@ -878,6 +885,7 @@ class TurnChangeStore:
                     "turn-change store: cannot write owner marker %s (%s)", owner_path, exc
                 )
                 return False
+            self._owner_payload = payload
         return True
 
     def _owner_matches(self, owner: Any) -> bool:
@@ -964,17 +972,24 @@ class TurnChangeStore:
         return True
 
     def _evict_until(
-        self, condition: Callable[[], bool], *, stop: Callable[[], bool] | None = None
+        self,
+        condition: Callable[[], bool],
+        *,
+        stop: Callable[[], bool] | None = None,
+        wait: float | None = None,
     ) -> bool:
         """Bounded FIFO eviction; stops as soon as a removal makes no progress.
 
         Locked or permission-protected directories degrade the caller (quota
         handling) instead of retrying the same failing entry forever. All
-        removals happen under the session lock (review F1).
+        removals happen under the session lock, whose wait follows the turn
+        budget when one is known (review F1/G3/H3).
         """
         if not self._storage_ok():
             return condition()
-        with _session_guard(self._session_lock_path()) as locked:
+        with _session_guard(
+            self._session_lock_path(), wait_seconds=wait, stop=stop
+        ) as locked:
             if not locked:
                 return condition()
             while not condition():
@@ -1286,25 +1301,49 @@ class TurnChangeStore:
         if checkpoint_id and checkpoint_id not in entry.checkpoint_ids:
             entry.checkpoint_ids.append(checkpoint_id)
 
-    def _accept_snapshot(self, size: int) -> tuple[str, str]:
-        """Reserve ``size`` snapshot bytes, or report why they are not stored."""
+    def _accept_snapshot(
+        self,
+        size: int,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, str]:
+        """Reserve ``size`` snapshot bytes, or report why they are not stored.
+
+        回合预算/取消贯通到配额淘汰：预算用尽后不再启动淘汰旧回合，当前捕获
+        按停止原因降级（review H3）。
+        """
         if size > self.limits.max_file_bytes:
             return SIDE_UNCAPTURED, REASON_QUOTA
         if self._turn_bytes + size > self.limits.max_turn_bytes:
             return SIDE_UNCAPTURED, REASON_QUOTA
-        if not self._session_has_room(size):
+        stop = self._stop_predicate(deadline, cancelled)
+        if deadline is not None and stop is not None and stop():
+            return SIDE_UNCAPTURED, self._stop_reason(deadline, cancelled)
+        if not self._session_has_room(size, deadline=deadline, stop=stop):
+            if deadline is not None and stop is not None and stop():
+                return SIDE_UNCAPTURED, self._stop_reason(deadline, cancelled)
             return SIDE_UNCAPTURED, REASON_QUOTA
         self._turn_bytes += size
         return SIDE_CAPTURED, ""
 
-    def _session_has_room(self, extra: int) -> bool:
+    def _session_has_room(
+        self,
+        extra: int,
+        *,
+        deadline: float | None = None,
+        stop: Callable[[], bool] | None = None,
+    ) -> bool:
         """会话超量先 FIFO 淘汰最旧回合；仍超则由调用方内部降级（行为要求 6）."""
         limit = self.limits.max_session_bytes
         if self._session_bytes() + self._turn_bytes + extra <= limit:
             return True
+        wait = None if deadline is None else max(0.0, deadline - self._clock())
         self._evict_until(
             lambda: not self._turn_dirs()
-            or self._session_bytes() + self._turn_bytes + extra <= limit
+            or self._session_bytes() + self._turn_bytes + extra <= limit,
+            stop=stop,
+            wait=wait,
         )
         return self._session_bytes() + self._turn_bytes + extra <= limit
 
@@ -1324,10 +1363,18 @@ class TurnChangeStore:
         if entry.tracked is not None:
             return self._resolve_tracked(entry)
         # 仅候选：before 从未取得快照 → 未能确认区（带原因）
-        after_state, after_bytes, _ = self._read_after(entry)
+        after_state, after_bytes, _ = self._read_after(
+            entry, deadline=deadline, cancelled=cancelled
+        )
         return self._unknown_entry(entry, SIDE_UNCAPTURED, REASON_ERROR, after_state, after_bytes)
 
-    def _read_after(self, entry: _PathEntry) -> tuple[str, bytes | None, str]:
+    def _read_after(
+        self,
+        entry: _PathEntry,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, bytes | None, str]:
         if not self._anchor_ok():
             logger.warning(
                 "turn-change store: workspace identity changed for %s; skipping read",
@@ -1363,7 +1410,9 @@ class TurnChangeStore:
             logger.warning("turn-change store: %s is not a regular file", entry.path)
             return SIDE_UNCAPTURED, None, REASON_ERROR
         size = st.st_size
-        state, reason = self._accept_snapshot(size)
+        state, reason = self._accept_snapshot(
+            size, deadline=deadline, cancelled=cancelled
+        )
         if state != SIDE_CAPTURED:
             # 超限的 after 字节绝不落盘
             return SIDE_UNCAPTURED, None, reason
@@ -1384,7 +1433,9 @@ class TurnChangeStore:
             return SIDE_UNCAPTURED, None, REASON_QUOTA
         if len(data) != size:  # 读取期间被改写：按实际字节数重新结算
             self._turn_bytes -= size
-            state, reason = self._accept_snapshot(len(data))
+            state, reason = self._accept_snapshot(
+                len(data), deadline=deadline, cancelled=cancelled
+            )
             if state != SIDE_CAPTURED:
                 return SIDE_UNCAPTURED, None, reason
         return SIDE_CAPTURED, data, ""
@@ -1396,7 +1447,9 @@ class TurnChangeStore:
         cancelled: Callable[[], bool] | None,
     ) -> _ResolvedEntry | None:
         before_state = entry.before_state
-        after_state, after_bytes, after_reason = self._read_after(entry)
+        after_state, after_bytes, after_reason = self._read_after(
+            entry, deadline=deadline, cancelled=cancelled
+        )
         if before_state == SIDE_CAPTURED and after_state == SIDE_CAPTURED:
             if entry.before == after_bytes:
                 # 两侧字节相同（含"改了又改回"）→ unchanged；seal 契约排除该状态
@@ -1833,11 +1886,67 @@ def _remove_children(fd: int) -> None:
             os.unlink(entry, dir_fd=fd)
 
 
+def _fd_identity(fd: int) -> tuple[int, int] | None:
+    """Identity ``(dev, ino)`` of an already-open directory; ``None`` if unreadable."""
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _name_identity(parent_fd: int, name: str) -> tuple[int, int] | None:
+    """Identity of ``name`` under an open parent handle, without following links."""
+    try:
+        st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+@contextmanager
+def _remove_expectation_scope(
+    identity: tuple[int, int] | None, owner: dict[str, Any] | None
+) -> Iterator[None]:
+    """Bind the verified identity/owner a removal must still match (review H1).
+
+    Same pattern as the I/O anchors: the expectation travels in the context so
+    fault-injection wrappers around ``_remove_tree_at(parent_fd, name)`` keep
+    their signature while the real deletion still re-verifies the opened child.
+    """
+    token = _REMOVE_EXPECT.set((identity, owner))
+    try:
+        yield
+    finally:
+        _REMOVE_EXPECT.reset(token)
+
+
 def _remove_tree_at(parent_fd: int, name: str) -> None:
-    """Remove one directory tree relative to a verified parent handle (G1)."""
+    """Remove one directory tree relative to a verified parent handle (G1/H1).
+
+    The opened child is re-verified against the caller's expectation through the
+    same handle (identity and, when known, the owner marker), and the directory
+    entry is only removed while ``name`` still resolves to that same inode — a
+    directory moved into place between the checks is left untouched.
+    """
     fd = os.open(name, _dir_open_flags() | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
     try:
+        expected_identity, expected_owner = _REMOVE_EXPECT.get() or (None, None)
+        if expected_identity is not None and _fd_identity(fd) != expected_identity:
+            raise OSError(
+                f"{name!r} is not the previously verified directory; refusing removal"
+            )
+        if expected_owner is not None:
+            try:
+                current_owner = json.loads(_read_text_at(fd, OWNER_NAME))
+            except (OSError, ValueError, TypeError):
+                current_owner = None
+            if current_owner != expected_owner:
+                raise OSError(f"owner of {name!r} is not ours anymore; refusing removal")
         _remove_children(fd)
+        if _fd_identity(fd) != _name_identity(parent_fd, name):
+            # 目录项已被替换：绝不按名字删除换入的目录（review H1）
+            raise OSError(f"{name!r} was replaced while being removed; refusing removal")
     finally:
         os.close(fd)
     os.rmdir(name, dir_fd=parent_fd)
@@ -1948,11 +2057,29 @@ _LOCK_DIR_NAME = ".locks"
 # 目录句柄式 I/O（O_NOFOLLOW / dir_fd / flock）只在 POSIX 可用；
 # Windows 退化为带既有弱点的路径式实现，而不是直接不可用（G1）。
 _HANDLE_IO_OK = os.name != "nt"
-_GUARD_LOCAL = threading.RLock()
-_GUARD_DEPTH = threading.local()
+# 会话锁的重入只允许"同一执行所有者 + 同一把锁"的嵌套调用；并行 asyncio task、
+# 其他 session 的锁都必须各自获取文件锁（review H2）。子任务会继承创建时的
+# 上下文，因此还要比对执行所有者，不能只看"上下文里有没有标记"。
+_GUARD_HELD: ContextVar[tuple[str, object, str, int] | None] = ContextVar(
+    "turn_change_guard_held", default=None
+)
+
+
+def _guard_owner() -> tuple[str, object]:
+    """Execution owner of the current call: the asyncio task, else the OS thread."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    if task is not None:
+        return ("task", task)
+    return ("thread", threading.get_ident())
 _IO_ANCHORS: ContextVar[dict[Path, tuple[int, int]] | None] = ContextVar(
     "turn_change_io_anchors", default=None
 )
+_REMOVE_EXPECT: ContextVar[
+    tuple[tuple[int, int] | None, dict[str, Any] | None] | None
+] = ContextVar("turn_change_remove_expect", default=None)
 
 
 @contextmanager
@@ -2111,28 +2238,27 @@ def _session_guard(
     wait_seconds: float | None = None,
     stop: Callable[[], bool] | None = None,
 ) -> Iterator[bool]:
-    """Cross-instance exclusion for one session area (review F1/G3).
+    """Cross-instance exclusion for one session area (review F1/G3/H2).
 
-    同进程线程先在模块级 RLock 上串行，跨进程再取文件锁；同一线程的嵌套获取
-    直接复用外层锁。等待受 ``wait_seconds``（通常是回合剩余预算）和 ``stop()``
-    约束；取不到锁时产出 ``False``，调用方保守降级（拒绝写入/删除）。
+    真正的嵌套（同一执行所有者 + 同一把锁）直接复用外层锁；并行 asyncio task、
+    其他 session 的锁都必须各自获取文件锁。等待受 ``wait_seconds``（通常是回合
+    剩余预算）和 ``stop()`` 约束；取不到锁时产出 ``False``，调用方保守降级
+    （拒绝写入/删除）。
     """
-    depth = getattr(_GUARD_DEPTH, "depth", 0)
-    if depth:
-        _GUARD_DEPTH.depth = depth + 1
+    key = str(lock_path)
+    owner = _guard_owner()
+    held = _GUARD_HELD.get()
+    if held is not None and held[0] == owner[0] and held[1] == owner[1] and held[2] == key:
+        _GUARD_HELD.set((owner[0], owner[1], key, held[3] + 1))
         try:
             yield True
         finally:
-            _GUARD_DEPTH.depth -= 1
+            _GUARD_HELD.set(held)
         return
     total = 2.0 if wait_seconds is None else max(0.0, float(wait_seconds))
     deadline = time.monotonic() + total
-    if not _GUARD_LOCAL.acquire(timeout=max(0.0, deadline - time.monotonic())):
-        logger.warning("turn-change store: busy session area %s; refusing storage I/O", lock_path)
-        yield False
-        return
     handle: Any = None
-    _GUARD_DEPTH.depth = 1
+    token: Any = None
     try:
         try:
             if _ensure_dir_chain(lock_path.parent):
@@ -2147,12 +2273,15 @@ def _session_guard(
             logger.warning(
                 "turn-change store: session lock unavailable for %s; degrading", lock_path
             )
+        else:
+            # 只有文件锁真正到手才算"持有"，嵌套调用据此复用（review H2）
+            token = _GUARD_HELD.set((owner[0], owner[1], key, 1))
         yield handle is not None
     finally:
-        _GUARD_DEPTH.depth = 0
+        if token is not None:
+            _GUARD_HELD.reset(token)
         if handle is not None:
             _unlock_file_handle(handle)
-        _GUARD_LOCAL.release()
 
 
 def _cleanup_orphans_path_based(base: Path, probe: Callable[[int], bool]) -> list[str]:
@@ -2256,6 +2385,10 @@ def _remove_orphan_session(
             current = None
         if current != raw:
             logger.warning("turn-change store: skip %s (owner changed before removal)", display)
+            return False
+        if _fd_identity(child_fd) != _name_identity(root_fd, name):
+            # 目录项在核验后被替换：不按名字删除换入的目录（review H1）
+            logger.warning("turn-change store: skip %s (entry replaced before removal)", display)
             return False
         try:
             _remove_children(child_fd)

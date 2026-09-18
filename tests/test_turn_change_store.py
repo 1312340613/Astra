@@ -1526,6 +1526,166 @@ def test_lock_wait_respects_the_turn_budget(tmp_path: Path) -> None:
     assert elapsed < 0.15, f"lock wait must follow the turn budget; elapsed={elapsed:.3f}s"
 
 
+def _hold_session_lock(path: Path):
+    """Hold ``path`` from a separate process; release via ``_release_lock`` (POSIX)."""
+    import subprocess as _subprocess
+    import sys as _sys
+
+    script = (
+        "import fcntl, sys\n"
+        "f = open(sys.argv[1], 'a+b')\n"
+        "fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+        "print('locked', flush=True)\n"
+        "sys.stdin.readline()\n"
+    )
+    child = _subprocess.Popen(
+        [_sys.executable, "-c", script, str(path)],
+        stdin=_subprocess.PIPE,
+        stdout=_subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None
+    assert child.stdout.readline().strip() == "locked"
+    return child
+
+
+def _release_lock(child) -> None:
+    if child.poll() is None and child.stdin is not None:
+        child.stdin.write("release\n")
+        child.stdin.flush()
+    child.wait(timeout=2)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-handle semantics")
+def test_close_refuses_a_replaced_session_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1：owner 核验之后、删除之前被换入同名目录 → 不得删除换入者的目录."""
+    subject = make_store(tmp_path, "review")
+    replacement = tmp_path / "other-session"
+    replacement.mkdir()
+    (replacement / "owner.json").write_text(
+        json.dumps({"session_id": "other", "pid": os.getpid(), "token": "active-other-owner"}),
+        encoding="utf-8",
+    )
+    (replacement / "keep.txt").write_bytes(b"OTHER-OWNER-DATA\n")
+    held = tmp_path / "review-held"
+    original = store._remove_tree_at
+    swapped = False
+
+    def swap_then_remove(parent_fd, name, **kwargs):
+        nonlocal swapped
+        if name == subject.session_dir.name and not swapped:
+            subject.session_dir.rename(held)
+            replacement.rename(subject.session_dir)
+            swapped = True
+        return original(parent_fd, name, **kwargs)
+
+    monkeypatch.setattr(store, "_remove_tree_at", swap_then_remove)
+    subject.close()
+
+    assert swapped is True
+    assert held.is_dir() and (held / "owner.json").is_file()  # 原目录仍在
+    assert (subject.session_dir / "keep.txt").read_bytes() == b"OTHER-OWNER-DATA\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock probe")
+def test_concurrent_seals_keep_their_own_session_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H2：并发 task 不得复用彼此的重入标记；外部持锁时另一个 seal 必须降级."""
+    import asyncio
+
+    first = make_store(tmp_path, "A", limits=store.TurnChangeLimits(compute_budget_ms=1000))
+    second = make_store(tmp_path, "B", limits=store.TurnChangeLimits(compute_budget_ms=20))
+    first.begin_turn("a")
+    for index in range(5):
+        path = tmp_path / f"a-{index}.txt"
+        path.write_bytes(b"new\n")
+        first.note_absent(path)
+    second.begin_turn("b")
+    target = tmp_path / "b.txt"
+    target.write_bytes(b"new\n")
+    second.note_absent(target)
+
+    writes: list[str] = []
+    original = store._write_bytes
+    first_writing = asyncio.Event()
+
+    def observe_write(path, data, **kwargs):
+        if second.session_dir in path.parents:
+            writes.append(path.name)
+        if first.session_dir in path.parents:
+            first_writing.set()
+        original(path, data, **kwargs)
+
+    async def scenario():
+        async def seal_second() -> None:
+            await first_writing.wait()
+            await second.seal_async()
+
+        await asyncio.gather(first.seal_async(), seal_second())
+
+    holder = _hold_session_lock(second._session_lock_path())
+    try:
+        monkeypatch.setattr(store, "_write_bytes", observe_write)
+        asyncio.run(scenario())
+        assert holder.poll() is None  # 外部持有者始终在场
+    finally:
+        _release_lock(holder)
+
+    assert writes == []  # B 绝不能绕过自己的文件锁写入
+    assert not (second.session_dir / "turn-1" / "manifest.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock probe")
+def test_quota_eviction_respects_the_turn_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H3：after 捕获触发配额淘汰也要受回合预算约束；过期后不再启动删除."""
+    import asyncio
+
+    subject = make_store(
+        tmp_path,
+        "review",
+        clock=time.monotonic,
+        limits=store.TurnChangeLimits(max_session_bytes=10, compute_budget_ms=20),
+    )
+    target = tmp_path / "note.txt"
+    target.write_bytes(b"old\n")
+    subject.begin_turn("old")
+    subject.note_absent(target)
+    assert subject.seal() is not None
+    assert subject._session_bytes() == 4
+    subject.begin_turn("new")
+    subject.note_capture(target, b"old\n")
+    target.write_bytes(b"new\n")
+
+    removed: list[str] = []
+    original_remove = subject._remove_turn
+
+    def observe_remove(turn_dir: Path) -> bool:
+        removed.append(turn_dir.name)
+        return original_remove(turn_dir)
+
+    holder = _hold_session_lock(subject._session_lock_path())
+    try:
+        monkeypatch.setattr(subject, "_remove_turn", observe_remove)
+        start = time.monotonic()
+        manifest = asyncio.run(subject.seal_async())
+        elapsed = time.monotonic() - start
+        assert holder.poll() is None
+    finally:
+        _release_lock(holder)
+
+    assert manifest is not None
+    assert removed == []  # 预算内不启动淘汰旧回合（review H3）
+    assert elapsed < 0.15, f"quota eviction must follow the turn budget; elapsed={elapsed:.3f}s"
+    # after 捕获因预算降级为未捕获：条目进入 unknown 区（F5 语义）
+    assert [change.after_state for change in manifest.unknown] == [store.SIDE_UNCAPTURED]
+    assert manifest.files == []
+
+
 def test_bounded_read_caps_the_read_size(tmp_path: Path) -> None:
     """R6：读取有字节上限（limit+1），不整份读入."""
     target = tmp_path / "big.bin"
