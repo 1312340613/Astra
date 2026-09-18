@@ -161,8 +161,11 @@ def format_turn_list(
     )
     width = min(max(len(_display(entry)) for entry in entries), MAX_PATH_COLUMN)
     number_width = len(str(len(entries)))
+    # 总输出限额：标题与截断提示一并计入（review R4）；被截断条目编号保持不变，
+    # 仍可用 ``n|path`` 选择。
+    limit = min(len(entries), MAX_OUTPUT_LINES - 2)
     lines = [header]
-    for index, entry in enumerate(entries, start=1):
+    for index, entry in enumerate(entries[:limit], start=1):
         name = _display(entry)
         padding = " " * max(0, width - len(name))
         checkpoints = ", ".join(labels.get(cp, _short(cp)) for cp in entry.checkpoint_ids)
@@ -172,6 +175,11 @@ def format_turn_list(
         if index > files_count:
             row += f"（未能确认：{entry.reason or '未知原因'}）"
         lines.append(" " + row)
+    if limit < len(entries):
+        lines.append(
+            f"（{OUTPUT_TRUNCATION_MARK}：仅显示前 {limit} 条，"
+            f"其余 {len(entries) - limit} 条可用编号继续选择）"
+        )
     return "\n".join(lines)
 
 
@@ -248,24 +256,35 @@ def _diff_body(entry: FileChange, sides: LoadedSides) -> tuple[list[str], list[s
         marks.append("（两侧内容相同，无可展示的行级差异）")
         return [], marks
 
+    before_lines, before_capped = _bounded_visible_lines(before)
+    after_lines, after_capped = _bounded_visible_lines(after)
+    capped = before_capped or after_capped
+    rows_overflow = len(before_lines) > MAX_SCAN_LINES or len(after_lines) > MAX_SCAN_LINES
+
     scan_bounded = _within_scan_budget(before) and _within_scan_budget(after)
     if scan_bounded and before is not None and after is not None:
         line_end = _line_end_marks(before, after)
         if line_end:
             return [], [*marks, *line_end]
-        if _visible_lines(before) == _visible_lines(after):
+        if not capped and before_lines == after_lines:
             marks.append(_masked_difference_mark(before, after))
             return [], marks
 
     if entry.compare == COMPARE_COARSE:
-        lines = _block_lines(before, after)
+        if rows_overflow:
+            # 行数预检先于整块替换：只展示前 200 行预览（review R4）
+            lines = _block_lines(
+                before_lines[:MAX_PREVIEW_LINES], after_lines[:MAX_PREVIEW_LINES]
+            )
+            if not lines:
+                marks.append("（无可展示的内容）")
+            return lines, [*marks, COARSE_MARK, LONG_PREVIEW_MARK]
+        lines = _block_lines(before_lines, after_lines)
         if not lines:
             marks.append("（无可展示的内容）")
         return lines, [*marks, COARSE_MARK]
 
-    before_lines = _visible_lines(before)
-    after_lines = _visible_lines(after)
-    if len(before_lines) > MAX_SCAN_LINES or len(after_lines) > MAX_SCAN_LINES:
+    if rows_overflow:
         preview_before = before_lines[:MAX_PREVIEW_LINES]
         preview_after = after_lines[:MAX_PREVIEW_LINES]
         if before != after:
@@ -273,9 +292,9 @@ def _diff_body(entry: FileChange, sides: LoadedSides) -> tuple[list[str], list[s
         lines = _aligned_lines(preview_before, preview_after, [RANGE_MARK] if before != after else [])
         return lines, [*marks, LONG_PREVIEW_MARK]
 
-    if not scan_bounded:
-        # 扫描预算用尽：跳过修剪，整块替换（§3.4「整块替换=粗略展示」）
-        lines = _block_lines(before, after)
+    if capped:
+        # 字节预算用尽（行数未超）：跳过修剪，整块替换（§3.4「整块替换=粗略展示」）
+        lines = _block_lines(before_lines, after_lines)
         if not lines:
             marks.append("（无可展示的内容）")
         return lines, [*marks, COARSE_MARK]
@@ -319,9 +338,9 @@ def _aligned_lines(
     return lines
 
 
-def _block_lines(before: bytes | None, after: bytes | None) -> list[str]:
-    lines = [_removed(line) for line in _visible_lines(before)]
-    lines += [_added(line) for line in _visible_lines(after)]
+def _block_lines(before_lines: Sequence[str], after_lines: Sequence[str]) -> list[str]:
+    lines = [_removed(line) for line in before_lines]
+    lines += [_added(line) for line in after_lines]
     return lines
 
 
@@ -423,15 +442,27 @@ def _decode(data: bytes) -> str:
         return data.decode("utf-8", errors="replace")
 
 
-def _visible_lines(data: bytes | None) -> list[str]:
-    """Decoded lines; a trailing newline is not a line and ``\\r`` is folded in."""
+def _bounded_visible_lines(data: bytes | None) -> tuple[list[str], bool]:
+    """Budgeted decode/split for diff rendering (review R4).
+
+    解码最多 ``MAX_SCAN_BYTES`` 字节；切行最多保留 ``MAX_SCAN_LINES + 1`` 行
+    （多一行用于判定“行数超限”）。返回 ``(lines, capped)``；``capped`` 为真时
+    调用方只走预览/整块替换路径，不再做逐行精细判定。
+    """
     if not data:
-        return []
+        return [], False
+    capped = False
+    if len(data) > MAX_SCAN_BYTES:
+        data = data[:MAX_SCAN_BYTES]
+        capped = True
     text = _decode(data)
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    return [line[:-1] if line.endswith("\r") else line for line in lines]
+    if len(lines) > MAX_SCAN_LINES:
+        capped = True
+        lines = lines[: MAX_SCAN_LINES + 1]
+    return [line[:-1] if line.endswith("\r") else line for line in lines], capped
 
 
 def _decoding_replaced(data: bytes | None) -> bool:

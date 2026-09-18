@@ -9,6 +9,8 @@ are all reachable without a backend.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from agent.runtime import turn_changes_view as view
 from agent.runtime.turn_change_store import (
     COMPARE_COARSE,
@@ -194,6 +196,24 @@ def test_list_header_and_rows_follow_the_frozen_shape():
 
     assert lines[5].startswith(" 5. src/other.txt")
     assert "（未能确认：quota）" in lines[5]
+
+
+def test_list_caps_output_at_the_total_line_limit_with_many_entries():
+    """500 条清单按总输出限额截断并明确提示（review R4）."""
+    files = [change(f"file-{index}.txt") for index in range(500)]
+    text = view.format_turn_list(1, record(files=500), manifest(files))
+    lines = lines_of(text)
+
+    assert len(lines) <= view.MAX_OUTPUT_LINES
+    assert len(text) <= view.MAX_OUTPUT_CHARS
+    assert view.OUTPUT_TRUNCATION_MARK in text
+    assert "可用编号" in text
+    assert lines[0].startswith("回合 @1 · request")
+    assert "1. file-0.txt" in lines[1]
+    assert lines[-1].startswith("（输出截断")
+    # 显示行仍按原编号排列（截断不改编号）
+    last_row_number = lines[-2].lstrip().split(".", 1)[0].strip()
+    assert last_row_number.isdigit() and int(last_row_number) < 500
 
 
 def test_list_uses_minus_sign_and_dash_for_unavailable_counts():
@@ -391,6 +411,56 @@ def test_diff_total_output_is_capped_without_degrading_to_coarse():
     assert view.COARSE_MARK not in text
     assert len(lines_of(text)) <= view.MAX_OUTPUT_LINES
     assert len(text) <= view.MAX_OUTPUT_CHARS
+
+
+def test_diff_coarse_over_rows_uses_bounded_preview():
+    """coarse 分支也要走行数预检：预算内解码、前 200 行预览、标注超长（review R4）."""
+    before = b"x\n" * (512 * 1024)
+    after = b"y\n" * (512 * 1024)
+    entry = change("big.txt", added=512 * 1024, removed=512 * 1024, compare=COMPARE_COARSE)
+    decoded: list[int] = []
+    removed_count = [0]
+    original_decode = view._decode
+    original_removed = view._removed
+
+    def observed_decode(data):
+        decoded.append(len(data))
+        return original_decode(data)
+
+    def counted_removed(line):
+        removed_count[0] += 1
+        return original_removed(line)
+
+    with patch.object(view, "_decode", observed_decode), patch.object(
+        view, "_removed", counted_removed
+    ):
+        text = view.format_file_diff(1, record(), manifest(), entry, sides(before, after))
+
+    assert all(size <= view.MAX_SCAN_BYTES for size in decoded), decoded
+    assert removed_count[0] <= view.MAX_PREVIEW_LINES
+    assert view.LONG_PREVIEW_MARK in text
+    assert len(lines_of(text)) <= view.MAX_OUTPUT_LINES
+    assert len(text) <= view.MAX_OUTPUT_CHARS
+
+
+def test_diff_full_over_rows_uses_bounded_decode():
+    """full 分支同样在预算内解码/切行，超行数时进入超长预览（review R4）."""
+    before = b"line\n" * (512 * 1024)
+    after = b"line\n" * (511 * 1024) + b"tail\n"
+    entry = change("big.txt", added=1, removed=0, compare=COMPARE_FULL)
+    decoded: list[int] = []
+    original_decode = view._decode
+
+    def observed_decode(data):
+        decoded.append(len(data))
+        return original_decode(data)
+
+    with patch.object(view, "_decode", observed_decode):
+        text = view.format_file_diff(1, record(), manifest(), entry, sides(before, after))
+
+    assert all(size <= view.MAX_SCAN_BYTES for size in decoded), decoded
+    assert view.LONG_PREVIEW_MARK in text
+    assert len(lines_of(text)) <= view.MAX_OUTPUT_LINES
 
 
 def test_diff_identical_bytes_without_visible_change_is_not_a_claim():
