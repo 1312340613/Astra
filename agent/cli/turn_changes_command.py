@@ -10,6 +10,7 @@ wording instead of pretending there is nothing to show.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, Any, cast
 
 from agent.runtime.turn_changes_view import (
     INDEX_UNAVAILABLE,
@@ -20,6 +21,9 @@ from agent.runtime.turn_changes_view import (
     parse_changes_args,
     resolve_selector,
 )
+
+if TYPE_CHECKING:
+    from agent.runtime.turn_change_store import TurnChangeStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +73,13 @@ def execute_changes_command(agent, argument: str) -> tuple[str, str]:
     return format_file_diff(k, record, manifest, entries[match.entry_index], sides), ""
 
 
-def _store_for(agent):
+def _store_for(agent: Any) -> TurnChangeStore | None:
     """Read-only accessor; never creates or closes the store."""
     accessor = getattr(agent, "turn_change_store", None)
     if not callable(accessor):
         return None
     try:
-        return accessor()
+        return cast("TurnChangeStore | None", accessor())
     except Exception:
         logger.exception("turn-change store accessor failed")
         return None
