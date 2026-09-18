@@ -76,10 +76,17 @@ logger = logging.getLogger(__name__)
 # 落盘布局（§3.2 行为要求 5）
 MANIFEST_NAME = "manifest.json"
 OWNER_NAME = "owner.json"
+# 完成回合索引（M3 · review R1）：单个原子快照文件，窗口内 ≤ max_turns_retained 条记录
+INDEX_NAME = "turns.json"
+INDEX_VERSION = 1
+# 查询失败语义（review R1 冻结）：写失败未落定 / 索引本身不可读
+INDEX_REASON_UNSETTLED = "index-write-unsettled"
+INDEX_REASON_UNAVAILABLE = "index-unavailable"
 DEFAULT_ROOT_PARTS = (".astra", "turn-changes")
 
 _SAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _TRACKED_CONTENT_PREFIXES = ("file:", "symlink:")
+_TURN_DIR_RE = re.compile(r"turn-[0-9]+")
 _TRACKED_MISSING = "missing"
 _TRACKED_DEFENSIVE = "<clean>"
 _TRACKED_ERROR_PREFIX = "error:"
@@ -131,6 +138,39 @@ class LoadedSides:
     after: bytes | None
     before_state: str
     after_state: str   # captured / absent / uncaptured（读取失败=uncaptured）
+
+
+@dataclass(frozen=True)
+class CompletedTurn:
+    """One finished turn as recorded in the bounded session index (M3 · review R1).
+
+    ``empty`` 只用于"确定完成且净改动为空"的回合（此时 ``dir_name is None``，不落
+    manifest）；快照已被字节配额淘汰或不可读的回合保留记录但 ``available=False``，
+    与 ``empty`` 显式区分（"已淘汰" ≠ "没有改动"）。
+    """
+
+    turn_seq: int
+    request_id: str
+    created_at: float
+    dir_name: str | None
+    empty: bool
+    files: int
+    unknown: int
+    available: bool
+
+
+@dataclass(frozen=True)
+class TurnIndexRead:
+    """Result of :meth:`TurnChangeStore.completed_turns`, newest turn first.
+
+    ``ok=False`` 表示"回合索引暂不可用"（索引写失败未落定、读失败/损坏、目录身份
+    已变）：调用方必须区别于"没有完成回合"，也不得回退到更旧的回合充当 ``@1``
+    （review R1）。
+    """
+
+    ok: bool
+    records: list[CompletedTurn]
+    reason: str = ""
 
 
 @dataclass
@@ -218,6 +258,15 @@ class TurnChangeStore:
         self.seal_stopped_by_cancel = False
         # 收尾完成但取消已传播的清单，供调用方取回（review G2）
         self._stopped_manifest: TurnChangesManifest | None = None
+        # 完成回合索引（M3 · review R1）：进程内序号高水位只增不减；已登记序号保证
+        # 同一回合只登记一次；失败未落定的记录留在内存，随下一次成功写入一并带上。
+        self._seq_high_water = 0
+        self._registered_turns: set[int] = set()
+        self._index_records: list[dict[str, Any]] = []
+        self._index_loaded = False
+        self._index_poisoned = False
+        self._index_dirty = False
+        self._index_unsettled = False
         # 本实例最后写入的 owner 内容：删除会话区前复核仍是它（review H1）
         self._owner_payload: dict[str, Any] | None = None
         # 存储目录链身份：workspace → root → session dir（review F2）
@@ -319,9 +368,9 @@ class TurnChangeStore:
         state = self._begin_seal()
         if state is None:
             return None
-        active, request_id, deadline = state
+        active, request_id, deadline, turn_seq = state
         resolved = self._resolve_entries(active, deadline, cancelled)
-        return self._finish_seal(request_id, deadline, cancelled, resolved)
+        return self._finish_seal(request_id, turn_seq, deadline, cancelled, resolved)
 
     async def seal_async(
         self, *, cancelled: Callable[[], bool] | None = None
@@ -335,7 +384,7 @@ class TurnChangeStore:
         state = self._begin_seal()
         if state is None:
             return None
-        active, request_id, deadline = state
+        active, request_id, deadline, turn_seq = state
         effective = cancelled
         resolved: list[_ResolvedEntry] = []
         for entry in active.values():
@@ -350,7 +399,9 @@ class TurnChangeStore:
                 resolved.append(outcome)
         forced = effective is _ALWAYS_CANCELLED
         try:
-            manifest = await self._finish_seal_async(request_id, deadline, effective, resolved)
+            manifest = await self._finish_seal_async(
+                request_id, turn_seq, deadline, effective, resolved
+            )
         except asyncio.CancelledError:
             self.seal_stopped_by_cancel = True
             raise
@@ -362,8 +413,12 @@ class TurnChangeStore:
         self.seal_stopped_by_cancel = False
         return manifest
 
-    def _begin_seal(self) -> tuple[dict[str, _PathEntry], str, float] | None:
-        """Take the active turn out of the store and compute this seal's deadline."""
+    def _begin_seal(self) -> tuple[dict[str, _PathEntry], str, float, int] | None:
+        """Take the active turn out of the store, allocate its seq, compute the deadline.
+
+        序号在收尾开始时分配（``_next_seq``）：空回合同样占号，保证 ``@k`` 与稳定回合
+        标识一一对应；没有活动回合时不分配任何序号（review R1）。
+        """
         with self._lock:
             active = self._active
             if active is None:
@@ -372,7 +427,8 @@ class TurnChangeStore:
             self._active = None
             self._request_id = ""
             deadline = self._clock() + self.limits.compute_budget_ms / 1000.0
-        return active, request_id, deadline
+            turn_seq = self._next_seq()
+        return active, request_id, deadline, turn_seq
 
     def _resolve_entries(
         self,
@@ -404,26 +460,50 @@ class TurnChangeStore:
     def _finish_seal(
         self,
         request_id: str,
+        turn_seq: int,
         deadline: float,
         cancelled: Callable[[], bool] | None,
         resolved: list[_ResolvedEntry],
     ) -> TurnChangesManifest | None:
-        manifest = self._build_manifest(request_id, resolved)
+        manifest = self._build_manifest(request_id, resolved, turn_seq)
         if manifest is None:
+            # 空回合（无操作/改回原样）：不落 manifest、不发事件、不进模型请求，
+            # 但登记入索引并占号（review R1）
+            self._finish_empty_turn(request_id, turn_seq, deadline, cancelled)
             return None
+        self._register_completed_turn(
+            request_id=request_id,
+            turn_seq=turn_seq,
+            created_at=manifest.created_at,
+            dir_name=f"turn-{turn_seq}",
+            files=len(manifest.files),
+            unknown=len(manifest.unknown),
+            empty=False,
+        )
         self._persist(manifest, resolved, deadline=deadline, cancelled=cancelled)
         return manifest
 
     async def _finish_seal_async(
         self,
         request_id: str,
+        turn_seq: int,
         deadline: float,
         cancelled: Callable[[], bool] | None,
         resolved: list[_ResolvedEntry],
     ) -> TurnChangesManifest | None:
-        manifest = self._build_manifest(request_id, resolved)
+        manifest = self._build_manifest(request_id, resolved, turn_seq)
         if manifest is None:
+            self._finish_empty_turn(request_id, turn_seq, deadline, cancelled)
             return None
+        self._register_completed_turn(
+            request_id=request_id,
+            turn_seq=turn_seq,
+            created_at=manifest.created_at,
+            dir_name=f"turn-{turn_seq}",
+            files=len(manifest.files),
+            unknown=len(manifest.unknown),
+            empty=False,
+        )
         try:
             await self._persist_async(manifest, resolved, deadline=deadline, cancelled=cancelled)
         except asyncio.CancelledError:
@@ -433,7 +513,10 @@ class TurnChangeStore:
         return manifest
 
     def _build_manifest(
-        self, request_id: str, resolved: list[_ResolvedEntry]
+        self,
+        request_id: str,
+        resolved: list[_ResolvedEntry],
+        turn_seq: int | None = None,
     ) -> TurnChangesManifest | None:
         if not resolved:
             return None
@@ -451,7 +534,7 @@ class TurnChangeStore:
         return TurnChangesManifest(
             session_id=self.session_id,
             request_id=request_id,
-            turn_seq=self._next_seq(),
+            turn_seq=self._next_seq() if turn_seq is None else int(turn_seq),
             created_at=self._clock(),
             files=files,
             unknown=unknown,
@@ -467,29 +550,25 @@ class TurnChangeStore:
     # -- 读取（M2/M3 用；M1 供测试） --
 
     def manifest(self, turn_offset: int = 0) -> TurnChangesManifest | None:
+        """兼容口径（M1 测试用）：按 turn-N 目录的 offset 读取。
+
+        命令层不使用（review R1/R2）：offset 只数"落盘过的回合"，空回合不占 offset。
+        """
         with self._lock:
             turn_dir = self._turn_dir(turn_offset)
             if turn_dir is None:
                 return None
             payload = self._read_manifest_payload(turn_dir)
-            if payload is None:
-                return None
-            totals = payload.get("totals")
-            return TurnChangesManifest(
-                session_id=str(payload.get("session_id") or ""),
-                request_id=str(payload.get("request_id") or ""),
-                turn_seq=int(payload.get("turn_seq") or 0),
-                created_at=float(payload.get("created_at") or 0.0),
-                files=[_change_from_payload(item) for item in _payload_list(payload.get("files"))],
-                unknown=[_change_from_payload(item) for item in _payload_list(payload.get("unknown"))],
-                totals=(
-                    {str(key): int(value) for key, value in totals.items()}
-                    if isinstance(totals, dict)
-                    else {}
-                ),
-            )
+        if payload is None:
+            return None
+        return _manifest_from_payload(payload)
 
     def load_sides(self, turn_offset: int, path: str) -> LoadedSides:
+        """兼容口径（M1 测试用）：按 offset + display **首条匹配** 读取。
+
+        命令层不使用：同一 display 的多条目按名字选条会读错（M3 · review R2），
+        ``/changes`` 走 :meth:`load_sides_for` 的 ``(turn_seq, entry_index)`` 绑定。
+        """
         with self._lock:
             turn_dir = self._turn_dir(turn_offset)
             if turn_dir is None:
@@ -507,6 +586,275 @@ class TurnChangeStore:
                 return LoadedSides(None, None, SIDE_UNCAPTURED, SIDE_UNCAPTURED)
             before, before_state = self._load_side(turn_dir, record.get("before_file"), record.get("before_state"))
             after, after_state = self._load_side(turn_dir, record.get("after_file"), record.get("after_state"))
+            return LoadedSides(before, after, before_state, after_state)
+
+    # -- 完成回合索引（M3 · review R1） --
+
+    def _index_window_size(self) -> int:
+        return max(1, int(self.limits.max_turns_retained))
+
+    def _trim_index(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """窗口 = 序号最大的 N 条；出窗记录从这里消失（对应目录随后一并淘汰）."""
+        ordered = sorted(records, key=lambda item: _record_seq(item) or 0)
+        return ordered[-self._index_window_size():]
+
+    def _read_index_file(self) -> tuple[bool, str, list[dict[str, Any]]]:
+        """Fresh disk read of ``turns.json``; ``ok=False`` means "暂不可用".
+
+        不缓存结果：外部损坏/替换必须在下一次查询被看见（review R1）。目录身份被
+        替换（锚不符）时同样返回不可用，不采信换入者的记录。
+        """
+        if not self._storage_ok():
+            return False, INDEX_REASON_UNAVAILABLE, []
+        try:
+            raw = _read_all_bytes(
+                self.session_dir / INDEX_NAME, anchors=self._storage_anchors()
+            )
+        except FileNotFoundError:
+            return True, "", []
+        except OSError as exc:
+            logger.warning("turn-change store: unreadable completed-turn index (%s)", exc)
+            return False, INDEX_REASON_UNAVAILABLE, []
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            logger.warning("turn-change store: corrupt completed-turn index (%s)", exc)
+            return False, INDEX_REASON_UNAVAILABLE, []
+        if not isinstance(payload, dict) or payload.get("version") != INDEX_VERSION:
+            logger.warning("turn-change store: unsupported completed-turn index payload")
+            return False, INDEX_REASON_UNAVAILABLE, []
+        records = payload.get("records")
+        if not isinstance(records, list) or not all(_valid_index_record(item) for item in records):
+            logger.warning("turn-change store: malformed completed-turn index records")
+            return False, INDEX_REASON_UNAVAILABLE, []
+        return True, "", [dict(item) for item in records]
+
+    def _index_records_for_read(self) -> tuple[bool, str, list[dict[str, Any]]]:
+        """Records visible to queries: 未落定的写优先报"暂不可用"（review R1）."""
+        if self._index_dirty or self._index_unsettled:
+            return False, INDEX_REASON_UNSETTLED, []
+        return self._read_index_file()
+
+    def _next_index_seq(self) -> int | None:
+        """Highest seq the on-disk index knows about; ``None`` when unreadable."""
+        ok, _reason, records = self._read_index_file()
+        if not ok:
+            return None
+        seqs = [_record_seq(item) for item in records]
+        return max([seq for seq in seqs if seq is not None], default=None)
+
+    def _flush_index_locked(self) -> bool:
+        """Atomic reorganisation of "旧记录 + 新记录取末 N 条" (review R1).
+
+        复用 ``_write_json_atomic``（temp + ``os.replace``，经锚复核的父句柄）。写失败
+        或磁盘索引不可读时只置"未落定"标记：查询报暂不可用、不写坏数据、也不丢内存
+        里的记录（下一次成功写入把它们一并带上）。
+        """
+        ok, _reason, disk_records = self._read_index_file()
+        if not ok:
+            # 磁盘索引已损坏/不可读：不覆盖它，也不假装写成功（review R1）
+            self._index_unsettled = True
+            return False
+        merged: dict[int, dict[str, Any]] = {}
+        for record in [*self._index_records, *disk_records]:
+            seq = _record_seq(record)
+            if seq is not None:
+                merged[seq] = dict(record)
+        window = self._trim_index(list(merged.values()))
+        try:
+            _write_json_atomic(
+                self.session_dir / INDEX_NAME,
+                {"version": INDEX_VERSION, "records": window},
+            )
+        except Exception as exc:  # noqa: BLE001 - ledger never breaks the turn
+            logger.warning(
+                "turn-change store: cannot write completed-turn index (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+            self._index_unsettled = True
+            return False
+        self._index_records = window
+        self._index_dirty = False
+        self._index_unsettled = False
+        return True
+
+    def _index_persist(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        """Index-only persist for turns without a manifest (空回合) (review R1)."""
+        if not self._ensure_session_dir():
+            self._index_unsettled = True
+            return
+        wait = None if deadline is None else max(0.0, deadline - self._clock())
+        stop = self._stop_predicate(deadline, cancelled)
+        with _session_guard(self._session_lock_path(), wait_seconds=wait, stop=stop) as locked:
+            if not locked:
+                logger.warning(
+                    "turn-change store: session lock unavailable; completed-turn index stays unsettled"
+                )
+                self._index_unsettled = True
+                return
+            with _io_anchor_scope(self._storage_anchors()):
+                self._flush_index_locked()
+
+    def _register_completed_turn(
+        self,
+        *,
+        request_id: str,
+        turn_seq: int,
+        created_at: float,
+        dir_name: str | None,
+        files: int,
+        unknown: int,
+        empty: bool,
+    ) -> bool:
+        """Idempotent registration: 同一回合（同一 turn_seq）只登记一次（review R1）.
+
+        同步 ``seal``、``seal_async`` 与兜底路径共用这一个入口；重复收尾不产生第二条
+        记录。序号在登记时抬高高水位，索引失败后也不回退、不复用。
+        """
+        with self._lock:
+            if turn_seq in self._registered_turns:
+                return False
+            self._registered_turns.add(turn_seq)
+            self._seq_high_water = max(self._seq_high_water, int(turn_seq))
+            self._index_records = self._trim_index(
+                [
+                    *self._index_records,
+                    {
+                        "turn_seq": int(turn_seq),
+                        "request_id": str(request_id),
+                        "created_at": float(created_at),
+                        "dir": dir_name,
+                        "empty": bool(empty),
+                        "files": int(files),
+                        "unknown": int(unknown),
+                    },
+                ]
+            )
+            self._index_dirty = True
+        return True
+
+    def _finish_empty_turn(
+        self,
+        request_id: str,
+        turn_seq: int,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        """空回合（含"改回原样"）登记入索引并占号；不发事件、不落 manifest（R1）."""
+        self._register_completed_turn(
+            request_id=request_id,
+            turn_seq=turn_seq,
+            created_at=self._clock(),
+            dir_name=None,
+            files=0,
+            unknown=0,
+            empty=True,
+        )
+        self._index_persist(deadline=deadline, cancelled=cancelled)
+        stop = self._stop_predicate(deadline, cancelled)
+        if stop is None or not stop():
+            self._enforce_retention(stop=stop)
+
+    def completed_turns(self) -> TurnIndexRead:
+        """完成回合索引（新→旧）；``ok=False`` = 回合索引暂不可用（review R1）.
+
+        查询只读：不修复、不写回、不成为模型回合。区分三种状态 —— 空回合
+        （``empty``）、快照被淘汰/不可读（``available=False``）、索引不可用（``ok``）。
+        """
+        with self._lock:
+            ok, reason, records = self._index_records_for_read()
+            if not ok:
+                return TurnIndexRead(False, [], reason)
+            dir_names = {path.name for _seq, path in self._turn_dirs()}
+            completed = [
+                self._completed_from_record(record, dir_names)
+                for record in sorted(records, key=lambda item: _record_seq(item) or 0)
+            ]
+        completed.reverse()
+        return TurnIndexRead(True, completed, "")
+
+    def _completed_from_record(
+        self, record: dict[str, Any], dir_names: set[str]
+    ) -> CompletedTurn:
+        seq = int(_record_seq(record) or 0)
+        raw_dir = record.get("dir")
+        dir_name = str(raw_dir) if isinstance(raw_dir, str) and raw_dir else None
+        empty = bool(record.get("empty")) or dir_name is None
+        return CompletedTurn(
+            turn_seq=seq,
+            request_id=str(record.get("request_id") or ""),
+            created_at=float(record.get("created_at") or 0.0),
+            dir_name=dir_name,
+            empty=empty,
+            files=max(0, _optional_int(record.get("files")) or 0),
+            unknown=max(0, _optional_int(record.get("unknown")) or 0),
+            # 目录已被字节配额淘汰/不可读 = available False，与 empty 显式区分
+            available=True if empty else dir_name in dir_names,
+        )
+
+    def _record_dir(self, turn_seq: int) -> str | None:
+        """Directory name for ``turn_seq`` per the index; ``None`` = 无可用快照."""
+        ok, _reason, records = self._index_records_for_read()
+        if not ok:
+            return None
+        for record in records:
+            if _record_seq(record) == int(turn_seq):
+                raw_dir = record.get("dir")
+                if isinstance(raw_dir, str) and raw_dir and not record.get("empty"):
+                    return raw_dir
+                return None
+        return None
+
+    def manifest_for(self, turn_seq: int) -> TurnChangesManifest | None:
+        """Manifest addressed by stable ``turn_seq``（索引不可用/空回合 → None）."""
+        with self._lock:
+            dir_name = self._record_dir(turn_seq)
+            if dir_name is None:
+                return None
+            payload = self._read_manifest_payload(self.session_dir / dir_name)
+            if payload is None:
+                return None
+        return _manifest_from_payload(payload)
+
+    def load_sides_for(self, turn_seq: int, entry_index: int) -> LoadedSides:
+        """Read one entry by its identity ``(turn_seq, entry_index)`` (review R2).
+
+        ``entry_index`` 是该回合条目**合并序**（files 在前、unknown 在后，与展示编号
+        一致：展示编号 = ``entry_index + 1``）；``display`` 不参与选条。两侧都经
+        ``_load_side``（handle-bound、锚/身份复核）读取持久化快照，不读实时目标文件。
+        """
+        missing = LoadedSides(None, None, SIDE_UNCAPTURED, SIDE_UNCAPTURED)
+        if entry_index < 0:
+            return missing
+        with self._lock:
+            dir_name = self._record_dir(turn_seq)
+            if dir_name is None:
+                return missing
+            turn_dir = self.session_dir / dir_name
+            payload = self._read_manifest_payload(turn_dir)
+            if payload is None:
+                return missing
+            combined = [
+                *_payload_list(payload.get("files")),
+                *_payload_list(payload.get("unknown")),
+            ]
+            if entry_index >= len(combined):
+                return missing
+            record = combined[entry_index]
+            if not isinstance(record, dict):
+                return missing
+            before, before_state = self._load_side(
+                turn_dir, record.get("before_file"), record.get("before_state")
+            )
+            after, after_state = self._load_side(
+                turn_dir, record.get("after_file"), record.get("after_state")
+            )
             return LoadedSides(before, after, before_state, after_state)
 
     # -- 生命周期 --
@@ -924,8 +1272,25 @@ class TurnChangeStore:
         return turns[len(turns) - 1 - turn_offset][1]
 
     def _next_seq(self) -> int:
-        turns = self._turn_dirs()
-        return turns[-1][0] + 1 if turns else 1
+        """Allocate the next sequence without ever re-using one (M3 · review R1).
+
+        ``max(索引内 seq, turn-N 目录, 进程内高水位) + 1``：空回合同样占号，索引
+        失败后也不回退、不复用已分配序号（高水位只增不减）。
+        """
+        highest = self._seq_high_water
+        for seq, _path in self._turn_dirs():
+            if seq > highest:
+                highest = seq
+        for record in self._index_records:
+            seq = _record_seq(record)
+            if seq is not None and seq > highest:
+                highest = seq
+        if not self._index_records and not self._index_dirty:
+            disk = self._next_index_seq()
+            if disk is not None and disk > highest:
+                highest = disk
+        self._seq_high_water = max(self._seq_high_water, highest + 1)
+        return self._seq_high_water
 
     def _session_bytes(self) -> int:
         total = 0
@@ -1012,7 +1377,13 @@ class TurnChangeStore:
             return condition()
 
     def _enforce_retention(self, *, stop: Callable[[], bool] | None = None) -> None:
-        """FIFO: 只保留最近 max_turns_retained 个回合；会话超量先淘汰最旧回合."""
+        """FIFO: 只保留最近 max_turns_retained 个回合；会话超量先淘汰最旧回合.
+
+        目录保留数量随索引窗口变化是本批的明示增量（review R1）：出窗记录（序号
+        小于窗口内最小序号）对应的目录一并淘汰；窗口内但快照已淘汰/不可读的回合
+        留在索引里 ``available=False``。索引不可用（读失败/写未落定）时不按窗口
+        淘汰，避免误删刚登记的回合目录。
+        """
         keep = max(1, int(self.limits.max_turns_retained))
         self._evict_until(lambda: len(self._turn_dirs()) <= keep, stop=stop)
         self._evict_until(
@@ -1020,6 +1391,31 @@ class TurnChangeStore:
             or self._session_bytes() <= self.limits.max_session_bytes,
             stop=stop,
         )
+        self._evict_until(
+            lambda: not self._index_bound_turn_dirs(stop=stop), stop=stop
+        )
+
+    def _index_bound_turn_dirs(self, *, stop: Callable[[], bool] | None = None) -> list[Path]:
+        """Directory names strictly older than the index window; ``[]`` when unknown.
+
+        保守口径：索引不可用、窗口为空、或索引里没有"比某目录更旧"的记录时不产出
+        候选（返回 ``[]``），绝不按不确定信息删目录。
+        """
+        if self._index_dirty or self._index_unsettled:
+            return []
+        ok, _reason, records = self._read_index_file()
+        if not ok:
+            return []
+        seqs = [seq for seq in (_record_seq(record) for record in records) if seq is not None]
+        if not seqs:
+            return []
+        oldest_retained = min(seqs)
+        stale = [
+            turn_dir for seq, turn_dir in self._turn_dirs() if seq < oldest_retained
+        ]
+        if stop is not None and stop():
+            return []
+        return stale
 
     def _read_manifest_payload(self, turn_dir: Path) -> dict[str, Any] | None:
         try:
@@ -1165,6 +1561,10 @@ class TurnChangeStore:
                 "totals": dict(manifest.totals),
             },
         )
+        # 完成回合索引与本次快照在同一会话锁内落定（review R1）：登记已在收尾时入内存，
+        # 这里按"旧记录 + 新记录取末 N 条"重组并原子写；写失败只让查询"暂不可用"，
+        # 不改变本回合的成功/取消结果，也不复用已分配序号。
+        self._flush_index_locked()
         if not stopped():
             self._enforce_retention(stop=stop)
 
@@ -1998,6 +2398,49 @@ def _open_deepest_ancestor(path: Path) -> tuple[int, list[str]]:
 
 def _payload_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _record_seq(record: Any) -> int | None:
+    """``turn_seq`` of one index record; ``None`` when it is unusable (R1)."""
+    if not isinstance(record, dict):
+        return None
+    return _optional_int(record.get("turn_seq"))
+
+
+def _valid_index_record(record: Any) -> bool:
+    """A record is trusted only when its shape is exactly what the store writes."""
+    if _record_seq(record) is None:
+        return False
+    if not isinstance(record.get("empty"), bool):
+        return False
+    if not isinstance(record.get("request_id"), str):
+        return False
+    dir_name = record.get("dir")
+    if dir_name is not None:
+        if not isinstance(dir_name, str) or not _TURN_DIR_RE.fullmatch(dir_name):
+            return False
+    created_at = record.get("created_at")
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        return False
+    return all(_optional_int(record.get(field)) is not None for field in ("files", "unknown"))
+
+
+def _manifest_from_payload(payload: dict[str, Any]) -> TurnChangesManifest:
+    """Rebuild a manifest from its persisted payload (single read path)."""
+    totals = payload.get("totals")
+    return TurnChangesManifest(
+        session_id=str(payload.get("session_id") or ""),
+        request_id=str(payload.get("request_id") or ""),
+        turn_seq=int(payload.get("turn_seq") or 0),
+        created_at=float(payload.get("created_at") or 0.0),
+        files=[_change_from_payload(item) for item in _payload_list(payload.get("files"))],
+        unknown=[_change_from_payload(item) for item in _payload_list(payload.get("unknown"))],
+        totals=(
+            {str(key): int(value) for key, value in totals.items()}
+            if isinstance(totals, dict)
+            else {}
+        ),
+    )
 
 
 def _optional_int(value: Any) -> int | None:

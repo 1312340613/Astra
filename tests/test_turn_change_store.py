@@ -656,7 +656,7 @@ def test_turn_directory_layout_and_owner_marker(tmp_path: Path) -> None:
     assert (turn / "before.0.bin").read_bytes() == b"old\n"
     assert (turn / "after.0.bin").read_bytes() == b"new\n"
     # owner.json 位于会话目录（且先于任何快照内容创建）
-    assert sorted(path.name for path in area.iterdir()) == ["owner.json", "turn-1"]
+    assert sorted(path.name for path in area.iterdir()) == ["owner.json", "turn-1", "turns.json"]
     owner = json.loads((area / "owner.json").read_text(encoding="utf-8"))
     assert owner["session_id"] == "sess-1"
     assert owner["pid"] == os.getpid()
@@ -1932,7 +1932,11 @@ def test_second_instance_refuses_an_active_owner(tmp_path: Path) -> None:
     assert second.seal() is not None  # 内存清单仍返回
 
     assert (session / "owner.json").read_text(encoding="utf-8") == owner_text  # 未改 owner
-    assert sorted(path.name for path in session.iterdir()) == ["owner.json", "turn-1"]
+    assert sorted(path.name for path in session.iterdir()) == [
+        "owner.json",
+        "turn-1",
+        "turns.json",
+    ]
 
     second.close()
     assert session.exists()  # 非本实例所有：不删除
@@ -2223,3 +2227,318 @@ def test_same_display_name_keeps_distinct_absolute_identities(tmp_path: Path) ->
     assert manifest is not None
     assert len(manifest.files) == 2
     assert sorted(change.display for change in manifest.files) == ["a.txt", "a.txt"]
+
+
+# ---------------------------------------------------------------------------
+# completed-turn index (M3 · review R1) — the addressable "/changes" history
+# ---------------------------------------------------------------------------
+
+def index_payload(tmp_path: Path, session_id: str = "sess-1") -> dict:
+    path = session_dir(tmp_path, session_id) / store.INDEX_NAME
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def completed_seqs(read: store.TurnIndexRead) -> list[int]:
+    return [turn.turn_seq for turn in read.records]
+
+
+def test_index_absent_is_an_empty_but_available_history(tmp_path: Path) -> None:
+    subject = make_store(tmp_path)
+
+    read = subject.completed_turns()
+
+    assert (read.ok, read.records, read.reason) == (True, [], "")
+
+
+def test_empty_turn_is_indexed_and_consumes_a_sequence(tmp_path: Path) -> None:
+    """空回合不落 manifest，但仍占号并留下 dir=null 的记录."""
+    subject = make_store(tmp_path)
+
+    subject.begin_turn("req-1")
+
+    assert subject.seal() is None
+    read = subject.completed_turns()
+    assert read.ok is True
+    assert len(read.records) == 1
+    (turn,) = read.records
+    assert (turn.turn_seq, turn.empty, turn.dir_name) == (1, True, None)
+    assert (turn.files, turn.unknown, turn.available) == (0, 0, True)
+    assert turn.request_id == "req-1"
+    payload = index_payload(tmp_path)
+    assert payload["version"] == store.INDEX_VERSION
+    assert [record["turn_seq"] for record in payload["records"]] == [1]
+    assert payload["records"][0]["empty"] is True
+    assert payload["records"][0]["dir"] is None
+    assert not (session_dir(tmp_path) / "turn-1").exists()  # 空回合不发事件、不落盘
+
+
+def test_reverted_turn_is_indexed_empty_and_older_changes_stay_addressable(
+    tmp_path: Path,
+) -> None:
+    """有改动 → 无操作 → 改回原样：@1/@2 空态可辨、@3 仍是原改动."""
+    subject = make_store(tmp_path)
+    (tmp_path / "a.txt").write_bytes(b"new\n")
+    subject.begin_turn("req-1")
+    subject.note_capture("a.txt", b"old\n")
+    original = subject.seal()
+    assert original is not None
+    assert original.turn_seq == 1
+
+    subject.begin_turn("req-2")
+    assert subject.seal() is None  # 无操作回合
+
+    (tmp_path / "a.txt").write_bytes(b"new\n")  # 改回原样：before == 盘上内容
+    subject.begin_turn("req-3")
+    subject.note_capture("a.txt", b"new\n")
+    assert subject.seal() is None
+
+    read = subject.completed_turns()
+
+    assert read.ok is True
+    assert completed_seqs(read) == [3, 2, 1]
+    newest, middle, oldest = read.records
+    assert (newest.empty, newest.dir_name) == (True, None)
+    assert (middle.empty, middle.dir_name) == (True, None)
+    assert (oldest.empty, oldest.files, oldest.unknown) == (False, 1, 0)
+    assert oldest.available is True
+    assert subject.manifest_for(3) is None
+    assert subject.manifest_for(2) is None
+    assert subject.manifest_for(1) == original
+    assert subject.manifest_for(4) is None
+
+
+def test_index_stays_bounded_and_sequences_never_go_backwards(tmp_path: Path) -> None:
+    """混合空/非空回合：磁盘索引 ≤N 条、seq 单调、出窗记录目录一并淘汰."""
+    limits = store.TurnChangeLimits(max_turns_retained=3)
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    seqs: list[int] = []
+
+    for index in range(7):
+        subject.begin_turn(f"req-{index}")
+        if index % 2 == 0:
+            (tmp_path / "a.txt").write_bytes(f"after-{index}\n".encode())
+            subject.note_capture("a.txt", f"before-{index}\n".encode())
+            manifest = subject.seal()
+            assert manifest is not None
+            seqs.append(manifest.turn_seq)
+        else:
+            assert subject.seal() is None
+
+    payload = index_payload(tmp_path)
+    assert len(payload["records"]) <= 3
+    assert [record["turn_seq"] for record in payload["records"]] == [5, 6, 7]
+    assert seqs == [1, 3, 5, 7]
+    read = subject.completed_turns()
+    assert completed_seqs(read) == [7, 6, 5]
+    assert (read.records[0].empty, read.records[1].empty, read.records[2].empty) == (
+        False,
+        True,
+        False,
+    )
+    retained = sorted(
+        path.name for path in session_dir(tmp_path).iterdir() if path.name.startswith("turn-")
+    )
+    assert retained == ["turn-5", "turn-7"]  # 出窗记录（含空回合挤掉的）目录一并淘汰
+
+
+def test_seal_paths_register_each_turn_exactly_once(tmp_path: Path) -> None:
+    import asyncio
+
+    subject = make_store(tmp_path)
+    seal_modified_turn(subject, tmp_path, request_id="req-1")
+
+    records = index_payload(tmp_path)["records"]
+    assert [record["turn_seq"] for record in records] == [1]  # 同步路径只登记一次
+
+    subject._register_completed_turn(
+        request_id="duplicate",
+        turn_seq=1,
+        created_at=7.0,
+        dir_name=None,
+        files=99,
+        unknown=99,
+        empty=True,
+    )
+
+    assert index_payload(tmp_path)["records"] == records  # 兜底重复登记被幂等拦住
+
+    subject.begin_turn("req-2")
+    assert asyncio.run(subject.seal_async()) is None  # 空回合走异步收尾
+    records = index_payload(tmp_path)["records"]
+    assert [record["turn_seq"] for record in records] == [1, 2]
+    assert (records[1]["empty"], records[1]["dir"]) == (True, None)
+
+
+def test_index_write_failure_is_unavailable_and_carried_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写失败未落定 → 查询"暂不可用"（不是空态、不是上一轮），不复用序号."""
+    subject = make_store(tmp_path)
+    seal_modified_turn(subject, tmp_path, request_id="req-1")
+
+    original = store._write_json_atomic
+    failures = {"left": 1}
+
+    def flaky(path, payload, **kwargs):
+        if Path(path).name == store.INDEX_NAME and failures["left"] > 0:
+            failures["left"] -= 1
+            raise OSError("simulated index write failure")
+        return original(path, payload, **kwargs)
+
+    monkeypatch.setattr(store, "_write_json_atomic", flaky)
+    (tmp_path / "a.txt").write_bytes(b"second\n")
+    subject.begin_turn("req-2")
+    subject.note_capture("a.txt", b"first\n")
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert manifest.turn_seq == 2  # 原回合的成功结果不受索引失败影响
+    read = subject.completed_turns()
+    assert read.ok is False
+    assert read.records == []
+    assert read.reason
+    assert subject.manifest_for(1) is None  # 不得把上一轮冒充 @1
+    assert subject.manifest_for(2) is None
+
+    (tmp_path / "a.txt").write_bytes(b"third\n")
+    subject.begin_turn("req-3")
+    subject.note_capture("a.txt", b"second\n")
+    third = subject.seal()
+
+    assert third is not None
+    assert third.turn_seq == 3  # 索引失败后不得复用已分配序号
+    read = subject.completed_turns()
+    assert read.ok is True
+    assert completed_seqs(read) == [3, 2, 1]  # 失败记录随下一次成功写入一并落定
+    assert subject.manifest_for(2) == manifest
+
+
+def test_corrupt_index_is_unavailable_and_never_clobbered(tmp_path: Path) -> None:
+    """读取损坏 → 不误报"无历史"，也不做破坏性重写."""
+    subject = make_store(tmp_path)
+    seal_modified_turn(subject, tmp_path, request_id="req-1")
+    index_path = session_dir(tmp_path) / store.INDEX_NAME
+    index_path.write_text("{not json", encoding="utf-8")
+
+    read = subject.completed_turns()
+
+    assert read.ok is False
+    assert read.records == []
+    assert read.reason
+
+    (tmp_path / "a.txt").write_bytes(b"newer\n")
+    subject.begin_turn("req-2")
+    subject.note_capture("a.txt", b"older\n")
+    assert subject.seal() is not None
+
+    assert index_path.read_text(encoding="utf-8") == "{not json"
+    assert subject.completed_turns().ok is False
+    assert subject.manifest_for(1) is None
+
+
+def test_byte_quota_eviction_keeps_the_record_but_marks_it_unavailable(
+    tmp_path: Path,
+) -> None:
+    """目录被配额淘汰 ≠ 空回合：窗口内记录保留、available=false."""
+    limits = store.TurnChangeLimits(
+        max_file_bytes=1024,
+        max_turn_bytes=4096,
+        max_session_bytes=160,
+        max_turns_retained=10,
+    )
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    seal_modified_turn(subject, tmp_path, before=b"A" * 32, after=b"B" * 32, request_id="req-1")
+    seal_modified_turn(subject, tmp_path, before=b"A" * 32, after=b"B" * 32, request_id="req-2")
+
+    (tmp_path / "a.txt").write_bytes(b"C" * 32)
+    subject.begin_turn("req-3")
+    subject.note_capture("a.txt", b"D" * 64)  # 会话预算不足 → 淘汰最旧回合目录
+    assert subject.seal() is not None
+
+    read = subject.completed_turns()
+
+    assert read.ok is True
+    assert completed_seqs(read) == [3, 2, 1]
+    oldest = read.records[-1]
+    assert oldest.empty is False  # 不是"确定完成且净改动为空"
+    assert oldest.available is False  # 快照已淘汰：与 empty 显式区分
+    assert (oldest.files, oldest.unknown) == (1, 0)
+    assert read.records[0].available is True
+    assert subject.manifest_for(1) is None
+
+
+def test_cancelled_seal_registers_without_evicting_beyond_the_stop_point(
+    tmp_path: Path,
+) -> None:
+    """取消/短期预算：登记照做，淘汰按既有停止语义停下."""
+    limits = store.TurnChangeLimits(compute_budget_ms=60_000, max_turns_retained=1)
+    subject = make_store(tmp_path, "sess-1", limits=limits)
+    for index in range(2):
+        seal_modified_turn(subject, tmp_path, request_id=f"req-{index}")
+    assert len(subject._turn_dirs()) == 1
+
+    (tmp_path / "a.txt").write_bytes(b"cancelled\n")
+    subject.begin_turn("req-cancelled")
+    subject.note_capture("a.txt", b"before-cancel\n")
+
+    assert subject.seal(cancelled=lambda: True) is not None
+
+    assert len(subject._turn_dirs()) == 2  # 取消后不再继续淘汰旧目录
+    read = subject.completed_turns()
+    assert read.ok is True
+    assert completed_seqs(read) == [3]
+
+
+def test_queries_never_write_back_to_the_index(tmp_path: Path) -> None:
+    subject = make_store(tmp_path)
+    seal_modified_turn(subject, tmp_path, request_id="req-1")
+    index_path = session_dir(tmp_path) / store.INDEX_NAME
+    before = index_path.read_bytes()
+
+    subject.completed_turns()
+    subject.manifest_for(1)
+    assert subject.completed_turns().ok is True
+
+    assert index_path.read_bytes() == before
+    assert sorted(path.name for path in session_dir(tmp_path).iterdir()) == [
+        "owner.json",
+        "turn-1",
+        "turns.json",
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-handle semantics")
+def test_index_read_refuses_a_replaced_session_directory(tmp_path: Path) -> None:
+    """目录身份被替换 → 索引读取降级为不可用，不采信换入者（锚/所有权守卫）."""
+    subject = make_store(tmp_path, "review")
+    seal_modified_turn(subject, tmp_path, request_id="req-1")
+
+    held = tmp_path / "review-held"
+    subject.session_dir.rename(held)
+    impostor = subject.session_dir
+    (impostor / "turn-1").mkdir(parents=True)
+    (impostor / store.INDEX_NAME).write_text(
+        json.dumps(
+            {
+                "version": store.INDEX_VERSION,
+                "records": [
+                    {
+                        "turn_seq": 9,
+                        "request_id": "impostor",
+                        "created_at": 0.0,
+                        "dir": "turn-1",
+                        "empty": False,
+                        "files": 1,
+                        "unknown": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    read = subject.completed_turns()
+
+    assert read.ok is False
+    assert read.records == []
+    assert subject.manifest_for(9) is None
