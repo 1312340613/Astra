@@ -682,7 +682,11 @@ def test_live_02_path_swap_cannot_read_instructions_or_write_profile_outside(
     assert result["status"] == "passed"
     assert result["marker_observed"] is True
     assert sentinel not in captured
-    assert sorted(path.name for path in outside.iterdir()) == ["AGENTS.md"]
+    # ``.astra`` is the agent's own runtime directory (file checkpoints and
+    # turn-change snapshots written by the harness, not by the model).
+    assert sorted(
+        path.name for path in outside.iterdir() if path.name != ".astra"
+    ) == ["AGENTS.md"]
 
 
 @requires_posix_audit_files
