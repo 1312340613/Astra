@@ -7,6 +7,7 @@ import type { AppshotManifestReader } from "./appshot-input.js";
 import type { GenerationProgress, GenerationStats, InputSubmission, LocalModeDefinition } from "./types.js";
 import { generationProgressLabel } from "./generation-progress.js";
 import { COMPACTION_LABEL, compactionNotice } from "./context-compaction.js";
+import { formatTurnChangesSummary, TurnChangesRenderGate } from "./turn-changes.js";
 import { createBackendEventReceiver, EventDeliveryState, writeProtocolDiagnostic } from "./backend-protocol.js";
 import { RuntimeTiming } from "./runtime-timing.js";
 import { ControlledBackendRestart } from "./controlled-restart.js";
@@ -635,6 +636,9 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
   const [compacting, setCompacting] = useState(false);
   const generationModelKeyRef = useRef<string>();
   const generationSessionIdRef = useRef<string>();
+  const sessionNameRef = useRef("");
+  const turnChangesGateRef = useRef<TurnChangesRenderGate | null>(null);
+  if (!turnChangesGateRef.current) turnChangesGateRef.current = new TurnChangesRenderGate();
   const [openToolResultId, setOpenToolResultId] = useState<number | null>(null);
   const [toolDetailOffset, setToolDetailOffset] = useState(0);
   const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
@@ -986,6 +990,7 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
         if (generationSessionIdRef.current !== event.name) setGenerationStats(null);
         generationSessionIdRef.current = event.name;
         setSessionName(event.name);
+        sessionNameRef.current = event.name;
         break;
       case "mode_info":
         setRuntimeMode(event.mode);
@@ -1355,6 +1360,11 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
           );
         }
         break;
+      case "turn_changes": {
+        const line = formatTurnChangesSummary(event);
+        if (line && turnChangesGateRef.current?.shouldRender(event, sessionNameRef.current)) addMessage("system", line);
+        break;
+      }
       case "done":
         finishTurn();
         break;

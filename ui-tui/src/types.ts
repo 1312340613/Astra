@@ -1,5 +1,7 @@
 // Protocol types for Python ↔ TUI communication
 
+import type { TurnChangesEventData } from "./turn-changes.js";
+
 export type RuntimeMode = "work" | "bar" | "minimal" | "local";
 
 export type LocalModeDefinition = {
@@ -256,6 +258,7 @@ export type PyEvent =
       has_more: boolean;
     }
   | { type: "connection_result"; request_id: string; provider_id?: string; error: string; notice?: string }
+  | ({ type: "turn_changes" } & TurnChangesEventData)
   | { type: "done" }
   | { type: "backend_hello"; protocol_version: number }
   | { type: "restart_ready"; request_id: string; session: string; replayed?: boolean }
