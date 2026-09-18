@@ -318,6 +318,38 @@ def test_unchanged_paths_are_never_reported(tmp_path: Path) -> None:
     assert subject.seal() is None
 
 
+def test_trailing_newline_change_is_a_byte_modification(tmp_path: Path) -> None:
+    """R9：净状态由存在性和字节决定；零行差只是展示数据."""
+    (tmp_path / "note.txt").write_bytes(b"hello\n")
+    subject = store.TurnChangeStore(tmp_path, "sess-1")  # 真实 turn_diff.diff_bytes
+    subject.begin_turn("req-1")
+    subject.note_capture("note.txt", b"hello")
+
+    manifest = subject.seal()
+    assert manifest is not None
+    change = manifest.files[0]
+    assert change.state == store.STATE_MODIFIED
+    assert change.compare == store.COMPARE_FULL
+    assert (change.added, change.removed) == (0, 0)
+    assert manifest.totals["files"] == 1
+
+
+def test_unchanged_entries_stay_out_of_the_main_list(tmp_path: Path) -> None:
+    """R9：unchanged 不进主清单也不进未知区，主清单只收净变化条目."""
+    (tmp_path / "same.txt").write_bytes(b"same\n")
+    (tmp_path / "mod.txt").write_bytes(b"new\n")
+    subject = make_store(tmp_path)
+    subject.begin_turn("req-1")
+    subject.note_capture("same.txt", b"same\n")  # 改了又改回
+    subject.note_capture("mod.txt", b"old\n")
+
+    manifest = subject.seal()
+    assert manifest is not None
+    assert [change.path for change in manifest.files] == ["mod.txt"]
+    assert manifest.unknown == []
+    assert manifest.totals["files"] == 1
+
+
 def test_uncaptured_side_lands_in_the_unknown_area(tmp_path: Path) -> None:
     subject = make_store(tmp_path)
     subject.begin_turn("req-1")

@@ -284,11 +284,19 @@ class TurnChangeStore:
         resolved: list[_ResolvedEntry] = []
         for entry in active.values():
             outcome = self._resolve(entry, deadline, cancelled)
-            if outcome is not None:
-                resolved.append(outcome)
+            if outcome is None:
+                continue
+            if outcome.change.state == STATE_UNCHANGED:
+                # 净变化为零：主清单与未知区都不出现（行为要求 3，review R9）
+                continue
+            resolved.append(outcome)
         if not resolved:
             return None
-        files = [item.change for item in resolved if item.change.state != STATE_UNKNOWN]
+        files = [
+            item.change
+            for item in resolved
+            if item.change.state not in (STATE_UNKNOWN, STATE_UNCHANGED)
+        ]
         unknown = [item.change for item in resolved if item.change.state == STATE_UNKNOWN]
         totals = {
             "files": len(files),
@@ -698,7 +706,12 @@ class TurnChangeStore:
         after_state, after_bytes, after_reason = self._read_after(entry)
         if before_state == SIDE_CAPTURED and after_state == SIDE_CAPTURED:
             if entry.before == after_bytes:
-                return None  # 两侧相同（含"改了又改回"）→ unchanged，不出现
+                # 两侧字节相同（含"改了又改回"）→ unchanged；seal 契约排除该状态
+                return _ResolvedEntry(
+                    self._no_change(entry, before_state, after_state),
+                    entry.before,
+                    after_bytes,
+                )
             return self._diff_entry(
                 entry, entry.before, after_bytes, STATE_MODIFIED, before_state, after_state, deadline, cancelled
             )
@@ -776,9 +789,8 @@ class TurnChangeStore:
                 "turn-change store: diff failed for %s (%s: %s)", entry.path, type(exc).__name__, exc
             )
             return self._degraded_entry(entry, before, after, state, before_state, after_state, REASON_ERROR)
-        if stats.quality == turn_diff.DIFF_FULL and stats.added == 0 and stats.removed == 0:
-            if before is not None and after is not None:
-                return _ResolvedEntry(self._no_change(entry, before_state, after_state), before, after)
+        # 行数（added/removed）仅是展示数据：零行差不代表字节未变。净状态由
+        # 存在性与字节决定（两侧字节相同已在 _resolve_snapshot 判为 unchanged）。
         if stats.quality == turn_diff.DIFF_COARSE:
             compare = COMPARE_COARSE
             added, removed = stats.added, stats.removed
