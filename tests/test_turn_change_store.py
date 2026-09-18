@@ -1338,13 +1338,13 @@ def test_after_read_refuses_a_parent_swap_between_check_and_open(
     original = store._read_bytes_bounded
     swapped = False
 
-    def swap_then_open(path, limit):
+    def swap_then_open(path, limit, **kwargs):
         nonlocal swapped
         if not swapped:
             folder.rename(workspace / "sub-held")
             folder.symlink_to(outside, target_is_directory=True)
             swapped = True
-        return original(path, limit)
+        return original(path, limit, **kwargs)
 
     monkeypatch.setattr(store, "_read_bytes_bounded", swap_then_open)
     manifest = subject.seal()
@@ -1376,13 +1376,13 @@ def test_snapshot_write_refuses_a_storage_swap_between_check_and_write(
     original = store._write_bytes
     swapped = False
 
-    def swap_then_write(path, data):
+    def swap_then_write(path, data, **kwargs):
         nonlocal swapped
         if not swapped:
             subject.session_dir.rename(subject.root / "review-held")
             subject.session_dir.symlink_to(outside, target_is_directory=True)
             swapped = True
-        original(path, data)
+        original(path, data, **kwargs)
 
     monkeypatch.setattr(store, "_write_bytes", swap_then_write)
     subject.seal()
@@ -1410,10 +1410,10 @@ def test_deadline_between_snapshot_sides_skips_the_second_write(
     writes: list[str] = []
     original = store._write_bytes
 
-    def slow_write(path, data):
+    def slow_write(path, data, **kwargs):
         writes.append(Path(path).name)
         clock.advance(40)  # 40ms 的受控慢写入（推进假时钟，与既有预算测试同口径）
-        original(path, data)
+        original(path, data, **kwargs)
 
     monkeypatch.setattr(store, "_write_bytes", slow_write)
     manifest = subject.seal()
@@ -1442,7 +1442,7 @@ def test_external_cancel_stops_persist_writes(
     observed: dict[str, float] = {}
     started = [0.0]
 
-    def slow_write(path, data):
+    def slow_write(path, data, **kwargs):
         if not writes:
             task = asyncio.current_task()
 
@@ -1453,24 +1453,26 @@ def test_external_cancel_stops_persist_writes(
             asyncio.get_running_loop().call_later(0.01, request_cancel)
         writes.append(Path(path).name)
         time.sleep(0.04)  # 受控慢 I/O
-        original(path, data)
+        original(path, data, **kwargs)
 
     async def scenario():
         task = asyncio.current_task()
         assert task is not None
         started[0] = time.monotonic()
         try:
-            await subject.seal_async(cancelled=lambda: bool(task.cancelling()))
+            manifest = await subject.seal_async(cancelled=lambda: bool(task.cancelling()))
+            observed["seal_returned_normally"] = True
         except asyncio.CancelledError:
+            # 收尾完成后的取消语义必须继续传播（review G2）
             observed["cancel_propagated"] = True
-        manifest = subject.take_stopped_manifest()
+            manifest = subject.take_stopped_manifest()
         await asyncio.sleep(0)
         return manifest
 
     monkeypatch.setattr(store, "_write_bytes", slow_write)
     manifest = asyncio.run(scenario())
 
-    assert observed.get("cancel_propagated") is True
+    assert observed.get("cancel_propagated") is True, observed
     assert manifest is not None
     assert len(writes) < 6, f"cancel must stop later snapshot writes; writes={writes}"
     assert (subject.session_dir / "turn-1" / "manifest.json").exists()  # 清单仍落盘
