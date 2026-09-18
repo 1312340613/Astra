@@ -204,6 +204,35 @@ def _safe_session_name(session_id: str) -> str:
     return f"{safe[:80]}-{digest}"
 
 
+def session_history_evidence(workspace: str | Path, session_id: str) -> bool | None:
+    """Read-only probe for ``/changes`` when no live store exists (review R5).
+
+    ``True`` = the session directory carries evidence of completed turns
+    (a ``turns.json`` or any ``turn-*`` snapshot directory); ``False`` = no
+    such evidence (a fresh session); ``None`` = the state cannot be
+    determined and callers must treat it conservatively.  Never creates the
+    session directory and never writes anything.
+    """
+    try:
+        session_dir = (
+            Path(workspace).expanduser().resolve().joinpath(*DEFAULT_ROOT_PARTS)
+            / _safe_session_name(session_id)
+        )
+        if (session_dir / INDEX_NAME).exists():
+            return True
+        if not session_dir.exists():
+            return False
+        if not session_dir.is_dir():
+            return None
+        for child in session_dir.iterdir():
+            name = child.name
+            if name.startswith("turn-") and name[len("turn-"):].isdigit():
+                return True
+        return False
+    except OSError:
+        return None
+
+
 def _tracked_has_content(fingerprint: str | None) -> bool:
     return fingerprint is not None and fingerprint.startswith(_TRACKED_CONTENT_PREFIXES)
 

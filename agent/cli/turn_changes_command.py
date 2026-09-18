@@ -3,8 +3,9 @@
 Read-only by contract: the command never writes, never seals a turn, never
 becomes a model turn, and never creates the ledger store.  The store accessor
 ``agent.turn_change_store()`` returns the live session store or ``None``; when
-it is ``None`` the command still answers with the honest "index unavailable"
-wording instead of pretending there is nothing to show.
+it is ``None``, ``agent.turn_changes_session_state()`` distinguishes a fresh
+session ("no completed turns yet") from a session whose index is genuinely
+unavailable — and anything undetermined stays conservative (review R5).
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ def execute_changes_command(agent, argument: str) -> tuple[str, str]:
         return "", error
     store = _store_for(agent)
     if store is None:
+        if _session_state(agent) == "none":
+            return NO_TURNS, ""
         return INDEX_UNAVAILABLE, ""
     try:
         index = store.completed_turns()
@@ -83,3 +86,16 @@ def _store_for(agent: Any) -> TurnChangeStore | None:
     except Exception:
         logger.exception("turn-change store accessor failed")
         return None
+
+
+def _session_state(agent: Any) -> str:
+    """Read-only session-state probe; unknown stays conservative (review R5)."""
+    probe = getattr(agent, "turn_changes_session_state", None)
+    if not callable(probe):
+        return ""
+    try:
+        state = probe()
+    except Exception:
+        logger.exception("turn-change session state probe failed")
+        return ""
+    return state if isinstance(state, str) else ""

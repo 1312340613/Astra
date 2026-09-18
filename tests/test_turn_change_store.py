@@ -2285,6 +2285,25 @@ def test_missing_index_is_unavailable_for_a_later_instance_too(tmp_path: Path) -
     assert read.records == []
 
 
+def test_session_history_evidence_is_read_only_and_distinguishes_states(
+    tmp_path: Path,
+) -> None:
+    """R5 只读探测：无痕迹=False；有 turn-N/turns.json 痕迹=True；不创建目录."""
+    assert store.session_history_evidence(tmp_path, "sess-x") is False
+    assert not (tmp_path / ".astra" / "turn-changes" / "sess-x").exists()
+
+    (tmp_path / ".astra" / "turn-changes" / "sess-x" / "turn-1").mkdir(parents=True)
+    assert store.session_history_evidence(tmp_path, "sess-x") is True
+
+    session_two = tmp_path / ".astra" / "turn-changes" / "sess-y"
+    session_two.mkdir(parents=True)
+    (session_two / store.INDEX_NAME).write_text("{}", encoding="utf-8")
+    assert store.session_history_evidence(tmp_path, "sess-y") is True
+
+    assert store.session_history_evidence(tmp_path, "sess-fresh") is False
+    assert not (tmp_path / ".astra" / "turn-changes" / "sess-fresh").exists()
+
+
 def test_empty_turn_index_write_rechecks_owner_under_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

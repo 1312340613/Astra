@@ -41,7 +41,12 @@ from .core_rules import CORE_SKILL_NAME
 from .deepseek import DEEPSEEK_VISION_MODELS
 from .llm import LLMClient, LLMIdleTimeout, LLMOverallTimeout, LLMResponseError
 from .turn_budget import TurnBudgetExceeded, budgeted_events, check_work_budget, parse_turn_budget
-from .turn_change_store import TurnChangeStore, current_turn_change_store, turn_store_scope
+from .turn_change_store import (
+    TurnChangeStore,
+    current_turn_change_store,
+    session_history_evidence,
+    turn_store_scope,
+)
 from .message_time import filter_message_time_events
 from .metrics import runtime_metrics
 from .micro_compact import micro_compact_tool_results
@@ -4488,6 +4493,28 @@ class ReActAgent(AgentBase):
         if self._turn_change_store_session != session_key:
             return None
         return store
+
+    def turn_changes_session_state(self) -> str:
+        """Read-only ``/changes`` state: ``available`` / ``none`` / ``unavailable``.
+
+        Never creates or rebuilds the store (review R5).  With a live session
+        store the answer is ``available``; otherwise the session directory is
+        probed read-only and ``none`` is reserved for a session without any
+        evidence of completed turns.  A session that carries history but has
+        no live store (for example one restored later) stays ``unavailable``.
+        """
+        if self.turn_change_store() is not None:
+            return "available"
+        session_path = self.context.session_path
+        session_key = Path(session_path).stem if session_path else "default"
+        try:
+            evidence = session_history_evidence(self._turn_change_workspace(), session_key)
+        except Exception:
+            logger.exception("turn-change session probe failed")
+            return "unavailable"
+        if evidence is False:
+            return "none"
+        return "unavailable"
 
     def _current_turn_change_store(self) -> "TurnChangeStore | None":
         """Session-owned turn-change store; rebuilt when the session changes."""

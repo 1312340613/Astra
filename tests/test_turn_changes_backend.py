@@ -431,7 +431,7 @@ class _ChangesCommandHandler(BaseHTTPRequestHandler):
 
 def _start_changes_backend(tmp_path: Path, session_name: str, *, hang_from_call: int = 0):
     workdir = tmp_path / "work"
-    workdir.mkdir()
+    workdir.mkdir(exist_ok=True)
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ChangesCommandHandler)
     server.requests = []
     server.target_name = "note.txt"
@@ -554,8 +554,35 @@ def test_changes_command_reads_the_live_ledger_without_new_turns(tmp_path: Path)
         server.server_close()
 
 
-def test_changes_command_without_a_turn_reports_an_unavailable_index(tmp_path: Path):
+def test_changes_command_without_a_turn_reports_no_turns(tmp_path: Path):
+    """新会话（尚未跑过回合）：报“还没有完成的回合”，不是索引故障（review R5）."""
     session_name = f"changes_empty_{uuid.uuid4().hex}"
+    workdir, server, proc, events, seen, wait_for, stderr_tail = _start_changes_backend(
+        tmp_path, session_name
+    )
+    try:
+        wait_for(lambda event: event.get("type") == "model_info")
+        _send_command(proc, "/changes")
+        result = _changes_result(proc, events, seen, wait_for)
+        assert result.get("error") == "", result
+        output = result.get("output") or ""
+        assert "还没有完成的回合" in output, result
+        assert "回合索引暂不可用" not in output, result
+    finally:
+        _stop_backend(proc)
+        server.shutdown()
+        server.server_close()
+
+
+def test_changes_command_with_history_but_no_live_store_reports_unavailable(
+    tmp_path: Path,
+):
+    """有完成回合痕迹但 store 未创建（如恢复的旧会话）：保守报不可用（review R5）."""
+    session_name = f"changes_history_{uuid.uuid4().hex}"
+    (tmp_path / "work").mkdir()
+    (
+        tmp_path / "work" / ".astra" / "turn-changes" / session_name / "turn-1"
+    ).mkdir(parents=True)
     workdir, server, proc, events, seen, wait_for, stderr_tail = _start_changes_backend(
         tmp_path, session_name
     )
