@@ -201,6 +201,8 @@ class TurnChangeStore:
         self._request_id = ""
         self._turn_bytes = 0
         self._truncated = False
+        # 本实例所有权令牌：owner.json 记录 (pid, token, session_id)（review R7）
+        self._owner_token = os.urandom(16).hex()
         # 会话目录创建后、写入任何快照内容前，立即写 owner.json（行为要求 10）
         self._ensure_session_dir()
 
@@ -383,12 +385,12 @@ class TurnChangeStore:
     # -- 生命周期 --
 
     def close(self) -> None:
-        """会话释放：尽力删除本会话快照区（之后仍可重新 begin_turn）."""
+        """会话释放：仅在本实例仍持有该会话区时删除快照目录（之后可重新 begin_turn）."""
         with self._lock:
             self._active = None
             self._request_id = ""
             self._turn_bytes = 0
-            if self._anchor_ok():
+            if self._anchor_ok() and self._owner_is_ours():
                 shutil.rmtree(self.session_dir, ignore_errors=True)
 
     @staticmethod
@@ -423,6 +425,14 @@ class TurnChangeStore:
                 continue
             if alive:
                 continue
+            # 删除前复核同一 owner 身份：读取后、删除前所有权易主则跳过（review R7）
+            try:
+                current = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                current = None
+            if current != owner:
+                logger.warning("turn-change store: skip %s (owner changed before removal)", child)
+                continue
             try:
                 shutil.rmtree(child)
             except OSError as exc:
@@ -442,7 +452,11 @@ class TurnChangeStore:
         return (st.st_dev, st.st_ino) == self._anchor_identity
 
     def _ensure_session_dir(self) -> bool:
-        """Create the session area and its owner marker before any content."""
+        """Create the session area and establish/take over its ownership marker.
+
+        所有权身份 = (pid, token, session_id)：活跃占用（其他存活实例）一律
+        拒绝写入；旧实例已退出则原子接管（review R7）。
+        """
         if not self._anchor_ok():
             logger.warning(
                 "turn-change store: workspace identity changed for %s; refusing to write",
@@ -451,18 +465,75 @@ class TurnChangeStore:
             return False
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
-            owner = self.session_dir / OWNER_NAME
-            if not owner.exists():
-                _write_json_atomic(
-                    owner,
-                    {"session_id": self.session_id, "pid": os.getpid(), "created_at": time.time()},
-                )
-            return True
         except OSError as exc:
             logger.warning(
                 "turn-change store: cannot prepare snapshot area %s (%s)", self.session_dir, exc
             )
             return False
+        return self._claim_ownership()
+
+    def _claim_ownership(self) -> bool:
+        owner_path = self.session_dir / OWNER_NAME
+        try:
+            raw = owner_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return self._write_owner(owner_path)
+        except OSError as exc:
+            logger.warning("turn-change store: unreadable owner marker %s (%s)", owner_path, exc)
+            return False
+        try:
+            owner = json.loads(raw)
+        except ValueError:
+            owner = None
+        if self._owner_matches(owner):
+            return True
+        pid = owner.get("pid") if isinstance(owner, dict) else None
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            logger.warning(
+                "turn-change store: owner marker %s has no usable pid; refusing writes", owner_path
+            )
+            return False
+        if pid == os.getpid() or _pid_alive(pid):
+            logger.warning(
+                "turn-change store: session area %s is actively owned by pid=%s; refusing writes",
+                self.session_dir,
+                pid,
+            )
+            return False
+        # 旧实例已退出 → 原子接管
+        return self._write_owner(owner_path)
+
+    def _write_owner(self, owner_path: Path) -> bool:
+        try:
+            _write_json_atomic(
+                owner_path,
+                {
+                    "session_id": self.session_id,
+                    "pid": os.getpid(),
+                    "token": self._owner_token,
+                    "created_at": time.time(),
+                },
+            )
+        except OSError as exc:
+            logger.warning("turn-change store: cannot write owner marker %s (%s)", owner_path, exc)
+            return False
+        return True
+
+    def _owner_matches(self, owner: Any) -> bool:
+        return (
+            isinstance(owner, dict)
+            and owner.get("session_id") == self.session_id
+            and owner.get("pid") == os.getpid()
+            and owner.get("token") == self._owner_token
+        )
+
+    def _owner_is_ours(self) -> bool:
+        """True only while owner.json still records this instance's identity."""
+        try:
+            owner = json.loads((self.session_dir / OWNER_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return False
+        return self._owner_matches(owner)
 
     def _turn_dirs(self) -> list[tuple[int, Path]]:
         found: list[tuple[int, Path]] = []
@@ -520,6 +591,9 @@ class TurnChangeStore:
         while not condition():
             turns = self._turn_dirs()
             if not turns:
+                break
+            if not self._owner_is_ours():
+                # 未核验到同一 owner 身份前，不删除任何回合目录（review R7）
                 break
             if not self._remove_turn(turns[0][1]):
                 break

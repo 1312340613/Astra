@@ -1305,6 +1305,54 @@ def test_cleanup_orphans_default_probe_keeps_a_live_session(tmp_path: Path) -> N
     assert (root / "self").exists()
 
 
+def test_store_takes_over_a_dead_owner_and_cleanup_keeps_it(tmp_path: Path) -> None:
+    """R7：死亡 pid 的 owner 被原子接管；清理器不会把活跃目录当孤儿删除."""
+    root = tmp_path / "turn-changes"
+    session = root / "review"
+    session.mkdir(parents=True)
+    dead_pid = 987654321
+    (session / "owner.json").write_text(
+        json.dumps({"session_id": "review", "pid": dead_pid}), encoding="utf-8"
+    )
+
+    subject = store.TurnChangeStore(tmp_path, "review", root=root)
+    subject.begin_turn("live-turn")
+
+    owner = json.loads((session / "owner.json").read_text(encoding="utf-8"))
+    assert owner["pid"] == os.getpid()
+    assert owner["session_id"] == "review"
+
+    removed = store.TurnChangeStore.cleanup_orphans(root, is_alive=lambda pid: pid != dead_pid)
+
+    assert removed == []
+    assert session.exists()
+
+
+def test_second_instance_refuses_an_active_owner(tmp_path: Path) -> None:
+    """R7：活跃占用须隔离或拒绝——第二实例不改 owner、不落盘、不删目录."""
+    root = tmp_path / "turn-changes"
+    first = store.TurnChangeStore(tmp_path, "review", root=root)
+    first.begin_turn("req-1")
+    (tmp_path / "a.txt").write_bytes(b"new\n")
+    first.note_capture("a.txt", b"old\n")
+    assert first.seal() is not None
+    session = root / "review"
+    owner_text = (session / "owner.json").read_text(encoding="utf-8")
+
+    second = store.TurnChangeStore(tmp_path, "review", root=root)
+    second.begin_turn("req-2")
+    (tmp_path / "b.txt").write_bytes(b"new\n")
+    second.note_capture("b.txt", b"old\n")
+    assert second.seal() is not None  # 内存清单仍返回
+
+    assert (session / "owner.json").read_text(encoding="utf-8") == owner_text  # 未改 owner
+    assert sorted(path.name for path in session.iterdir()) == ["owner.json", "turn-1"]
+
+    second.close()
+    assert session.exists()  # 非本实例所有：不删除
+    assert first.manifest(0) is not None
+
+
 # ---------------------------------------------------------------------------
 # 9. turn_store_scope / current_turn_change_store
 # ---------------------------------------------------------------------------
