@@ -1695,6 +1695,7 @@ def register_web_tools(registry: ToolRegistry, sandbox, default_provider: str | 
             "通过 Exa 或 SearXNG 搜索网页并返回轻量候选链接（标题、URL、摘要）。"
             "provider=auto 会让新闻、论文、新模型和研究查询优先使用 Exa，并在 Exa/SearXNG 间故障回退；"
             "多个独立查询可同轮并行。摘要足以回答时直接引用；仅在摘要不足或需要核实原文时使用 web_extract。"
+            "若仍缺关键证据，可主动使用浏览器访问原站或交互搜索补查，按信息需要自主选择，无需用户点名浏览器。"
         ),
         parameters={
             "type": "object",
@@ -1748,6 +1749,7 @@ def register_web_tools(registry: ToolRegistry, sandbox, default_provider: str | 
             "通过可配置后端瀑布流读取网页并返回干净 Markdown。auto 按 Tavily、Exa、Parallel、"
             "Firecrawl、直接 HTTP 的顺序选择并逐 URL 故障回退；整条链失败时会从搜索结果中"
             "有界重试最多 2 个公开候选，并在结果中标明恢复来源。一次最多 5 个公开 URL。"
+            "提取成功不代表问题已回答；遇到折叠 FAQ、动态内容或需站内搜索等信息缺口，可主动用浏览器交互补查。"
         ),
         parameters={
             "type": "object",
@@ -1780,7 +1782,10 @@ def register_web_tools(registry: ToolRegistry, sandbox, default_provider: str | 
 
     registry.register(ToolDef(
         name="fetch_url",
-        description="抓取静态网页文本（纯 HTML，不执行 JS）。结果带 URL 缓存；JS 页面用 extract_url。",
+        description=(
+            "抓取静态 HTML 并返回清洗后的文本，不返回原始 HTML，也不执行 JS；script/style 等内容会被移除。"
+            "结果未包含答案不代表源 HTML 没有答案。结果带 URL 缓存；需渲染时可用 extract_url，需展开或站内查询时可用浏览器交互。"
+        ),
         parameters={
             "type": "object",
             "properties": {

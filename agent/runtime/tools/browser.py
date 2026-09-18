@@ -309,7 +309,9 @@ def register_browser_tools(
                 "instruction": (
                     "Target value is verified. Continue with fresh after refs or report briefly; application saving is separate."
                     if value_verified else
-                    "Inspect after for the requested result. If not yet confirmed, use browser_wait with an observed condition or browser_snapshot; an unchanged page does not authorize another click."
+                    "Inspect after for the requested result. If not yet confirmed, use browser_read on the relevant container, "
+                    "browser_wait with an observed condition, or a scoped browser_snapshot; an unchanged page does not authorize another click. "
+                    "Changing the ref, selector, parent/child target, or channel is still a retry of the same intended action while its outcome is unconfirmed."
                 ),
             }
             comparison = payload.get("value_comparison", {})
@@ -914,7 +916,10 @@ def register_browser_tools(
         name="browser_open",
         description=(
             "在持久浏览器会话中打开一个标签页（起始为 read_only 档）。"
-            "已配置自动连接时会主动连接扩展并打开可见标签，无需先调用 browser_connect；等待最多45秒。"
+            "也适用于搜索或正文提取不足时主动访问原站、展开内容或交互搜索补查。"
+            "查资料且 URL 已知、不依赖原标签状态时，优先复用本任务可用标签，没有则直接调用本工具。"
+            "已配置自动连接时会主动连接扩展并打开可见标签，无需先调用 browser_status/browser_tabs/browser_connect；等待最多45秒。"
+            "新标签当前可能被选中，不保证保留用户的活动标签；按已有通道能力优先减少前台打扰。"
             "若配置了只读后端，会立即抓取页面正文并存储脱敏快照。"
             "需要交互时再用 browser_click/browser_type，遇到验证码/登录/支付用 browser_handoff。"
         ),
@@ -946,6 +951,7 @@ def register_browser_tools(
             "读取当前标签页已存储快照；refresh=true 观察当前页面，不重新导航。"
             "选择题/混合表单优先 scope=form,include_text=false：groups 保留题干，elements 保留选项、checked 和 frame/ref，自动刷新。文本编辑器用 scope=editable。"
             "可用 role_filter/frame_ref 筛选、offset/limit 分页，避免工具栏挤掉输入框。"
+            "offset/limit 只分页匹配元素，不分页正文；长页内容优先定位容器后用 browser_read，避免重复全页刷新。"
             "已读页面正文后用 include_text=false 自动刷新为精简观察，后续 after 沿用；保留元素值、checked 状态和新 refs。"
             "使用最新 elements 中的 ref:<id>；点击后结果未明时先观察或 browser_wait，不重复提交。"
             "快照中的 cookie/token/密码等敏感信息已在落库前剥离。"
@@ -989,6 +995,7 @@ def register_browser_tools(
         name="browser_click",
         description=(
             "点击最新快照的 ref:<id> 或唯一 CSS 元素；返回观测结果和新快照，不能把派发成功当作任务成功。"
+            "no_observed_change 时先只读核对；结果仍不明时，换 ref/CSS 或内外层元素点击仍是同一目标的重试。"
             "read_only 档或 human takeover 中会报错。"
         ),
         parameters={
@@ -1062,7 +1069,10 @@ def register_browser_tools(
     ))
     register(ToolDef(
         name="browser_read",
-        description="读取指定 ref:<id> 或唯一 CSS 元素的实际值、frameRef 和选择控件的 checked 状态；value 不代表勾选状态。不点击、不改变焦点、不使现有引用过期。",
+        description=(
+            "读取指定 ref:<id> 或唯一 CSS 元素的实际值、frameRef 和选择控件的 checked 状态；value 不代表勾选状态。"
+            "适合读取长页面的已定位内容容器；只读题头不能确认答案或展开状态。不点击、不改变焦点、不使现有引用过期。"
+        ),
         parameters={"type": "object", "properties": {
             "selector": {"type": "string", "description": "最新快照的 ref:<id> 或全页唯一 CSS"},
             "tab_id": {"type": "string", "default": ""}}, "required": ["selector"]},
@@ -1185,7 +1195,10 @@ def register_browser_tools(
 
     registry.register(ToolDef(
         name="browser_status",
-        description="查看浏览器后端可用性与最近会话/标签页状态（诊断用）。",
+        description=(
+            "查看浏览器后端可用性与最近会话/标签页状态，用于实际连接失败、明确配置问题或用户要求诊断。"
+            "普通资料调研已有目标 URL 时可直接 browser_open，不必例行预检；历史标签不是当前已绑定标签。"
+        ),
         parameters={"type": "object", "properties": {}},
         fn=_browser_status, risk="read", approval="never", idempotent=True,
         cache_results=False, repeat_guard=False, max_calls_per_turn=20,
@@ -1210,6 +1223,7 @@ def register_browser_tools(
         description=(
             "连接现有浏览器：transport=extension 使用独立控制扩展授权的 Edge/Chrome 标签，"
             "先 browser_tabs 查看 target_tab_id；cdp 保留调试端口连接。"
+            "用于用户指定或任务依赖原页面状态的已有标签；普通资料调研可直接 browser_open 新建任务标签。"
         ),
         parameters={
             "type": "object",
@@ -1228,7 +1242,11 @@ def register_browser_tools(
 
     register(ToolDef(
         name="browser_tabs",
-        description="列出独立控制扩展明确授权的标签；不枚举未授权的日常标签。未连接时返回安装/连接提示。",
+        description=(
+            "发现用户指定或任务所需的已有标签，只列出独立控制扩展明确授权的标签，不枚举未授权的日常标签。"
+            "普通资料调研无需将此作为 browser_open 的前置；空列表只表示无已授权标签，仍可新建任务标签。"
+            "连接不可用时返回安装/连接提示。"
+        ),
         parameters={"type": "object", "properties": {
             "transport": {"type": "string", "enum": ["extension"], "default": "extension"}}},
         fn=_browser_tabs, risk="read", approval="never", idempotent=True,

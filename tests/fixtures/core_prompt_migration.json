@@ -1,11 +1,12 @@
 {
   "source_commit": "ab72bfd4d1df1baabcc70897d11318215d369bd4",
-  "core_sha256": "1b5acd9c40f48eae7fb58820daaf1808c33a3583224191ba1512b0e33a5a0092",
+  "core_sha256": "365bde64da657b52a3d8519a70d289d7ec7c69414c8ba1114af64d482ef73fb8",
   "profile_sha256": {
-    "lyra": "0a82476967e5d423ee942250598b9ad06bcfd6cecae3b3b1ecd8ebba77dd0334"
+    "lyra": "6cf15668e577050e575460f6d6ad424ab84f9e7879fcf888658d07f6fb894059"
   },
   "learning_contract_update": "2026-09-13: direct skill saving and manual review; persona text unchanged",
   "history_retrieval_update": "2026-09-13: model-initiated local history lookup; persona text unchanged",
   "persona_update": "2026-09-14: public Lyra definition; retired preset bodies are no longer bundled",
-  "workflow_guidance_update": "2026-09-18: replace blanket verification mandates with proportionate skill guidance and reusable evidence; retain the public Lyra persona"
+  "workflow_guidance_update": "2026-09-18: replace blanket verification mandates with proportionate skill guidance and reusable evidence; retain the public Lyra persona",
+  "browser_research_update": "2026-09-19: autonomous browser follow-up, direct task tabs, and focused source reads; keep research skill selection voluntary"
 }
