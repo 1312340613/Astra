@@ -29,6 +29,7 @@ from ..agent_team import (
 )
 from ..team_budget import TeamBudgetTracker
 from ..process_env import hidden_process_creationflags
+from ..turn_change_store import turn_store_scope
 from ..worker import (
     MAX_WORKER_TURNS,
     REASONING_EFFORTS,
@@ -2295,7 +2296,7 @@ def register_delegate_tools(
                 if process is not None:
                     process.metadata["session_transcript_path"] = str(path)
 
-        async def _factory(on_output: OutputCallback) -> dict:
+        async def _factory_body(on_output: OutputCallback) -> dict:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + spec.timeout_seconds
             acquired = False
@@ -2447,6 +2448,17 @@ def register_delegate_tools(
                 except Exception:
                     logger.exception("could not finish durable team agent")
             return result
+
+        async def _factory(on_output: OutputCallback) -> dict:
+            # A delegate/Team child runs as an asyncio task that copies the
+            # caller's context, so without this detach it would inherit the
+            # parent turn's ledger and record its own edits (or late
+            # completions) into the parent's -- or a later -- turn manifest.
+            # Ownership of root/session/request stays fixed with the parent
+            # turn; children never hold a binding
+            # (review R3).
+            with turn_store_scope(None):
+                return await _factory_body(on_output)
 
         def _started(process) -> None:
             process_holder["process"] = process

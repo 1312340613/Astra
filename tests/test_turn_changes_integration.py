@@ -16,13 +16,17 @@ import asyncio
 import copy
 import json
 import re
+from types import SimpleNamespace
 
 from agent.core.msg import ContentBlock, Msg
 from agent.runtime import turn_change_store as tcs
 from agent.runtime.llm import LLMConfig, LLMResponseError
 from agent.runtime.react import ReActAgent
 from agent.runtime.token_estimator import estimate_messages_tokens
+from agent.runtime.tools import delegate as delegate_tools
+from agent.runtime.tools.delegate import register_delegate_tools
 from agent.runtime.tools.files import register_file_tools
+from agent.runtime.tools.processes import ProcessManager
 from agent.runtime.tools.registry import ToolRegistry
 
 
@@ -349,11 +353,12 @@ def test_many_edits_net_out_correctly(tmp_path, monkeypatch):
 
 
 def test_turn_store_scope_is_context_local(tmp_path):
-    """The store binding never leaks outside its scope or into fresh contexts.
+    """Scope binding is context-local: nesting restores, fresh contexts reset.
 
-    Delegate subagents run in separate processes with no inherited contextvar
-    state, so this mechanism (plus the isolated subagent loop) is what keeps
-    parent ledgers untouched by inherited turns.
+    A bare asyncio task copies the caller's context, so it inherits whatever
+    binding is active; the delegate execution entry therefore detaches the
+    ledger explicitly instead of relying on context isolation (review R3, see
+    the delegate-chain tests below).
     """
     store = tcs.TurnChangeStore(tmp_path, "sess-scope", root=tmp_path / "tc-root")
     store.begin_turn("req-scope")
@@ -368,6 +373,9 @@ def test_turn_store_scope_is_context_local(tmp_path):
 
             with tcs.turn_store_scope(store):
                 assert tcs.current_turn_change_store() is store
+                # A bare child task copies the active context; this inherited
+                # binding is exactly what the delegate entry must detach, so
+                # the ledger tests below run the real chain instead (R3).
                 assert await asyncio.create_task(child()) is store
 
             assert await asyncio.create_task(child()) is None
@@ -447,3 +455,176 @@ def test_previous_turn_snapshots_are_immutable(tmp_path, monkeypatch):
 
     assert stores[0].manifest(0) is not None
     assert stores[0].manifest(1) is not None
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 (review R3): the real delegate chain never feeds the parent ledger
+# ---------------------------------------------------------------------------
+
+
+class DelegateScriptedLLM:
+    """Scripted chat LLM for a real delegate run (shape: tests/test_delegate)."""
+
+    def __init__(self, responses, *, gate=None):
+        self.responses = list(responses)
+        self.gate = gate
+
+    async def chat(self, **kwargs):
+        del kwargs
+        if self.gate is not None:
+            await self.gate.wait()
+        return self.responses.pop(0)
+
+
+def worker_edit_call(call_id, path, old, new):
+    """A scripted worker tool call that edits one real workspace file."""
+    return {
+        "content": "",
+        "tool_calls": [{
+            "id": call_id,
+            "name": "edit_file",
+            "arguments": json.dumps({"path": path, "old": old, "new": new}),
+        }],
+    }
+
+
+def make_delegate_registry(tmp_path, monkeypatch, responses, *, gate=None, sandbox=None):
+    """Register the real delegate tools behind a test-scoped ProcessManager."""
+    manager = ProcessManager(artifact_dir=tmp_path / "tc-processes")
+    monkeypatch.setattr(delegate_tools, "_sub_processes", manager)
+    registry = ToolRegistry()
+    register_file_tools(registry, workdir=str(tmp_path))
+    registry.yolo = True
+    llm = DelegateScriptedLLM(responses, gate=gate)
+    register_delegate_tools(registry, llm_getter=lambda: llm, sandbox=sandbox)
+    return registry, manager, llm
+
+
+def test_delegate_child_edits_stay_out_of_parent_ledger(tmp_path, monkeypatch):
+    """R3: a real shared-workspace delegate run must not feed the parent ledger."""
+    target = tmp_path / "sample.py"
+    target.write_text("old\n", encoding="utf-8")
+    registry, _manager, _llm = make_delegate_registry(
+        tmp_path,
+        monkeypatch,
+        [
+            worker_edit_call("child-edit", "sample.py", "old", "new"),
+            {"content": "child done", "tool_calls": []},
+        ],
+    )
+    store = make_store(tmp_path, "sess-delegate")
+
+    async def scenario():
+        store.begin_turn("req-delegate")
+        with tcs.turn_store_scope(store):
+            result = await registry.execute(
+                "delegate_task",
+                {
+                    "goal": "update sample value",
+                    "mode": "worker",
+                    "max_turns": 2,
+                    "timeout": 10,
+                },
+                task_id="r3-shared",
+            )
+            # Ownership stays pinned to the parent turn during the child run.
+            assert tcs.current_turn_change_store() is store
+        return json.loads(result["output"])
+
+    payload = run(scenario())
+    assert payload["worker_status"] == "completed"
+    assert target.read_text(encoding="utf-8") == "new\n"
+    # The child really edited the file, yet the parent turn records nothing.
+    assert store.seal() is None
+
+
+def test_worktree_delegate_child_edits_stay_out_of_parent_ledger(tmp_path, monkeypatch):
+    """R3: worktree isolation must not re-attach the child to the parent ledger."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    note = worktree / "note.txt"
+    note.write_text("old\n", encoding="utf-8")
+    monkeypatch.setattr(delegate_tools, "_create_detached_worktree", lambda _sandbox: worktree)
+    monkeypatch.setattr(
+        delegate_tools, "_finalize_detached_worktree", lambda _root, _worktree: False
+    )
+    registry, _manager, _llm = make_delegate_registry(
+        tmp_path,
+        monkeypatch,
+        [
+            # The child edits the file that lives inside the isolated worktree.
+            worker_edit_call("wt-edit", str(note), "old", "new"),
+            {"content": "worktree done", "tool_calls": []},
+        ],
+        sandbox=SimpleNamespace(workdir=str(tmp_path)),
+    )
+    store = make_store(tmp_path, "sess-delegate-wt")
+
+    async def scenario():
+        store.begin_turn("req-delegate-wt")
+        with tcs.turn_store_scope(store):
+            result = await registry.execute(
+                "delegate_task",
+                {
+                    "goal": "edit note in worktree",
+                    "mode": "worker",
+                    "isolation": "worktree",
+                    "max_turns": 2,
+                    "timeout": 10,
+                },
+                task_id="r3-worktree",
+            )
+        return json.loads(result["output"])
+
+    payload = run(scenario())
+    assert payload["worker_status"] == "completed"
+    assert note.read_text(encoding="utf-8") == "new\n"
+    assert store.seal() is None
+
+
+def test_late_background_delegate_does_not_pollute_next_turn(tmp_path, monkeypatch):
+    """R3: a child finishing after the next turn begins must not write into it."""
+    target = tmp_path / "late.txt"
+    target.write_text("old\n", encoding="utf-8")
+    store = make_store(tmp_path, "sess-delegate-late")
+
+    async def scenario():
+        gate = asyncio.Event()
+        registry, manager, _llm = make_delegate_registry(
+            tmp_path,
+            monkeypatch,
+            [
+                worker_edit_call("late-edit", "late.txt", "old", "new"),
+                {"content": "late done", "tool_calls": []},
+            ],
+            gate=gate,
+        )
+
+        store.begin_turn("req-1")
+        with tcs.turn_store_scope(store):
+            raw = await registry.execute(
+                "delegate_task",
+                {
+                    "goal": "late edit",
+                    "mode": "worker",
+                    "max_turns": 2,
+                    "timeout": 10,
+                    "background": True,
+                },
+                task_id="r3-late",
+            )
+            assert tcs.current_turn_change_store() is store
+        payload = json.loads(raw["output"])
+        process = manager.get(payload["process_id"])
+        # Turn 1 seals while the gated child has not touched any file yet.
+        assert store.seal() is None
+
+        store.begin_turn("req-2")
+        gate.set()
+        assert await manager.wait(process, 10_000)
+        # The child finished during turn 2; its edit must not join this turn.
+        return store.seal()
+
+    manifest = run(scenario())
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert manifest is None
