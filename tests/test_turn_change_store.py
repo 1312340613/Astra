@@ -2250,6 +2250,41 @@ def test_index_absent_is_an_empty_but_available_history(tmp_path: Path) -> None:
     assert (read.ok, read.records, read.reason) == (True, [], "")
 
 
+def test_missing_index_after_published_history_is_unavailable(tmp_path: Path) -> None:
+    """已发布过的索引消失 → “暂不可用”，不假装没有历史、不写回（review R2）.
+
+    快照目录仍在（turn-1/manifest.json）；查询必须只读：不修复、不写回。
+    """
+    subject = make_store(tmp_path)
+    seal_modified_turn(subject, tmp_path, request_id="req-1")
+    assert subject.completed_turns().ok is True
+
+    index_path = session_dir(tmp_path) / store.INDEX_NAME
+    assert (session_dir(tmp_path) / "turn-1" / store.MANIFEST_NAME).exists()
+    index_path.unlink()
+
+    read = subject.completed_turns()
+
+    assert read.ok is False
+    assert read.records == []
+    assert read.reason
+    assert not index_path.exists()  # 查询不修复、不写回
+
+
+def test_missing_index_is_unavailable_for_a_later_instance_too(tmp_path: Path) -> None:
+    """跨实例：曾发布过索引的会话，索引消失后对新实例同样报不可用."""
+    subject = make_store(tmp_path)
+    seal_modified_turn(subject, tmp_path, request_id="req-1")
+    (session_dir(tmp_path) / store.INDEX_NAME).unlink()
+
+    later = make_store(tmp_path)
+
+    read = later.completed_turns()
+
+    assert read.ok is False
+    assert read.records == []
+
+
 def test_empty_turn_is_indexed_and_consumes_a_sequence(tmp_path: Path) -> None:
     """空回合不落 manifest，但仍占号并留下 dir=null 的记录."""
     subject = make_store(tmp_path)

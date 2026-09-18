@@ -598,11 +598,17 @@ class TurnChangeStore:
         ordered = sorted(records, key=lambda item: _record_seq(item) or 0)
         return ordered[-self._index_window_size():]
 
-    def _read_index_file(self) -> tuple[bool, str, list[dict[str, Any]]]:
+    def _read_index_file(
+        self, *, missing_after_history: bool = False
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
         """Fresh disk read of ``turns.json``; ``ok=False`` means "暂不可用".
 
         不缓存结果：外部损坏/替换必须在下一次查询被看见（review R1）。目录身份被
         替换（锚不符）时同样返回不可用，不采信换入者的记录。
+
+        ``missing_after_history``（只用于查询路径）：文件缺失时，若本会话曾有完成
+        回合（内存记录/高水位/``turn-*`` 目录任一），说明"索引发布过又消失"，报
+        暂不可用；写路径与淘汰决策保持"缺失=还没有索引"的语义（review R2）。
         """
         if not self._storage_ok():
             return False, INDEX_REASON_UNAVAILABLE, []
@@ -611,6 +617,12 @@ class TurnChangeStore:
                 self.session_dir / INDEX_NAME, anchors=self._storage_anchors()
             )
         except FileNotFoundError:
+            if missing_after_history and self._has_history_evidence():
+                logger.warning(
+                    "turn-change store: completed-turn index vanished for %s",
+                    self.session_dir,
+                )
+                return False, INDEX_REASON_UNAVAILABLE, []
             return True, "", []
         except OSError as exc:
             logger.warning("turn-change store: unreadable completed-turn index (%s)", exc)
@@ -629,11 +641,22 @@ class TurnChangeStore:
             return False, INDEX_REASON_UNAVAILABLE, []
         return True, "", [dict(item) for item in records]
 
+    def _has_history_evidence(self) -> bool:
+        """True when this session had completed turns before (review R2).
+
+        信号（任一）：本实例登记过索引记录或分配过序号；会话目录里仍有
+        ``turn-*`` 快照目录。索引文件缺失而这里为 True 意味着"索引发布过又
+        消失"——查询应报暂不可用，而不是"没有历史"。
+        """
+        if self._index_records or self._seq_high_water > 0:
+            return True
+        return bool(self._turn_dirs())
+
     def _index_records_for_read(self) -> tuple[bool, str, list[dict[str, Any]]]:
         """Records visible to queries: 未落定的写优先报"暂不可用"（review R1）."""
         if self._index_dirty or self._index_unsettled:
             return False, INDEX_REASON_UNSETTLED, []
-        return self._read_index_file()
+        return self._read_index_file(missing_after_history=True)
 
     def _next_index_seq(self) -> int | None:
         """Highest seq the on-disk index knows about; ``None`` when unreadable."""
