@@ -36,6 +36,29 @@ def test_local_execution_receipt_survives_registry(tool, args, code, tmp_path):
     asyncio.run(run())
 
 
+def test_foreground_yield_ceiling_allows_ninety_seconds(tmp_path):
+    """The foreground wait ceiling for code tools is 90s (raised from 60s)."""
+    async def run():
+        registry = ToolRegistry()
+        sandbox = LocalSandbox(timeout=3, workdir=str(tmp_path))
+        register_code_tools(registry, sandbox)
+        try:
+            for name in ("execute_python", "execute_shell", "notebook_execute"):
+                properties = registry.get(name).parameters["properties"]
+                assert properties["foreground_yield_ms"]["maximum"] == 90_000
+            accepted = await registry.execute(
+                "execute_shell", {"command": "echo ok", "foreground_yield_ms": 90_000}
+            )
+            assert accepted["execution"] == {"status": "completed", "exit_code": 0}
+            rejected = await registry.execute(
+                "execute_shell", {"command": "echo ok", "foreground_yield_ms": 90_001}
+            )
+            assert "must be between 0 and 90000" in rejected["error"]
+        finally:
+            await sandbox.close()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("terminal", ["completed", "cancelled"])
 def test_background_receipts_remain_pending_until_observed_terminal_result(tmp_path, terminal):
     async def run():

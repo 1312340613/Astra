@@ -496,8 +496,8 @@ def register_code_tools(
         task_id: str,
         supervisor_spec: dict | None = None,
     ):
-        if foreground_yield_ms < 0 or foreground_yield_ms > 60_000:
-            raise ValueError("foreground_yield_ms must be between 0 and 60000")
+        if foreground_yield_ms < 0 or foreground_yield_ms > 90_000:
+            raise ValueError("foreground_yield_ms must be between 0 and 90000")
         use_supervisor = (
             supervisor_spec is not None
             and (background or foreground_yield_ms > 0)
@@ -678,7 +678,7 @@ def register_code_tools(
         parameters={"type": "object", "properties": {
             "code": {"type": "string", "description": "Python code"},
             "foreground_yield_ms": {
-                "type": "integer", "minimum": 0, "maximum": 60000, "default": 10000,
+                "type": "integer", "minimum": 0, "maximum": 90000, "default": 10000,
             },
             "background": {"type": "boolean", "default": False},
             **approval_justification_schema(),
@@ -743,7 +743,7 @@ def register_code_tools(
             "foreground_yield_ms": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 60000,
+                "maximum": 90000,
                 "default": 10000,
                 "description": "Wait this long before returning a background process_id; 0 waits until completion.",
             },

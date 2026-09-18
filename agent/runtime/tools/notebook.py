@@ -51,7 +51,7 @@ def register_notebook_tools(registry, execute_python, permission_check, permissi
             "skip_cells": {"type": "array", "items": {"type": "integer", "minimum": 1}, "default": []},
             "cell_timeout": {"type": "integer", "minimum": 1, "maximum": 86400, "default": 600},
             "kernel_name": {"type": "string", "default": ""},
-            "foreground_yield_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "default": 10000},
+            "foreground_yield_ms": {"type": "integer", "minimum": 0, "maximum": 90000, "default": 10000},
             "background": {"type": "boolean", "default": False},
             **approval_justification_schema(),
         }, "required": ["path"]},
