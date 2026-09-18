@@ -161,10 +161,12 @@ def format_turn_list(
     )
     width = min(max(len(_display(entry)) for entry in entries), MAX_PATH_COLUMN)
     number_width = len(str(len(entries)))
-    # 总输出限额：标题与截断提示一并计入（review R4）；被截断条目编号保持不变，
-    # 仍可用 ``n|path`` 选择。
+    # 总输出限额：行数与字符同时执行，标题、行内容和截断提示都计入；哪个先到
+    # 就截断（review R4）。被截断条目编号保持不变，仍可用 ``n|path`` 选择。
     limit = min(len(entries), MAX_OUTPUT_LINES - 2)
     lines = [header]
+    used_chars = len(header)
+    hint_reserve = len(_list_truncation_hint(len(entries), len(entries))) + 1
     for index, entry in enumerate(entries[:limit], start=1):
         name = _display(entry)
         padding = " " * max(0, width - len(name))
@@ -174,13 +176,23 @@ def format_turn_list(
         row += _compare_mark(entry)
         if index > files_count:
             row += f"（未能确认：{entry.reason or '未知原因'}）"
-        lines.append(" " + row)
-    if limit < len(entries):
-        lines.append(
-            f"（{OUTPUT_TRUNCATION_MARK}：仅显示前 {limit} 条，"
-            f"其余 {len(entries) - limit} 条可用编号继续选择）"
-        )
+        rendered = " " + row
+        budget = MAX_OUTPUT_CHARS - (hint_reserve if index < len(entries) else 0)
+        if used_chars + 1 + len(rendered) > budget:
+            break
+        lines.append(rendered)
+        used_chars += 1 + len(rendered)
+    shown = len(lines) - 1
+    if shown < len(entries):
+        lines.append(_list_truncation_hint(shown, len(entries) - shown))
     return "\n".join(lines)
+
+
+def _list_truncation_hint(shown: int, rest: int) -> str:
+    return (
+        f"（{OUTPUT_TRUNCATION_MARK}：仅显示前 {shown} 条，"
+        f"其余 {rest} 条可用编号继续选择）"
+    )
 
 
 # --------------------------------------------------------------- diff view
@@ -289,8 +301,9 @@ def _diff_body(entry: FileChange, sides: LoadedSides) -> tuple[list[str], list[s
         preview_after = after_lines[:MAX_PREVIEW_LINES]
         if before != after:
             marks.append(RANGE_MARK)
-        lines = _aligned_lines(preview_before, preview_after, [RANGE_MARK] if before != after else [])
-        return lines, [*marks, LONG_PREVIEW_MARK]
+        preview_marks: list[str] = []
+        lines = _aligned_lines(preview_before, preview_after, preview_marks)
+        return lines, [*marks, *preview_marks, LONG_PREVIEW_MARK]
 
     if capped:
         # 字节预算用尽（行数未超）：跳过修剪，整块替换（§3.4「整块替换=粗略展示」）

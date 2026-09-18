@@ -24,7 +24,9 @@ from types import SimpleNamespace
 import pytest
 
 from agent.core.msg import ContentBlock, Msg
+from agent.cli.turn_changes_command import execute_changes_command
 from agent.runtime import turn_change_store as tcs
+from agent.runtime import turn_changes_view as changes_view
 from agent.runtime.llm import LLMConfig, LLMResponseError
 from agent.runtime.react import ReActAgent
 from agent.runtime.token_estimator import estimate_messages_tokens
@@ -1036,3 +1038,52 @@ def test_cross_root_raw_path_forms_revert_no_event(tmp_path, monkeypatch, path_f
 
     assert [event for event in events if event["type"] == "turn_changes"] == [], events
     assert (files / name).read_text(encoding="utf-8") == "original\n"
+
+
+def test_restored_session_after_normal_shutdown_reports_unavailable(tmp_path):
+    """真实完成 → 正常退出（快照目录被清理）→ 恢复会话：仍保守报“暂不可用”（R5 adjacent）."""
+    session_path = str(tmp_path / "sessions" / "restore.json")
+    agent = ReActAgent(
+        "tc-agent",
+        ScriptedLLM([DONE]),
+        ToolRegistry(),
+        timing_log_enabled=False,
+        query_profile_enabled=False,
+        max_iterations=2,
+    )
+    agent._sandbox = SimpleNamespace(workdir=tmp_path)
+    agent.context.set_session(session_path)
+
+    event_types = [
+        event["type"]
+        for event in run(
+            collect_stream(agent, Msg(content=[ContentBlock.text("hello")], id="msg-1"))
+        )
+    ]
+    assert "done" in event_types
+
+    store = agent.turn_change_store()
+    assert store is not None
+    index = store.completed_turns()
+    assert index.ok and len(index.records) == 1
+
+    agent.end_session("shutdown")
+    assert not store.session_dir.exists()  # 正常退出的清理策略保持不变
+
+    restored = ReActAgent(
+        "tc-agent",
+        ScriptedLLM([]),
+        ToolRegistry(),
+        timing_log_enabled=False,
+        query_profile_enabled=False,
+        max_iterations=2,
+    )
+    restored._sandbox = SimpleNamespace(workdir=tmp_path)
+    restored.context.set_session(session_path)
+    assert restored.context.load() is True
+    assert [msg.get("role") for msg in restored.context.messages] == ["user", "assistant"]
+
+    output, error = execute_changes_command(restored, "")
+
+    assert error == ""
+    assert output == changes_view.INDEX_UNAVAILABLE

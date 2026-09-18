@@ -4501,7 +4501,9 @@ class ReActAgent(AgentBase):
         store the answer is ``available``; otherwise the session directory is
         probed read-only and ``none`` is reserved for a session without any
         evidence of completed turns.  A session that carries history but has
-        no live store (for example one restored later) stays ``unavailable``.
+        no live store — on disk or in the loaded conversation (for example one
+        restored after a normal shutdown cleaned its snapshots) — stays
+        ``unavailable``.
         """
         if self.turn_change_store() is not None:
             return "available"
@@ -4513,8 +4515,19 @@ class ReActAgent(AgentBase):
             logger.exception("turn-change session probe failed")
             return "unavailable"
         if evidence is False:
+            if self._session_has_messages():
+                # 恢复的旧会话：聊天历史已加载，但快照/索引不可恢复 → 保守
+                # （review R5 adjacent）
+                return "unavailable"
             return "none"
         return "unavailable"
+
+    def _session_has_messages(self) -> bool:
+        """True when the loaded context already carries conversation history."""
+        try:
+            return bool(self.context.messages)
+        except Exception:
+            return True  # 无法判断时保守
 
     def _current_turn_change_store(self) -> "TurnChangeStore | None":
         """Session-owned turn-change store; rebuilt when the session changes."""

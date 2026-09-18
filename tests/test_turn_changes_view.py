@@ -216,6 +216,24 @@ def test_list_caps_output_at_the_total_line_limit_with_many_entries():
     assert last_row_number.isdigit() and int(last_row_number) < 500
 
 
+def test_list_caps_characters_independently_of_line_count():
+    """长路径 350 条：字符上限先到也必须截断并提示（review R4 adjacent）."""
+    prefix = "/".join("d" * 90 for _ in range(7))
+    files = [change(f"{prefix}/file-{index:03d}.txt") for index in range(350)]
+    text = view.format_turn_list(1, record(files=350), manifest(files))
+    lines = lines_of(text)
+
+    assert len(text) <= view.MAX_OUTPUT_CHARS
+    assert len(lines) <= view.MAX_OUTPUT_LINES
+    assert view.OUTPUT_TRUNCATION_MARK in text
+    assert "可用编号" in text
+    assert len(lines) < view.MAX_OUTPUT_LINES  # 字符先到：行数还没用满
+    assert "file-000.txt" in lines[1]
+    assert lines[1].lstrip().startswith("1.")
+    last_row_number = lines[-2].lstrip().split(".", 1)[0].strip()
+    assert last_row_number.isdigit()
+
+
 def test_list_uses_minus_sign_and_dash_for_unavailable_counts():
     files = [change("a.txt", added=3, removed=0), change("b.txt", added=None, removed=None)]
     text = view.format_turn_list(1, record(files=2), manifest(files))
@@ -461,6 +479,17 @@ def test_diff_full_over_rows_uses_bounded_decode():
     assert all(size <= view.MAX_SCAN_BYTES for size in decoded), decoded
     assert view.LONG_PREVIEW_MARK in text
     assert len(lines_of(text)) <= view.MAX_OUTPUT_LINES
+
+
+def test_diff_full_over_rows_preview_keeps_the_coarse_mark():
+    """超长预览里块替换夹带未变行：粗略展示标记必须保留（review R3 adjacent）."""
+    before = b"header\nold-A\nunchanged-middle\nold-B\n" + b"tail\n" * 2500
+    after = b"header\nnew-A\nunchanged-middle\nnew-B\n" + b"tail\n" * 2500
+    entry = change("note.txt", added=2, removed=2, compare=COMPARE_FULL)
+    text = view.format_file_diff(1, record(), manifest(), entry, sides(before, after))
+
+    assert view.LONG_PREVIEW_MARK in text
+    assert view.COARSE_MARK in text
 
 
 def test_diff_identical_bytes_without_visible_change_is_not_a_claim():
