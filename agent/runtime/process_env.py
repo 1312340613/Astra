@@ -64,14 +64,28 @@ def pid_alive(pid: int) -> bool:
 
         process_query_limited_information = 0x1000
         still_active = 259
+        error_invalid_parameter = 87
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _set_winapi_signature(
+            kernel32.OpenProcess, [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong], ctypes.c_void_p
+        )
+        _set_winapi_signature(
+            kernel32.GetExitCodeProcess,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)],
+            ctypes.c_int,
+        )
+        _set_winapi_signature(kernel32.CloseHandle, [ctypes.c_void_p], ctypes.c_int)
         handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
         if not handle:
-            return False
+            # 只有 ERROR_INVALID_PARAMETER 才是"pid 不存在"；访问被拒等查询失败
+            # 无法证明进程已退出，保守视为存活（F3）。
+            get_last_error = getattr(ctypes, "get_last_error", None)
+            error = int(get_last_error()) if callable(get_last_error) else 0
+            return error != error_invalid_parameter
         try:
             exit_code = ctypes.c_ulong()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
+                return True  # 查询失败 ≠ 已退出：保守视为存活（F3）
             return exit_code.value == still_active
         finally:
             kernel32.CloseHandle(handle)
@@ -84,6 +98,18 @@ def pid_alive(pid: int) -> bool:
     except OSError:
         return True
     return True
+
+
+def _set_winapi_signature(function, argtypes, restype) -> None:
+    """Declare a WinAPI prototype when the object supports one.
+
+    Real ``ctypes`` functions expose ``argtypes``/``restype``; test doubles
+    (plain bound methods) do not, and are skipped instead of failing the probe.
+    """
+    if not hasattr(function, "argtypes"):
+        return
+    function.argtypes = argtypes
+    function.restype = restype
 
 
 def hidden_process_creationflags(*, new_process_group: bool = False) -> int:

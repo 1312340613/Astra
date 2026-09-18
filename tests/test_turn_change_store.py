@@ -1305,6 +1305,41 @@ def test_cleanup_orphans_default_probe_keeps_a_live_session(tmp_path: Path) -> N
     assert (root / "self").exists()
 
 
+def test_cleanup_orphans_keeps_the_session_when_liveness_is_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F3：探活"不确定"必须保守保留（查询失败 ≠ 进程已退出）."""
+    import ctypes
+    from types import SimpleNamespace
+
+    from agent.runtime import process_env
+
+    root = tmp_path / "turn-changes"
+    session = make_session_dir(
+        root, "review", json.dumps({"session_id": "review", "pid": 987654321, "token": "t"})
+    )
+
+    class Kernel:
+        def OpenProcess(self, *_args):
+            return 123
+
+        def GetExitCodeProcess(self, *_args):
+            return 0  # 查询失败：不能据此认定已退出
+
+        def CloseHandle(self, *_args):
+            return 1
+
+    monkeypatch.setattr(process_env, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: Kernel(), raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
+
+    removed = store.TurnChangeStore.cleanup_orphans(root)
+
+    assert removed == []
+    assert session.exists()
+
+
 def test_store_takes_over_a_dead_owner_and_cleanup_keeps_it(tmp_path: Path) -> None:
     """R7：死亡 pid 的 owner 被原子接管；清理器不会把活跃目录当孤儿删除."""
     root = tmp_path / "turn-changes"
