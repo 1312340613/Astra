@@ -18,6 +18,7 @@ from .persona import PersonaState, parse_persona_metadata
 from .prompts import get_prompt_profile, is_legacy_persona_prompt, normalize_system_prompt
 from .system_prompt_projection import SystemPromptProjection
 from .runtime_context_projection import RuntimeContextProjection
+from .system_suffix import split_legacy_suffix
 from .time_utils import needs_relative_date_anchor, relative_date_anchor, relative_date_metadata, weekday_label
 
 if TYPE_CHECKING:
@@ -308,6 +309,7 @@ class AgentContext:
     _system_token_cost: int = field(default=0, init=False, repr=False)
     _tools_token_cost: int = 0
     _stable_system_suffix: str = field(default="", init=False, repr=False)
+    _system_prompt_migration: dict = field(default_factory=dict, init=False, repr=False)
     system_projection: SystemPromptProjection = field(default_factory=SystemPromptProjection, init=False, repr=False)
     runtime_projection: RuntimeContextProjection = field(default_factory=RuntimeContextProjection, init=False, repr=False)
 
@@ -330,6 +332,7 @@ class AgentContext:
         return self.total_prompt_tokens + self.total_completion_tokens
 
     def set_session(self, path: str):
+        self._system_prompt_migration = {}
         self.system_projection.reset()
         self.runtime_projection.reset()
         self._session_path = path
@@ -358,11 +361,29 @@ class AgentContext:
         """Set deterministic capability guidance kept outside session state.
 
         The suffix is reconstructed from installed capabilities on startup, so
-        legacy session prompts can be restored verbatim without losing current
-        skill guidance or rewriting the persisted prompt every turn.
+        legacy generated tails can be retired without losing custom prompt text.
         """
         self._stable_system_suffix = str(suffix or "").strip()
+        self._migrate_system_suffix()
         self._system_token_cost = _estimate_value_tokens(self.effective_system_prompt)
+
+    def _migrate_system_suffix(self) -> None:
+        base, catalogs, projects = split_legacy_suffix(self.system_prompt, self._stable_system_suffix)
+        if not (catalogs or projects):
+            return
+        # Audit-only reversible backup: persisted atomically with the new base,
+        # never included in provider messages or token accounting.
+        migration = dict(self._system_prompt_migration)
+        migration.setdefault("version", 1)
+        migration.setdefault("original_system_prompt", self.system_prompt)
+        for key, count in (("skill_catalogs", catalogs), ("project_blocks", projects)):
+            migration[key] = int(migration.get(key, 0)) + count
+        self._system_prompt_migration = migration
+        self.system_prompt = base
+        self.system_projection.reset()
+        logger.info("Retired legacy system suffix: %s catalogs, %s project blocks", catalogs, projects)
+        if "<available-skills>" in base or "## Project guidance:" in base:
+            logger.warning("Unrecognized legacy prompt blocks retained; original prompt backed up")
 
     def set_persona(self, state: PersonaState, prompt: str):
         """Set an assembled persona prompt and persist its identity separately."""
@@ -470,6 +491,7 @@ class AgentContext:
         self._rebuild_token_cache()
         data = {
             "system_prompt": self.system_prompt,
+            "system_prompt_migration": self._system_prompt_migration,
             "system_prompt_projection": self.system_projection.state,
             "runtime_context_projection": self.runtime_projection.state,
             "persona_id": self.persona_id,
@@ -527,6 +549,8 @@ class AgentContext:
                 hydrate_content(message.get("content"), self.session_path)
             self.system_projection = SystemPromptProjection(data.get("system_prompt_projection"))
             self.runtime_projection = RuntimeContextProjection(data.get("runtime_context_projection"))
+            migration = data.get("system_prompt_migration")
+            self._system_prompt_migration = dict(migration) if isinstance(migration, dict) else {}
             loaded_prompt = data.get("system_prompt")
             if isinstance(loaded_prompt, str) and loaded_prompt.strip():
                 persona_id = data.get("persona_id") if isinstance(data.get("persona_id"), str) else ""
@@ -546,11 +570,16 @@ class AgentContext:
                 active_mode = state_text("active_mode")
                 relationship_context = state_text("relationship_context")
                 affect = state_text("affect")
-                retiring_persona = is_legacy_persona_prompt(loaded_prompt, persona_id or None)
+                # Migrate before persona normalization: that may rebuild the
+                # base itself, but cannot be allowed to hide a contaminated
+                # persisted projection or discard the original backup.
+                self.system_prompt = loaded_prompt
+                self._migrate_system_suffix()
+                retiring_persona = is_legacy_persona_prompt(self.system_prompt, persona_id or None)
                 if retiring_persona:
                     active_mode = relationship_context = affect = ""
                 self.system_prompt = normalize_system_prompt(
-                    loaded_prompt,
+                    self.system_prompt,
                     persona_id=persona_id or None,
                     persona_version=persona_version,
                     state_revision=state_revision,
@@ -918,9 +947,9 @@ class AgentContext:
                 # summary failed on a non-forced pass). Keep history and save
                 # bookkeeping untouched; a forced retry may still act.
                 return changed
-            # Keep system prompt separate, replace messages
+            # The compressor's head is the effective prompt (base + runtime
+            # suffix). It is input context, never authority to replace the base.
             if compressed and compressed[0].get("role") == "system":
-                self.system_prompt = compressed[0].get("content", "")
                 self.messages = compressed[1:]
             else:
                 self.messages = compressed

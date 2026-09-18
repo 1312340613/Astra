@@ -139,12 +139,14 @@ class SkillStore:
         return items
 
     def catalog_prompt(self) -> str:
+        from .system_suffix import SKILL_CATALOG_INTRO
+
         items = self.list()
         if not items:
             return ""
         lines = [
             "<available-skills>",
-            "开始编码/调试/测试/审查任务前，检查下方目录。有匹配的 Skill 必须先 skill_view 读取再执行。",
+            SKILL_CATALOG_INTRO,
         ]
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in items:

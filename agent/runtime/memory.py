@@ -62,17 +62,27 @@ def default_memory_path() -> Path:
     return state_path("memory.db")
 
 
-def _safe_memory_text(value: str, *, max_chars: int, allow_empty: bool = False) -> str:
+def _safe_state_text(value: str, *, max_chars: int, allow_empty: bool = False) -> str:
     text = " ".join(str(value).strip().split())
     if not text and not allow_empty:
         raise ValueError("Memory content cannot be empty")
     if len(text) > max_chars:
         raise ValueError(f"Memory content is too long (max {max_chars} characters)")
-    if "§" in text:
-        raise ValueError("Memory content cannot contain the entry delimiter (§)")
     if any(pattern.search(text) for pattern in _SECRET_PATTERNS):
         raise ValueError("Memory content looks like a secret or credential and was not stored")
     return text
+
+
+def _safe_memory_text(value: str, *, max_chars: int, allow_empty: bool = False) -> str:
+    text = _safe_state_text(value, max_chars=max_chars, allow_empty=allow_empty)
+    if "§" in text:
+        raise ValueError("Memory content cannot contain the entry delimiter (§)")
+    return text
+
+
+def _safe_plan_text(value: str, *, max_chars: int, allow_empty: bool = False) -> str:
+    # Plans are stored as JSON, not delimiter-separated Core Memory entries.
+    return _safe_state_text(value, max_chars=max_chars, allow_empty=allow_empty)
 
 
 class MemoryStore:
@@ -677,7 +687,7 @@ class MemoryStore:
         *,
         require_goal: bool,
     ) -> tuple[str, list[dict[str, str]]]:
-        clean_goal = _safe_memory_text(goal, max_chars=600, allow_empty=True)
+        clean_goal = _safe_plan_text(goal, max_chars=600, allow_empty=True)
         if require_goal and not clean_goal:
             raise ValueError("Plan goal must not be empty")
         if not 2 <= len(steps) <= 12:
@@ -685,7 +695,7 @@ class MemoryStore:
         normalized: list[dict[str, str]] = []
         seen: set[str] = set()
         for raw in steps:
-            text = _safe_memory_text(raw.get("text", ""), max_chars=240)
+            text = _safe_plan_text(raw.get("text", ""), max_chars=240)
             status = str(raw.get("status") or "")
             if not text:
                 raise ValueError("Plan step text must not be empty")
@@ -705,7 +715,7 @@ class MemoryStore:
 
     def set_working_plan(self, session_id: str, steps: list[str], *, goal: str = "") -> dict[str, Any]:
         data = self.get_working(session_id)
-        requested_goal = _safe_memory_text(goal, max_chars=600, allow_empty=True)
+        requested_goal = _safe_plan_text(goal, max_chars=600, allow_empty=True)
         effective_goal = requested_goal or str(data.get("goal") or "")
         clean_goal, normalized = self._normalize_working_plan(
             effective_goal,

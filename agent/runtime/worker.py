@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any
 
 from .tools.processes import ManagedProcess, ProcessManager
+from .execution_limits import WORKER_TIMEOUT_MAX_SECONDS
 
 
 REASONING_EFFORTS = ("low", "medium", "high", "max")
@@ -80,8 +81,8 @@ class WorkerSpec:
             raise ValueError("goal is required")
         if self.max_turns < 1 or self.max_turns > MAX_WORKER_TURNS:
             raise ValueError(f"max_turns must be 1-{MAX_WORKER_TURNS}")
-        if self.timeout_seconds < 1 or self.timeout_seconds > 1_800:
-            raise ValueError("timeout must be 1-1800")
+        if self.timeout_seconds < 1 or self.timeout_seconds > WORKER_TIMEOUT_MAX_SECONDS:
+            raise ValueError(f"timeout must be 1-{WORKER_TIMEOUT_MAX_SECONDS}")
         object.__setattr__(self, "worker_type", worker_type)
         object.__setattr__(self, "goal", goal)
         object.__setattr__(self, "model", str(self.model or "").strip())
@@ -219,6 +220,10 @@ def attach_worker_run(
 
     enriched = dict(payload or manager.describe(process))
     enriched["worker"] = WorkerRun.from_process(manager, process).to_dict()
+    if "execution_binding" in process.metadata:
+        enriched["execution_binding"] = dict(process.metadata["execution_binding"])
+    if "runtime" in process.metadata:
+        enriched["runtime"] = dict(process.metadata["runtime"])
     transcript_path = str(process.metadata.get("session_transcript_path") or "")
     if transcript_path:
         enriched["session_transcript_path"] = transcript_path

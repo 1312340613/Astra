@@ -1922,6 +1922,9 @@ async def _main(startup_started: float):
     await _send_model_info()
     _send_session_info()
     startup_profile_report = startup_profiler.finish("ready")
+    from agent.runtime.runtime_identity import runtime_identity
+    startup_profile_report["runtime"] = runtime_identity()
+    agent.context.append_diagnostic({"type": "runtime_started", **runtime_identity()})
 
     # ── Startup dashboard ──
     def _send_startup_status(_statuses=None) -> None:

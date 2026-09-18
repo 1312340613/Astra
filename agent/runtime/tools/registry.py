@@ -335,6 +335,24 @@ class ToolRegistry:
         """Delegates observe the parent's live switch, including revocation."""
         self._yolo_state = parent._yolo_state
 
+    def share_session_with(self, parent: "ToolRegistry") -> None:
+        """Rebound tools keep the parent's policy, hooks, grants and audit sink.
+
+        Session cleanup stays owned by the parent; do not register a callback
+        that would retain every short-lived child registry until session end.
+        Tool definitions and filesystem roots remain local to this registry.
+        """
+        self.policy = parent.policy
+        self.hooks = parent.hooks
+        self.approval_handler = parent.approval_handler
+        self.approval_audit_handler = parent.approval_audit_handler
+        self.share_yolo_with(parent)
+        self.approved_permission_scopes = parent.approved_permission_scopes
+        self._session_policy_allows = parent._session_policy_allows
+        self.artifact_dir = parent.artifact_dir
+        self.max_inline_chars = parent.max_inline_chars
+        self.max_fresh_chars = parent.max_fresh_chars
+
     async def _request_approval(
         self,
         *,

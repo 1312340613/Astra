@@ -1005,6 +1005,8 @@ class AgentTeamStore:
         *,
         new_owner_task_id: str,
         session_id: str,
+        expected_owner_task_id: str | None = None,
+        live_process_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Atomically adopt an orphaned Team from an earlier task in this session."""
 
@@ -1013,8 +1015,6 @@ class AgentTeamStore:
         if not new_owner or not current_session:
             raise ValueError("resuming an Agent Team requires a task and session")
         now = time.time()
-        active_statuses = tuple(sorted(ACTIVE_AGENT_STATUSES))
-        placeholders = ",".join("?" for _ in active_statuses)
         with self._lock, self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             team = db.execute(
@@ -1029,6 +1029,8 @@ class AgentTeamStore:
             previous_owner = str(team["owner_task_id"] or "")
             if previous_owner == new_owner:
                 return self.get_team(team_id) or {}
+            if expected_owner_task_id is not None and previous_owner != expected_owner_task_id:
+                raise ValueError("Agent Team owner changed during resume; read the current team state")
 
             has_task_runs = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'"
@@ -1051,15 +1053,22 @@ class AgentTeamStore:
                 }:
                     raise ValueError("previous Agent Team owner task is still active")
 
-            active_helpers = db.execute(
-                f"SELECT id FROM team_agents WHERE team_id=? AND id<>? "
-                f"AND status IN ({placeholders})",
-                [str(team_id), str(team["lead_agent_id"]), *active_statuses],
-            ).fetchall()
-            if active_helpers:
-                raise ValueError(
-                    "Agent Team still has active teammates; wait or stop it before resuming"
-                )
+            if live_process_ids is not None:
+                helpers = db.execute(
+                    f"SELECT id, process_id FROM team_agents WHERE team_id=? AND id<>? "
+                    f"AND status IN ({_ACTIVE_STATUS_SQL})",
+                    (str(team_id), str(team["lead_agent_id"])),
+                ).fetchall()
+                for helper in helpers:
+                    if str(helper["process_id"] or "") not in live_process_ids:
+                        db.execute(
+                            "UPDATE team_agents SET status='interrupted', updated_at=?, finished_at=? WHERE id=?",
+                            (now, now, helper["id"]),
+                        )
+                        db.execute(
+                            "UPDATE team_episodes SET outcome='interrupted', finished_at=? WHERE agent_id=? AND outcome='running'",
+                            (now, helper["id"]),
+                        )
 
             db.execute(
                 """UPDATE agent_teams SET owner_task_id=?, status='active',
@@ -1073,9 +1082,22 @@ class AgentTeamStore:
             )
             db.execute(
                 """UPDATE team_tasks SET lease_until=NULL, updated_at=?, version=version+1
-                   WHERE team_id=? AND status='running'""",
-                (now, str(team_id)),
+                   WHERE team_id=? AND status='running' AND owner_agent_id NOT IN (
+                       SELECT id FROM team_agents WHERE team_id=? AND id<>?
+                       AND status IN ('starting', 'running', 'idle', 'waiting')
+                   )""",
+                (now, str(team_id), str(team_id), str(team["lead_agent_id"])),
             )
+            # Completion notices and the authoritative owner change together.
+            # Keep delivered flags/cursors: adoption must never replay a result.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='delegate_notifications'").fetchone():
+                db.execute(
+                    """UPDATE delegate_notifications SET owner_task_id=?, updated_at=?
+                       WHERE owner_task_id=? AND process_id IN (
+                           SELECT process_id FROM team_agents WHERE team_id=?
+                       )""",
+                    (new_owner, now, previous_owner, str(team_id)),
+                )
         resumed = self.get_team(team_id) or {}
         resumed["resumed_from_task_id"] = previous_owner
         return resumed
@@ -1116,7 +1138,12 @@ class AgentTeamRuntime:
         if team is None:
             raise ValueError(f"unknown team_id: {team_id}")
         if str(team.get("owner_task_id") or "") != str(owner_task_id or ""):
-            raise AgentTeamOwnershipError("agent team belongs to another parent task")
+            # A live member keeps its authenticated identity across lead turns.
+            # Its creation task id remains immutable provenance.
+            member_id = current_team_agent_id()
+            member = self.store.get_agent(member_id) if member_id else None
+            if not member or str(member.get("team_id") or "") != str(team_id):
+                raise AgentTeamOwnershipError("agent team belongs to another parent task")
         return team
 
     def sender_for(self, team: dict[str, Any]) -> str:

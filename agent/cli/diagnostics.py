@@ -9,6 +9,7 @@ from typing import Any
 
 from agent.runtime.capabilities import build_runtime_capabilities, computer_use_capability
 from agent.runtime.metrics import runtime_metrics
+from agent.runtime.runtime_identity import runtime_identity
 from agent.runtime.providers import DEFAULT_PROVIDER_REGISTRY
 from agent.runtime.tools.web import exa_configuration_status
 from agent.runtime.tracing import tracing_status
@@ -72,6 +73,7 @@ def build_runtime_diagnostics(
     computer = computer_use_capability(agent)
     snapshot: dict[str, Any] = {
         "version": 1,
+        "runtime": runtime_identity(compare_disk=True),
         "model": str(agent.llm.config.model),
         "context": context,
         "prompt_cache": {
@@ -142,6 +144,7 @@ def build_runtime_diagnostics(
         ),
     ]
     startup = snapshot["startup"]
+    runtime = snapshot["runtime"]
     if startup.get("phases"):
         phases = sorted(
             startup["phases"],
@@ -164,6 +167,12 @@ def build_runtime_diagnostics(
             "  Profiling is off; set ASTRA_PROFILE_STARTUP=1 before launch for phase timings.",
         ]
     mcp = snapshot["mcp"]
+    startup_lines.extend([
+        f"  Loaded runtime: pid={runtime['pid']} run={runtime['run_id']}",
+        f"  Loaded source: {runtime['source_sha256']}",
+        f"  Source changed since startup: {runtime['source_changed']}",
+        f"  Execution limits: {json.dumps(runtime['execution_limits'], sort_keys=True)}",
+    ])
     mcp_lines = [f"MCP: {mcp['ready']}/{mcp['total']} ready; {mcp['tools']} tools"]
     mcp_lines.extend(
         f"  {item['name']}: {item['state']} ({item['tools']} tools)"

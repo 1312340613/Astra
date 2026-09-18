@@ -19,6 +19,11 @@ from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlparse
 
 from ..deepseek import is_deepseek_model
+from ..execution_limits import (
+    DELEGATE_FOREGROUND_MAX_MS, POLL_MAX_MS, WORKER_TIMEOUT_MAX_SECONDS, validate_wait_ms,
+)
+from ..runtime_identity import runtime_identity
+from ..async_io import durable_io
 from ..llm import LLMClient
 from ..agent_team import (
     EPISODE_KINDS,
@@ -44,6 +49,7 @@ from .files import register_file_tools
 from .code import register_code_tools
 from .git import register_git_tools
 from agent.sandbox.local import LocalSandbox
+from agent.sandbox.docker import DockerSandbox
 
 if TYPE_CHECKING:
     from ..task_store import TaskStore
@@ -196,6 +202,14 @@ class DelegateMailboxStore:
 
     def upsert(self, owner_task_id: str, entry: dict[str, Any]) -> None:
         with self._lock, self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='team_agents'").fetchone():
+                owner = db.execute(
+                    """SELECT t.owner_task_id FROM agent_teams t JOIN team_agents a ON a.team_id=t.id
+                       WHERE a.process_id=?""", (str(entry["process_id"]),),
+                ).fetchone()
+                if owner is not None:
+                    owner_task_id = str(owner[0])
             db.execute(
                 """INSERT INTO delegate_notifications
                    (owner_task_id, process_id, session_id, goal, status,
@@ -270,7 +284,33 @@ class DelegateMailbox:
         self.store = store
         self._runs: dict[str, dict[str, dict[str, Any]]] = {}
         self._events: dict[str, asyncio.Event] = {}
+        self.control_lock = asyncio.Lock()
+        self.owner_for_process: Callable[[Any], str | None] = lambda process: next(
+            (owner for owner, entries in self._runs.items() if process.process_id in entries),
+            str(process.task_id or ""),
+        )
+        self._adopted_processes: set[str] = set()
         self._load_persisted()
+
+    def sync_owners(self) -> None:
+        """Reconcile volatile mailboxes against the durable Team authority."""
+        for previous, entries in list(self._runs.items()):
+            for process_id, entry in list(entries.items()):
+                try:
+                    process = self.manager.get(process_id)
+                except ValueError:
+                    continue
+                current = self.owner_for_process(process)
+                if current is None:
+                    continue
+                if current != str(process.task_id or ""):
+                    self._adopted_processes.add(process_id)
+                if current != previous:
+                    self._runs.setdefault(current, {})[process_id] = entries.pop(process_id)
+                    self._event(previous).set()
+                    self._event(current).set()
+            if not entries:
+                self._runs.pop(previous, None)
 
     def _load_persisted(self) -> None:
         if self.store is None:
@@ -309,11 +349,15 @@ class DelegateMailbox:
 
     @classmethod
     def _bounded_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
-        return {
+        bounded: dict[str, Any] = {
             "worker_status": str(payload.get("worker_status") or ""),
             "result": cls._result_text(payload),
             "error": str(payload.get("error") or "")[:1200],
         }
+        evidence = payload.get("execution_evidence")
+        if isinstance(evidence, dict):
+            bounded["execution_evidence"] = dict(evidence)
+        return bounded
 
     def track(self, process, *, session_id: str = "") -> None:
         task_id = str(process.task_id or "")
@@ -336,7 +380,11 @@ class DelegateMailbox:
             return
 
         def completed(done: asyncio.Task) -> None:
-            current = self._runs.get(task_id, {}).get(process.process_id)
+            self.sync_owners()
+            owner = self.owner_for_process(process)
+            if owner is None:
+                return
+            current = self._runs.get(owner, {}).get(process.process_id)
             if current is None or current["status"] != "running":
                 return
             if done.cancelled():
@@ -365,28 +413,33 @@ class DelegateMailbox:
                 or ""
             )
             if self.store is not None:
-                self.store.upsert(task_id, current)
-            self._event(task_id).set()
+                self.store.upsert(owner, current)
+            self._event(owner).set()
 
         task.add_done_callback(completed)
 
     def has_running(self, task_id: str) -> bool:
+        self.sync_owners()
         return any(
             entry["status"] == "running"
             for entry in self._runs.get(str(task_id or ""), {}).values()
         )
 
     def running_ids(self, task_id: str) -> list[str]:
+        self.sync_owners()
         return [
             process_id
             for process_id, entry in self._runs.get(str(task_id or ""), {}).items()
             if entry["status"] == "running"
         ]
 
-    def drain(self, task_id: str) -> list[str]:
+    def drain(self, task_id: str, *, exclude: set[str] | None = None) -> list[str]:
+        self.sync_owners()
         task_id = str(task_id or "")
         envelopes: list[str] = []
         for entry in self._runs.get(task_id, {}).values():
+            if exclude and entry["process_id"] in exclude:
+                continue
             if entry["status"] == "running" or entry["delivered"]:
                 continue
             entry["delivered"] = True
@@ -405,6 +458,18 @@ class DelegateMailbox:
             ]
             if error:
                 lines.extend(("Error:", error[:1200]))
+            evidence = payload.get("execution_evidence")
+            if isinstance(evidence, dict):
+                # Keep automatic delivery compact; the full bounded receipt
+                # remains available through delegate_poll and storage.
+                observations = evidence.get("observations", [])
+                summary = {
+                    **evidence,
+                    "observations": observations[-8:],
+                    "omitted_observations": int(evidence.get("omitted_observations", 0))
+                    + max(0, len(observations) - 8),
+                }
+                lines.extend(("Execution observations (tool runtime):", _json.dumps(summary, ensure_ascii=False)))
             transcript_path = str(entry.get("transcript_path") or "")
             if transcript_path:
                 lines.extend(("Session transcript:", transcript_path))
@@ -418,6 +483,7 @@ class DelegateMailbox:
         """Drain this task plus completed workers from earlier turns in-session."""
         task_id = str(task_id or "")
         session_id = str(session_id or "")
+        self.sync_owners()
         owner_ids = {task_id}
         if session_id:
             for owner_id, entries in self._runs.items():
@@ -425,10 +491,13 @@ class DelegateMailbox:
                     owner_ids.add(owner_id)
         envelopes: list[str] = []
         for owner_id in owner_ids:
-            envelopes.extend(self.drain(owner_id))
+            envelopes.extend(self.drain(
+                owner_id, exclude=self._adopted_processes if owner_id != task_id else None,
+            ))
         return envelopes
 
     def acknowledge(self, task_id: str, process_id: str) -> None:
+        self.sync_owners()
         entry = self._runs.get(str(task_id or ""), {}).get(str(process_id))
         if entry is not None and entry["status"] != "running":
             entry["delivered"] = True
@@ -468,11 +537,17 @@ class DelegateMailbox:
         return self.drain(task_id)
 
     async def cancel_running(self, task_id: str) -> None:
+        async with self.control_lock:
+            await self._cancel_running_owned(task_id)
+
+    async def _cancel_running_owned(self, task_id: str) -> None:
         task_id = str(task_id or "")
         processes = []
         for process_id in self.running_ids(task_id):
             try:
-                processes.append(self.manager.get(process_id))
+                process = self.manager.get(process_id)
+                if self.owner_for_process(process) == task_id:
+                    processes.append(process)
             except ValueError:
                 continue
         if processes:
@@ -985,9 +1060,8 @@ def _build_subagent_registry(
     """
     mode = _normalize_mode(mode)
     sub = ToolRegistry(policy=main_registry.policy)
-    sub.set_approval_handler(main_registry.approval_handler)
-    sub.share_yolo_with(main_registry)
-    sub.approved_permission_scopes = main_registry.approved_permission_scopes
+    sub.share_session_with(main_registry)
+    sub.filesystem_policy = main_registry.filesystem_policy
     all_names: set[str] = set()
     allowed_names = (
         ALLOWED_READ_TOOLS
@@ -1026,8 +1100,10 @@ def _build_subagent_registry(
     return sub
 
 
-def _validated_workspace_root(sandbox, value: str, *, isolation: str) -> str:
-    """Resolve one explicit Team workspace inside the configured sandbox root."""
+def _validated_workspace_root(
+    sandbox, value: str, *, isolation: str, filesystem_policy=None, mode: str = "worker",
+) -> str:
+    """Resolve a workspace within the sandbox or an existing explicit grant."""
 
     raw = str(value or "").strip()
     if not raw:
@@ -1045,8 +1121,34 @@ def _validated_workspace_root(sandbox, value: str, *, isolation: str) -> str:
     if not resolved.is_dir():
         raise ValueError("workspace_root must be an existing directory")
     if resolved != sandbox_root and sandbox_root not in resolved.parents:
-        raise ValueError("workspace_root must be inside the sandbox root")
+        if filesystem_policy is None or filesystem_policy.permission_request(
+            str(resolved), write=mode == "worker", operation="Use teammate workspace",
+        ) is not None:
+            raise ValueError(
+                f"workspace_root must be inside the sandbox root {sandbox_root} "
+                f"or an explicitly granted {'write' if mode == 'worker' else 'read'} directory; "
+                f"target: {resolved}. Configured visibility alone is not an access grant."
+            )
     return str(resolved)
+
+
+def _workspace_sandbox(sandbox, root: Path):
+    """Preserve the execution environment while changing its physical root."""
+    base = getattr(sandbox, "current", sandbox)
+    if isinstance(base, DockerSandbox):
+        return DockerSandbox(
+            timeout=base.timeout, workdir=str(root), memory_limit=base.memory_limit,
+            network=base.network, docker_cmd=base.docker_cmd, image=base.image,
+            reuse_container=False,
+        )
+    return LocalSandbox(
+        timeout=int(getattr(base, "timeout", 30) or 30), workdir=str(root),
+        max_output_bytes=int(getattr(base, "max_output_bytes", 200_000) or 200_000),
+        max_memory_mb=getattr(base, "max_memory_mb", None),
+        max_cpu_seconds=getattr(base, "max_cpu_seconds", None),
+        windows_job_containment=getattr(base, "windows_job_containment", None),
+        windows_job_max_processes=getattr(base, "windows_job_max_processes", None),
+    )
 
 
 def _create_workspace_registry(
@@ -1060,18 +1162,9 @@ def _create_workspace_registry(
 
     mode = _normalize_mode(mode)
     root = Path(workspace_root).resolve()
-    base = getattr(sandbox, "current", sandbox)
-    local = LocalSandbox(
-        timeout=int(getattr(base, "timeout", 30) or 30),
-        workdir=str(root),
-        max_output_bytes=int(
-            getattr(base, "max_output_bytes", 200_000) or 200_000
-        ),
-    )
+    local = _workspace_sandbox(sandbox, root)
     rebound = ToolRegistry(policy=main_registry.policy)
-    rebound.set_approval_handler(main_registry.approval_handler)
-    rebound.share_yolo_with(main_registry)
-    rebound.approved_permission_scopes = main_registry.approved_permission_scopes
+    rebound.share_session_with(main_registry)
     register_file_tools(rebound, workdir=str(root), sandbox=local)
     register_git_tools(
         rebound,
@@ -1090,13 +1183,12 @@ def _create_workspace_registry(
         else {"read", "network", "write", "execute"}
     )
     scoped = ToolRegistry(policy=main_registry.policy)
-    scoped.set_approval_handler(main_registry.approval_handler)
-    scoped.share_yolo_with(main_registry)
-    scoped.approved_permission_scopes = main_registry.approved_permission_scopes
+    scoped.share_session_with(main_registry)
+    scoped.filesystem_policy = rebound.filesystem_policy
     parent = _build_subagent_registry(main_registry, mode)
     for source in (rebound, parent):
         for name in source.tool_names:
-            if name in scoped.tool_names or name not in allowed_names:
+            if name in scoped.tool_names or (name not in allowed_names and name not in parent.tool_names):
                 continue
             tooldef = source.get(name)
             if tooldef is not None and tooldef.risk in allowed_risks:
@@ -1109,28 +1201,7 @@ def _create_worker_worktree_registry(main_registry: ToolRegistry, sandbox, workt
     worker capabilities from the parent registry. This avoids shared-checkout
     writes rather than merely telling the model to use a different cwd.
     """
-    base = getattr(sandbox, "current", sandbox)
-    local = LocalSandbox(
-        timeout=int(getattr(base, "timeout", 30) or 30),
-        workdir=str(worktree),
-        max_output_bytes=int(getattr(base, "max_output_bytes", 200_000) or 200_000),
-    )
-    isolated = ToolRegistry(policy=main_registry.policy)
-    # A worktree changes the filesystem root, not the user's approval model.
-    # Do not accidentally turn host-execution approval off in the child.
-    isolated.set_approval_handler(main_registry.approval_handler)
-    isolated.share_yolo_with(main_registry)
-    isolated.approved_permission_scopes = main_registry.approved_permission_scopes
-    register_file_tools(isolated, workdir=str(worktree), sandbox=local)
-    register_code_tools(isolated, local)
-    register_git_tools(isolated, workdir=str(worktree))
-    for name in main_registry.tool_names:
-        if name in TOP_LEVEL_ONLY_TOOLS or name in isolated.tool_names:
-            continue
-        tooldef = main_registry.get(name)
-        if tooldef is not None:
-            isolated.register(tooldef)
-    return isolated
+    return _create_workspace_registry(main_registry, sandbox, worktree, mode="worker")
 
 
 def _create_detached_worktree(sandbox) -> Path:
@@ -1206,6 +1277,20 @@ def register_delegate_tools(
         runtime = AgentTeamRuntime(path, on_event=on_process_event)
         team_runtime_holder["runtime"] = runtime
         return runtime
+
+    def _process_owner(process) -> str | None:
+        membership = process.metadata.get("agent_team")
+        if not isinstance(membership, dict) or not membership.get("team_id"):
+            return str(process.task_id or "")
+        team = _team_runtime().store.get_team(str(membership["team_id"]))
+        if team is None:
+            return None
+        agent = next((item for item in team["agents"] if item["id"] == membership.get("agent_id")), None)
+        if not agent or str(agent.get("process_id") or "") != process.process_id:
+            return None
+        return str(team.get("owner_task_id") or "")
+
+    mailbox.owner_for_process = _process_owner
 
     # ── Subagent ReAct loop (factory for ProcessManager) ──────────────
 
@@ -1319,6 +1404,7 @@ def register_delegate_tools(
         turns = 0
         last_result = ""
         evidence_fragments: list[str] = []
+        execution_observations: list[dict[str, Any]] = []
         investigation_notes: list[str] = []
         terminal_error = ""
         error_code = ""
@@ -1821,7 +1907,9 @@ def register_delegate_tools(
                         tc_args_raw = tc.get("arguments", "{}")
                         _log("stdout", f"  📎 {tc_name}")
                         _progress_event("tool_call", message=tc_name)
-                        if tc_name not in sub_registry.tool_names:
+                        if tc_name not in sub_registry.tool_names or (
+                            spec.requested_tools is not None and tc_name not in spec.requested_tools
+                        ):
                             return tc_id, tc_name, _json.dumps({
                                 "error": f"Tool '{tc_name}' is not available in {spec.worker_type} mode"
                             })
@@ -1831,6 +1919,15 @@ def register_delegate_tools(
                             tc_args = {}
 
                         try:
+                            if sandbox is not None and spec.workspace_root:
+                                # Explicit external grants can be revoked while
+                                # a worker is alive. Rebinding a root must not
+                                # turn that grant into permanent workspace access.
+                                _validated_workspace_root(
+                                    sandbox, spec.workspace_root, isolation="shared",
+                                    filesystem_policy=registry.filesystem_policy,
+                                    mode=spec.worker_type,
+                                )
                             operation_remaining = (
                                 min(
                                     active_budget.remaining() - finalization_reserve,
@@ -1850,7 +1947,7 @@ def register_delegate_tools(
                             async with slots:
                                 with team_execution_context(spec.team_agent_id, turn):
                                     tool_result = await asyncio.wait_for(
-                                        registry.execute(
+                                        sub_registry.execute(
                                             tc_name,
                                             tc_args,
                                             call_id=tc_id,
@@ -1869,6 +1966,11 @@ def register_delegate_tools(
                         except Exception as exc:
                             tool_result = {"error": str(exc)}
 
+                        execution = tool_result.get("execution") if isinstance(tool_result, dict) else None
+                        if isinstance(execution, dict):
+                            execution_observations.append({
+                                "tool": tc_name, "call_id": tc_id, **execution,
+                            })
                         output = tool_result if isinstance(tool_result, str) else _json.dumps(tool_result, default=str)
                         output = str(output)
                         if len(output) > 8000:
@@ -1970,6 +2072,13 @@ def register_delegate_tools(
             "result": last_result or "(no result — subagent did not produce output)",
             "worker_status": worker_status.value,
             "error_code": error_code,
+            "execution_evidence": {
+                "source": "tool_runtime",
+                "scope": "worker_lifetime",
+                "workspace_root": spec.workspace_root,
+                "observations": execution_observations[-64:],
+                "omitted_observations": max(0, len(execution_observations) - 64),
+            },
         }
         if spec.keep_alive:
             payload.update(
@@ -2026,13 +2135,14 @@ def register_delegate_tools(
             sandbox,
             workspace_root,
             isolation=normalized_isolation,
+            filesystem_policy=registry.filesystem_policy,
+            mode=normalized_mode,
         )
-        if foreground_yield_ms < 0 or foreground_yield_ms > 120_000:
-            raise ValueError("foreground_yield_ms must be 0-120000")
+        validate_wait_ms(foreground_yield_ms, name="foreground_yield_ms", maximum=DELEGATE_FOREGROUND_MAX_MS)
         if not 1 <= max_turns <= _DELEGATE_MAX_TURNS:
             raise ValueError(f"max_turns must be 1-{_DELEGATE_MAX_TURNS}")
-        if not 1 <= timeout <= 1_800:
-            raise ValueError("timeout must be 1-1800")
+        if not 1 <= timeout <= WORKER_TIMEOUT_MAX_SECONDS:
+            raise ValueError(f"timeout must be 1-{WORKER_TIMEOUT_MAX_SECONDS} seconds (worker total time limit)")
         if tools is not None and (
             not isinstance(tools, list)
             or not all(isinstance(name, str) for name in tools)
@@ -2075,7 +2185,9 @@ def register_delegate_tools(
             )
             if unknown:
                 raise ValueError(
-                    f"tools are not available to subagents: {', '.join(unknown)}"
+                    f"tools are not available to subagents in {normalized_mode} mode: {', '.join(unknown)}. "
+                    "Explorer supports static inspection; execute_shell and file edits require worker mode "
+                    "and an available parent tool. tools is an optional subset, not an extra permission grant."
                 )
         return normalized_mode, normalized_isolation, sub_registry, spec
 
@@ -2167,8 +2279,8 @@ def register_delegate_tools(
                     raise ValueError(
                         f"max_turns must be 1-{_DELEGATE_MAX_TURNS}"
                     )
-                if not 1 <= item_timeout <= 1_800:
-                    raise ValueError("timeout must be 1-1800")
+                if not 1 <= item_timeout <= WORKER_TIMEOUT_MAX_SECONDS:
+                    raise ValueError(f"timeout must be 1-{WORKER_TIMEOUT_MAX_SECONDS} seconds (worker total time limit)")
                 normalized_tasks.append({
                     **item,
                     "goal": item_goal,
@@ -2238,6 +2350,19 @@ def register_delegate_tools(
                 Path(spec.workspace_root),
                 mode=spec.worker_type,
             )
+        execution_registry = worker_registry or sub_registry
+        base_sandbox = getattr(sandbox, "current", sandbox)
+        effective_root = str(
+            worktree or spec.workspace_root
+            or Path(getattr(base_sandbox, "workdir", Path.cwd())).resolve()
+        )
+        spec = replace(spec, workspace_root=effective_root)
+        execution_binding = {
+            "workspace_root": effective_root,
+            "shell_cwd": "/workspace" if isinstance(base_sandbox, DockerSandbox) else effective_root,
+            "environment": "docker" if isinstance(base_sandbox, DockerSandbox) else "local",
+            "tools": sorted(spec.requested_tools if spec.requested_tools is not None else execution_registry.tool_names),
+        }
         delegate_step_id = ""
         if task_store is not None and _task_id:
             try:
@@ -2344,7 +2469,7 @@ def register_delegate_tools(
                     wall_deadline=wall_deadline,
                     on_transcript=_record_session_event,
                     on_progress=_record_progress,
-                    sub_registry_override=worker_registry,
+                    sub_registry_override=execution_registry,
                 )
             except asyncio.TimeoutError:
                 on_output("stderr", "[timeout] Subagent queue time limit reached.\n")
@@ -2462,6 +2587,8 @@ def register_delegate_tools(
 
         def _started(process) -> None:
             process_holder["process"] = process
+            process.metadata["runtime"] = runtime_identity()
+            process.metadata["execution_binding"] = execution_binding
             if spec.team_agent_id:
                 try:
                     _team_runtime().store.bind_agent(spec.team_agent_id, process.process_id)
@@ -2573,7 +2700,7 @@ def register_delegate_tools(
 
     def _owned_process(process_id: str, task_id: str):
         process = _sub_processes.get(process_id)
-        if process.task_id != task_id:
+        if _process_owner(process) != task_id:
             raise ValueError("subagent process belongs to another task")
         return process
 
@@ -2581,13 +2708,13 @@ def register_delegate_tools(
         process_id: str, wait_ms: int = 0, _task_id: str = ""
     ) -> str:
         """Check subagent status; optionally wait up to wait_ms for completion."""
-        if wait_ms < 0 or wait_ms > 300_000:
-            raise ValueError("wait_ms must be 0-300000")
+        validate_wait_ms(wait_ms, name="wait_ms", maximum=POLL_MAX_MS)
         process = _owned_process(process_id, _task_id)
         if wait_ms and _sub_processes.status(process) == "running":
             await _sub_processes.wait(process, wait_ms)
         if process.task is not None and process.task.done():
             await asyncio.sleep(0)
+        _owned_process(process_id, _task_id)
         _sub_processes.observe(process)
         info = attach_worker_run(_sub_processes, process)
         if _sub_processes.status(process) != "running" and process.result is not None:
@@ -2608,6 +2735,7 @@ def register_delegate_tools(
         process = _owned_process(process_id, _task_id)
         if process.task is not None and process.task.done():
             await asyncio.sleep(0)
+        _owned_process(process_id, _task_id)
         info = attach_worker_run(
             _sub_processes,
             process,
@@ -2633,14 +2761,15 @@ def register_delegate_tools(
                 info,
             )
             for info in _sub_processes.list(include_completed=include_completed)
-            if str(info.get("task_id") or "") == _task_id
+            if _process_owner(_sub_processes.get(str(info["process_id"]))) == _task_id
         ]
         return _sub_processes.dumps(procs)
 
     async def _delegate_cancel(process_id: str, _task_id: str = "") -> str:
         """Cancel a running subagent."""
-        process = _owned_process(process_id, _task_id)
-        await _sub_processes.cancel(process)
+        async with mailbox.control_lock:
+            process = _owned_process(process_id, _task_id)
+            await _sub_processes.cancel(process)
         await asyncio.sleep(0)
         mailbox.acknowledge(_task_id, process_id)
         info = attach_worker_run(_sub_processes, process)
@@ -2710,12 +2839,44 @@ def register_delegate_tools(
         if normalized == "resume":
             if current_team_agent_id():
                 raise ValueError("only a parent-task lead may resume an Agent Team")
-            resumed = await asyncio.to_thread(
-                runtime.store.resume_team,
-                team_id,
-                new_owner_task_id=_task_id,
-                session_id=current_session_id,
-            )
+            async with mailbox.control_lock:
+                observed = runtime.store.get_team(team_id)
+                if observed is None:
+                    raise ValueError(f"unknown team_id: {team_id}")
+                # Adoption changes control, never the granted filesystem scope.
+                if sandbox is not None:
+                    for member in observed.get("agents", []):
+                        if member.get("status") not in {"starting", "running", "idle", "waiting"}:
+                            continue
+                        process_id = str(member.get("process_id") or "")
+                        if not process_id:
+                            continue
+                        try:
+                            process = _sub_processes.get(process_id)
+                        except ValueError:
+                            continue
+                        worker_spec = process.metadata.get("worker_spec") or {}
+                        _validated_workspace_root(
+                            sandbox, str(worker_spec.get("workspace_root") or ""),
+                            isolation="shared", filesystem_policy=registry.filesystem_policy,
+                            mode=str(worker_spec.get("worker_type") or "worker"),
+                        )
+                try:
+                    resumed = await durable_io(
+                        runtime.store.resume_team,
+                        team_id,
+                        new_owner_task_id=_task_id,
+                        session_id=current_session_id,
+                        expected_owner_task_id=str(observed["owner_task_id"]),
+                        live_process_ids={
+                            str(item["process_id"])
+                            for item in _sub_processes.list(include_completed=False)
+                        },
+                    )
+                finally:
+                    # durable_io settles the transaction even if this wait was
+                    # cancelled. Late old-owner cleanup sees the new authority.
+                    mailbox.sync_owners()
             runtime.emit(
                 "team_resumed",
                 team_id=str(resumed["id"]),
@@ -2753,18 +2914,20 @@ def register_delegate_tools(
             return _sub_processes.dumps(team)
         if sender != str(team["lead_agent_id"]):
             raise ValueError("only the team lead may stop a team")
-        for agent in team.get("agents", []):
-            process_id = str(agent.get("process_id") or "")
-            if not process_id or str(agent.get("status") or "") not in {
-                "starting", "running", "idle", "waiting",
-            }:
-                continue
-            try:
-                process = _owned_process(process_id, _task_id)
-                await _sub_processes.cancel(process)
-            except ValueError:
-                continue
-        stopped = await asyncio.to_thread(runtime.store.stop_team, str(team["id"]))
+        async with mailbox.control_lock:
+            runtime, team = _owned_team(team_id, _task_id)
+            for agent in team.get("agents", []):
+                process_id = str(agent.get("process_id") or "")
+                if not process_id or str(agent.get("status") or "") not in {
+                    "starting", "running", "idle", "waiting",
+                }:
+                    continue
+                try:
+                    process = _owned_process(process_id, _task_id)
+                    await _sub_processes.cancel(process)
+                except ValueError:
+                    continue
+            stopped = await asyncio.to_thread(runtime.store.stop_team, str(team["id"]))
         runtime.emit("team_stopped", team_id=str(team["id"]), status="stopped")
         return _sub_processes.dumps(stopped)
 
@@ -3073,10 +3236,11 @@ def register_delegate_tools(
     ) -> str:
         """Wait for the next Team state change without fixed-interval polling."""
 
-        if timeout_ms < 0 or timeout_ms > 300_000:
-            raise ValueError("timeout_ms must be 0-300000")
+        validate_wait_ms(timeout_ms, name="timeout_ms", maximum=POLL_MAX_MS)
         runtime, _ = await asyncio.to_thread(_owned_team, team_id, _task_id)
-        return _sub_processes.dumps(await runtime.wait(team_id, timeout_ms))
+        result = await runtime.wait(team_id, timeout_ms)
+        _owned_team(team_id, _task_id)
+        return _sub_processes.dumps(result)
 
     async def _team_inbox(
         team_id: str,
@@ -3247,7 +3411,7 @@ def register_delegate_tools(
                             "model": {"type": "string", "description": "Optional model override for this task; flash/fast select deepseek-flash."},
                             "reasoning_effort": {"type": "string", "enum": list(REASONING_EFFORTS), "description": "Optional override for remote DeepSeek workers; empty leaves the model/config setting unchanged."},
                             "max_turns": {"type": "integer", "minimum": 1, "maximum": _DELEGATE_MAX_TURNS},
-                            "timeout": {"type": "integer", "minimum": 1, "maximum": 1800},
+                            "timeout": {"type": "integer", "minimum": 1, "maximum": WORKER_TIMEOUT_MAX_SECONDS},
                         },
                         "required": ["goal"],
                     },
@@ -3264,8 +3428,8 @@ def register_delegate_tools(
                 "model": {"type": "string", "description": "Optional worker model. Empty follows the main agent; flash/fast select deepseek-flash.", "default": ""},
                 "reasoning_effort": {"type": "string", "enum": list(REASONING_EFFORTS), "description": "Optional override for remote DeepSeek workers; empty leaves the model/config setting unchanged."},
                 "max_turns": {"type": "integer", "minimum": 1, "maximum": _DELEGATE_MAX_TURNS, "description": "Maximum LLM turns including one reserved final-report turn (default 12).", "default": 12},
-                "timeout": {"type": "integer", "minimum": 1, "maximum": 1800, "description": "Maximum total seconds (default 120).", "default": 120},
-                "foreground_yield_ms": {"type": "integer", "description": "Run this long before returning process_id (0=wait for completion).", "default": 0},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": WORKER_TIMEOUT_MAX_SECONDS, "description": "Maximum total seconds (default 120).", "default": 120},
+                "foreground_yield_ms": {"type": "integer", "minimum": 0, "maximum": DELEGATE_FOREGROUND_MAX_MS, "description": "Run this long before returning process_id (0=wait for completion).", "default": 0},
                 "background": {"type": "boolean", "description": "Start subagent in background immediately.", "default": False},
             },
             "required": [],
@@ -3285,16 +3449,16 @@ def register_delegate_tools(
             "type": "object",
             "properties": {
                 "process_id": {"type": "string", "description": "Process id from delegate_task."},
-                "wait_ms": {"type": "integer", "description": "Optional wait in ms (max 300000).", "default": 0},
+                "wait_ms": {"type": "integer", "description": "Wait for this poll only; the worker continues afterward.", "minimum": 0, "maximum": POLL_MAX_MS, "default": 0},
             },
             "required": ["process_id"],
         },
         fn=_delegate_poll,
+        timeout=None,
         risk="read",
         group="core",
         approval="never",
         repeat_guard=False,
-        max_calls_per_turn=8,
     ))
 
     registry.register(ToolDef(
@@ -3421,14 +3585,15 @@ def register_delegate_tools(
                 "model": {"type": "string", "description": "Optional teammate model. Empty follows the main agent; flash/fast select deepseek-flash.", "default": ""},
                 "max_turns": {"type": "integer", "minimum": 1, "maximum": _DELEGATE_MAX_TURNS, "default": MAX_WORKER_TURNS,
                               "description": "Cumulative member turn budget across episodes; default and maximum 50, including one reserved final-report turn."},
-                "timeout": {"type": "integer", "minimum": 1, "maximum": 1800, "default": 300},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": WORKER_TIMEOUT_MAX_SECONDS, "default": 300},
                 "isolation": {"type": "string", "enum": ["shared", "worktree"], "default": "shared"},
                 "keep_alive": {"type": "boolean", "default": False},
                 "workspace_root": {
                     "type": "string",
                     "description": (
                         "Optional absolute existing directory inside the active "
-                        "sandbox root. Rebinds this teammate's workspace tools and "
+                        "sandbox root or an explicitly granted external directory "
+                        "(read for explorer, write for worker). Rebinds this teammate's workspace tools and "
                         "requires isolation=shared."
                     ),
                     "default": "",
@@ -3466,7 +3631,7 @@ def register_delegate_tools(
                     "minimum": 1,
                     "maximum": _DELEGATE_MAX_TURNS,
                 },
-                "timeout": {"type": "integer", "minimum": 1, "maximum": 1800},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": WORKER_TIMEOUT_MAX_SECONDS},
             },
             "required": ["team_id", "agent"],
         },
@@ -3525,7 +3690,7 @@ def register_delegate_tools(
             "type": "object",
             "properties": {
                 "team_id": {"type": "string"},
-                "timeout_ms": {"type": "integer", "default": 0},
+                "timeout_ms": {"type": "integer", "minimum": 0, "maximum": POLL_MAX_MS, "default": 0},
             },
             "required": ["team_id"],
         },
@@ -3535,7 +3700,6 @@ def register_delegate_tools(
         group="team",
         approval="never",
         repeat_guard=False,
-        max_calls_per_turn=8,
     ))
 
     registry.register(ToolDef(

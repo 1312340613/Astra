@@ -1659,17 +1659,14 @@ def test_team_claim_target_and_cross_turn_resume(tmp_path: Path):
         ))["output"])
         assert team["id"] in {item["id"] for item in listed}
 
-        active_denied = await registry.execute(
-            "team", {"action": "resume", "team_id": team["id"]}, task_id=second_run["id"]
-        )
-        assert "still has active teammates" in active_denied["error"]
-        AgentTeamStore(store.path).set_agent_status(helper["id"], "completed")
         resumed = json.loads((await registry.execute(
             "team", {"action": "resume", "team_id": team["id"]}, task_id=second_run["id"]
         ))["output"])
         assert resumed["owner_task_id"] == second_run["id"]
         assert resumed["resumed_from_task_id"] == first_run["id"]
         assert next(item for item in resumed["agents"] if item["name"] == "lead")["status"] == "running"
+        # There is no corresponding live process for this persisted helper.
+        assert next(item for item in resumed["agents"] if item["id"] == helper["id"])["status"] == "interrupted"
         recovered_task = next(item for item in resumed["tasks"] if item["id"] == second_task["id"])
         assert recovered_task["lease_until"] is None
 

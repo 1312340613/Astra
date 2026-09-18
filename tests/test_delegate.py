@@ -9,6 +9,7 @@ import pytest
 
 from agent.runtime.tools import delegate
 from agent.runtime.llm import LLMClient, LLMConfig
+from agent.runtime.hooks import ToolDecision
 from agent.runtime.tools.delegate import (
     DelegateConcurrencyGate,
     _DelegateSlotLease,
@@ -64,6 +65,47 @@ def test_running_delegate_observes_parent_yolo_changes(tmp_path, kind):
         parent.yolo = enabled
         assert child.yolo is enabled
     assert ToolRegistry().yolo is False, "unrelated sessions must keep independent switches"
+
+
+@pytest.mark.parametrize("kind", ["subagent", "workspace", "worktree"])
+def test_rebound_tools_preserve_parent_hooks_audit_and_session_grant_cleanup(tmp_path, kind):
+    async def scenario():
+        parent = ToolRegistry()
+        approvals, audit, executions = [], [], []
+
+        async def approve(request):
+            approvals.append(request)
+            return "session"
+
+        def probe():
+            executions.append("read")
+            return "observed"
+
+        parent.register(ToolDef("read_probe", "probe", {"type": "object", "properties": {}},
+                                probe, group="codegraph"))
+        parent.set_approval_handler(approve)
+        parent.set_approval_audit_handler(audit.append)
+        parent.policy.add_rule_shortcut("read_probe", "ask")
+        sandbox = LocalSandbox(workdir=str(tmp_path))
+        child_root = tmp_path / "child"
+        child_root.mkdir()
+        if kind == "subagent":
+            child = _build_subagent_registry(parent, "worker")
+        elif kind == "workspace":
+            child = delegate._create_workspace_registry(parent, sandbox, child_root, mode="worker")
+        else:
+            child = delegate._create_worker_worktree_registry(parent, sandbox, child_root)
+        assert not (await child.execute("read_probe", {}))["error"]
+        assert not (await parent.execute("read_probe", {}))["error"]
+        assert len(approvals) == 1 and audit
+        parent.hooks.dispatch_session_end("session", "new session")
+        assert not (await child.execute("read_probe", {}))["error"]
+        assert len(approvals) == 2
+        parent.hooks.on_tool_decision(lambda name, args, tool: ToolDecision.deny("existing parent policy"))
+        denied = await child.execute("read_probe", {})
+        assert "existing parent policy" in denied["error"]
+        assert len(executions) == 3
+    asyncio.run(scenario())
 
 
 def test_delegate_concurrency_gate_does_not_swallow_cancelled_acquire():
@@ -394,7 +436,7 @@ def test_worktree_registry_excludes_top_level_tools_but_copies_parent_tool(tmp_p
     registry = ToolRegistry()
     _register_read_tool(registry, "ask_user_question", group="core")
     _register_read_tool(registry, "plan_update", group="core")
-    _register_read_tool(registry, "parent_read", group="core")
+    _register_read_tool(registry, "parent_read", group="codegraph")
     worktree = tmp_path / "worker"
     worktree.mkdir()
     sandbox = SimpleNamespace(current=SimpleNamespace(

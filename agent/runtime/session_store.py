@@ -352,6 +352,7 @@ class SessionStore:
     def _state_without_messages(self, data: dict[str, Any]) -> dict[str, Any]:
         return {
             "system_prompt": data.get("system_prompt", ""),
+            "system_prompt_migration": data.get("system_prompt_migration", {}),
             "system_prompt_projection": data.get("system_prompt_projection", {}),
             "runtime_context_projection": data.get("runtime_context_projection", {}),
             "persona_id": data.get("persona_id", ""),

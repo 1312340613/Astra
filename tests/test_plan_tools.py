@@ -36,6 +36,25 @@ def test_plan_update_replaces_complete_session_plan(tmp_path: Path):
     ]
 
 
+def test_plan_section_symbols_round_trip_without_relaxing_core_memory(tmp_path):
+    from agent.runtime.memory import _safe_memory_text
+
+    store, registry = setup_plan(tmp_path)
+    result = asyncio.run(registry.execute("plan_update", {
+        "goal": "Review §2",
+        "steps": [
+            {"text": "Read §2.1", "status": "in_progress"},
+            {"text": "Verify §2.2", "status": "pending"},
+        ],
+    }))
+    assert not result["error"]
+    reloaded = MemoryStore(tmp_path / "memory.db")
+    assert reloaded.get_working("session-a")["goal"] == "Review §2"
+    assert store.get_working("session-a")["steps"][0]["text"] == "Read §2.1"
+    with pytest.raises(ValueError, match="entry delimiter"):
+        _safe_memory_text("Core § entry", max_chars=600)
+
+
 def test_plan_update_rejects_ambiguous_active_state(tmp_path: Path):
     _, registry = setup_plan(tmp_path)
     result = asyncio.run(registry.execute("plan_update", {

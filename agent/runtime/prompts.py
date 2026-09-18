@@ -7,6 +7,7 @@ behavior.
 
 from dataclasses import dataclass
 from hashlib import sha256
+import re
 
 from .persona import (
     PersonaAssembler,
@@ -252,6 +253,18 @@ def normalize_system_prompt(
             relationship_context=relationship_context,
             affect=affect,
         )
-        return profile.system_prompt(state)
+        # Persona metadata owns the assembled persona body, not instructions
+        # appended after it. Keep unknown project/custom tails intact while
+        # upgrading the known body; suffix migration has already handled the
+        # catalog blocks positively recognized as runtime-generated.
+        extension = ""
+        if metadata:
+            boundary = re.search(
+                r'</persona-stable>(?:\n\n<persona-state revision="\d+">.*?</persona-state>)?',
+                prompt, re.DOTALL,
+            )
+            if boundary:
+                extension = prompt[boundary.end():]
+        return profile.system_prompt(state) + extension
 
     return prompt
