@@ -1555,6 +1555,7 @@ async def _main(startup_started: float):
                     }
                     _send(vision_event)
                 elif event["type"] == "turn_changes":
+                    totals = event.get("totals")
                     _send({
                         "type": "turn_changes",
                         "session_id": event.get("session_id", ""),
@@ -1562,7 +1563,7 @@ async def _main(startup_started: float):
                         "turn_seq": event.get("turn_seq", 0),
                         "files": list(event.get("files") or []),
                         "unknown_count": int(event.get("unknown_count") or 0),
-                        "totals": dict(event.get("totals") or {}),
+                        "totals": dict(totals) if isinstance(totals, dict) else {},
                     })
                 elif event["type"] == "done":
                     turn_completed = True
