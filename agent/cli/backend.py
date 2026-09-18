@@ -46,6 +46,7 @@ from agent.cli.mode_preferences import (
     set_reasoning_effort,
 )
 from agent.cli.turn_budget import execute_budget_command
+from agent.cli.turn_changes_command import execute_changes_command
 from agent.cli.stream_events import tool_progress_event, tool_result_event
 from agent.runtime.bar_mode import BAR_SCENE_TOOL_NAMES, BarModeController
 from agent.runtime import conversation_edits
@@ -2785,6 +2786,18 @@ async def _main(startup_started: float):
                 ):
                     mode_name = "bar" if bar_mode.active else ("minimal" if minimal_mode.active else local_mode.tool_name)
                     _send({"type": "tool_result", "name": mode_name, "output": "", "error": f"This command belongs to the work context. Use /{mode_name} leave first.", "code": ""})
+                    _send({"type": "done"})
+                elif c == "/changes" or c.startswith("/changes "):
+                    if _reply_done and active_task is not None:
+                        with suppress(asyncio.CancelledError, Exception):
+                            await active_task
+                    if active_task is not None and not active_task.done():
+                        _send({"type": "tool_result", "name": "changes", "output": "", "error": "Finish or cancel the current reply before viewing changes.", "code": ""})
+                        if _reply_done:
+                            _send({"type": "done"})
+                        continue
+                    output, error = execute_changes_command(agent, c[len("/changes"):].strip())
+                    _send({"type": "tool_result", "name": "changes", "output": output, "error": error, "code": ""})
                     _send({"type": "done"})
                 elif c == "/undo" or c.startswith("/undo ") or c == "/retry":
                     command_name = "retry" if c == "/retry" else "undo"

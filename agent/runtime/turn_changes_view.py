@@ -55,6 +55,7 @@ OUTPUT_TRUNCATION_MARK = "输出截断"
 ENCODING_MARK = "（含编码替换字符，差异可能被掩盖）"
 LONG_PREVIEW_MARK = "（超长预览：仅前 200 行，其余未展示）"
 INDEX_UNAVAILABLE = "回合索引暂不可用；请稍后重试。"
+NO_TURNS = "还没有完成的回合可供查看。"
 EVICTED_MESSAGE = "回合的快照已被淘汰，无法展示改动清单。"
 
 _REASON_TEXT = {
@@ -484,6 +485,7 @@ __all__ = [
     "ENCODING_MARK",
     "LONG_PREVIEW_MARK",
     "INDEX_UNAVAILABLE",
+    "NO_TURNS",
     "SelectorMatch",
     "parse_changes_args",
     "resolve_selector",

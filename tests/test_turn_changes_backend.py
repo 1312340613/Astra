@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -310,6 +311,302 @@ def test_backend_stdout_order_keeps_turn_changes_before_done(tmp_path: Path):
         ), f"note.txt not recorded; files={files}"
         assert (workdir / "note.txt").read_text(encoding="utf-8") == "hello turn-changes\n"
     finally:
+        _stop_backend(proc)
+        server.shutdown()
+        server.server_close()
+
+
+# ------------------------------------------------------------------ /changes
+
+CHANGES_USAGE = "Usage: /changes [@k] [n|path]"
+BUSY_ERROR = "Finish or cancel the current reply before viewing changes."
+
+
+class _ChangesCommandHandler(BaseHTTPRequestHandler):
+    """Same script as ``_WriteThenDoneHandler`` plus an optional hang switch.
+
+    Calls 1-2 finish one turn (write_file, then final text).  When
+    ``server.hang_from_call`` is set, that call and every later one is answered
+    with an open SSE stream that never completes until ``server.release`` is set
+    — the reply stays active, which is what the busy guard must detect.
+    """
+
+    def log_message(self, format, *args):
+        return
+
+    def _json(self, payload: dict):
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _sse(self, chunks: list[dict]):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for chunk in chunks:
+            self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def do_GET(self):
+        if self.path.endswith("/models"):
+            self._json({
+                "object": "list",
+                "data": [{"id": "Qwen3.6-35B-A3B", "meta": {"n_ctx": 131072}}],
+            })
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        if not self.path.endswith("/chat/completions"):
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        self.server.requests.append(payload)
+        call_number = len(self.server.requests)
+        hang_from = int(getattr(self.server, "hang_from_call", 0) or 0)
+        if hang_from and call_number >= hang_from:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(b": pending\n\n")
+            self.wfile.flush()
+            release = self.server.release
+            while not release.is_set():
+                time.sleep(0.05)
+            return
+        base = {
+            "id": f"chatcmpl-changes-{call_number}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": "Qwen3.6-35B-A3B",
+        }
+        has_tool_result = any(
+            isinstance(message, dict) and message.get("role") == "tool"
+            for message in (payload.get("messages") or [])
+        )
+        if not has_tool_result:
+            arguments = json.dumps({
+                "path": self.server.target_name,
+                "content": "hello turn-changes\n",
+            })
+            self._sse([
+                {
+                    **base,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-changes-write",
+                                "type": "function",
+                                "function": {"name": "write_file", "arguments": arguments},
+                            }],
+                        },
+                        "finish_reason": None,
+                    }],
+                },
+                {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+            ])
+        else:
+            self._sse([
+                {
+                    **base,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "note written"},
+                        "finish_reason": None,
+                    }],
+                },
+                {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ])
+
+
+def _start_changes_backend(tmp_path: Path, session_name: str, *, hang_from_call: int = 0):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ChangesCommandHandler)
+    server.requests = []
+    server.target_name = "note.txt"
+    server.hang_from_call = hang_from_call
+    server.release = threading.Event()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    proc, events, seen, wait_for, stderr_tail = _start_backend(
+        tmp_path, server.server_port, session_name, workdir
+    )
+    return workdir, server, proc, events, seen, wait_for, stderr_tail
+
+
+def _run_turn(proc, events, seen, wait_for, text: str):
+    """Run one message turn, answering approvals, until the closing ``done``."""
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps({"type": "message", "text": text}) + "\n")
+    proc.stdin.flush()
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        try:
+            event = events.get(timeout=0.5)
+        except Empty:
+            if proc.poll() is not None:
+                break
+            continue
+        seen.append(event)
+        if event.get("type") == "tool_approval_request":
+            proc.stdin.write(json.dumps({
+                "type": "tool_approval_response",
+                "request_id": event["request_id"],
+                "decision": "once",
+            }) + "\n")
+            proc.stdin.flush()
+        elif event.get("type") == "done":
+            return
+    raise AssertionError(f"turn did not finish; seen={[e.get('type') for e in seen]}")
+
+
+def _send_command(proc, cmd: str):
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps({"type": "command", "cmd": cmd}) + "\n")
+    proc.stdin.flush()
+
+
+def _changes_result(proc, events, seen, wait_for) -> dict:
+    event = wait_for(
+        lambda item: item.get("type") == "tool_result" and item.get("name") == "changes"
+    )
+    assert event.get("code", "") == "", event
+    return event
+
+
+def _drain(events, seen, seconds: float) -> list[dict]:
+    drained: list[dict] = []
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            event = events.get(timeout=0.1)
+        except Empty:
+            continue
+        seen.append(event)
+        drained.append(event)
+    return drained
+
+
+def _index_records(workdir: Path, session_name: str) -> list[dict]:
+    index_path = (
+        workdir / ".astra" / "turn-changes" / tcs._safe_session_name(session_name) / "turns.json"
+    )
+    assert index_path.exists(), f"missing {index_path}; tree={sorted(str(p) for p in workdir.rglob('*'))}"
+    return json.loads(index_path.read_text(encoding="utf-8"))["records"]
+
+
+def test_changes_command_reads_the_live_ledger_without_new_turns(tmp_path: Path):
+    session_name = f"changes_cmd_{uuid.uuid4().hex}"
+    workdir, server, proc, events, seen, wait_for, stderr_tail = _start_changes_backend(
+        tmp_path, session_name
+    )
+    try:
+        wait_for(lambda event: event.get("type") == "model_info")
+        _run_turn(proc, events, seen, wait_for, "write a note")
+
+        _send_command(proc, "/changes")
+        result = _changes_result(proc, events, seen, wait_for)
+        output = result.get("output") or ""
+        assert result.get("error") == "", result
+        assert "note.txt" in output, f"output={output!r}"
+        assert re.search(r"\+\d+ \u2212\d+", output), f"counts missing: {output!r}"
+        assert output.splitlines()[0].startswith("回合 @1 · request "), output
+
+        records_before = _index_records(workdir, session_name)
+        assert len(records_before) == 1, records_before
+        changes_events_before = sum(1 for item in seen if item.get("type") == "turn_changes")
+
+        _send_command(proc, "/changes @1 1")
+        detail = _changes_result(proc, events, seen, wait_for)
+        assert detail.get("error") == "", detail
+        detail_output = detail.get("output") or ""
+        assert detail_output.splitlines()[0].startswith("回合 @1 · note.txt"), detail_output
+        assert "新增文件" in detail_output, detail_output
+
+        _send_command(proc, "/changes @9")
+        past_end = _changes_result(proc, events, seen, wait_for)
+        assert CHANGES_USAGE in (past_end.get("error") or ""), past_end
+        assert past_end.get("output") == "", past_end
+
+        _send_command(proc, "/changes @99")
+        out_of_window = _changes_result(proc, events, seen, wait_for)
+        assert CHANGES_USAGE in (out_of_window.get("error") or ""), out_of_window
+
+        _send_command(proc, "/changes")
+        _changes_result(proc, events, seen, wait_for)
+        _drain(events, seen, 0.5)
+        assert _index_records(workdir, session_name) == records_before
+        assert sum(1 for item in seen if item.get("type") == "turn_changes") == changes_events_before
+        assert not (workdir / "note.txt").read_text(encoding="utf-8").startswith("回合")
+    finally:
+        _stop_backend(proc)
+        server.shutdown()
+        server.server_close()
+
+
+def test_changes_command_without_a_turn_reports_an_unavailable_index(tmp_path: Path):
+    session_name = f"changes_empty_{uuid.uuid4().hex}"
+    workdir, server, proc, events, seen, wait_for, stderr_tail = _start_changes_backend(
+        tmp_path, session_name
+    )
+    try:
+        wait_for(lambda event: event.get("type") == "model_info")
+        _send_command(proc, "/changes")
+        result = _changes_result(proc, events, seen, wait_for)
+        assert result.get("error") == "", result
+        assert "回合索引暂不可用" in (result.get("output") or ""), result
+    finally:
+        _stop_backend(proc)
+        server.shutdown()
+        server.server_close()
+
+
+def test_changes_command_is_rejected_while_a_reply_is_active(tmp_path: Path):
+    session_name = f"changes_busy_{uuid.uuid4().hex}"
+    workdir, server, proc, events, seen, wait_for, stderr_tail = _start_changes_backend(
+        tmp_path, session_name, hang_from_call=3
+    )
+    try:
+        wait_for(lambda event: event.get("type") == "model_info")
+        _run_turn(proc, events, seen, wait_for, "write a note")
+
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps({"type": "message", "text": "second turn"}) + "\n")
+        proc.stdin.flush()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and len(server.requests) < 3:
+            time.sleep(0.05)
+        assert len(server.requests) >= 3, f"second model call never started: {len(server.requests)}"
+
+        _send_command(proc, "/changes")
+        busy = wait_for(
+            lambda item: item.get("type") == "tool_result" and item.get("name") == "changes"
+        )
+        assert busy.get("error") == BUSY_ERROR, busy
+        assert busy.get("output") == "", busy
+
+        index = next(
+            position
+            for position, item in enumerate(seen)
+            if item.get("type") == "tool_result" and item.get("name") == "changes"
+        )
+        trailing = _drain(events, seen, 1.0)
+        assert not any(item.get("type") == "done" for item in trailing), (
+            "a done event was sent while the reply was still active; "
+            f"after-error={[item.get('type') for item in seen[index + 1:]]}"
+        )
+    finally:
+        server.release.set()
         _stop_backend(proc)
         server.shutdown()
         server.server_close()

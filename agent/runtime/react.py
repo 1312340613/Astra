@@ -4473,6 +4473,22 @@ class ReActAgent(AgentBase):
         except Exception:
             logger.exception("turn-change store close failed")
 
+    def turn_change_store(self) -> "TurnChangeStore | None":
+        """Read-only accessor for the live session store (M3 · T4).
+
+        Returns the existing instance only when it belongs to the current
+        session; never creates, rebuilds or closes one (review R3: ``/changes``
+        must not turn a read into a store lifecycle event).
+        """
+        store = getattr(self, "_turn_change_store", None)
+        if store is None:
+            return None
+        session_path = self.context.session_path
+        session_key = Path(session_path).stem if session_path else "default"
+        if self._turn_change_store_session != session_key:
+            return None
+        return store
+
     def _current_turn_change_store(self) -> "TurnChangeStore | None":
         """Session-owned turn-change store; rebuilt when the session changes."""
         session_key = Path(self.context.session_path).stem if self.context.session_path else "default"
