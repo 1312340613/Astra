@@ -219,7 +219,7 @@ def test_ephemeral_tool_images_and_transient_steering_never_enter_projection(tmp
     assert "SECRET" not in json.dumps(agent.context._session_store.load())
 
 
-@pytest.mark.parametrize("mode", ["restricted", "minimal", "writing"])
+@pytest.mark.parametrize("mode", ["restricted", "minimal"])
 def test_restricted_interaction_does_not_replay_or_mutate_work_snapshots(mode):
     agent = ReActAgent("agent", SimpleNamespace(), ToolRegistry(), system_prompt="system")
     agent.context.add_user("hello")
@@ -229,7 +229,7 @@ def test_restricted_interaction_does_not_replay_or_mutate_work_snapshots(mode):
         agent.tool_allowlist = set()
         agent.runtime_turn_context_provider = lambda: "BAR_STATE"
     else:
-        setattr(agent, f"{mode}_mode", True)
+        agent.minimal_mode = True
     prompt, _ = asyncio.run(agent._prepare_prompt_for_llm("hello", None))
     assert "WORK_ONLY_MEMORY" not in str(prompt)
     if mode == "restricted":

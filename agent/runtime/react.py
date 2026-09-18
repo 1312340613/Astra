@@ -2330,7 +2330,7 @@ class ReActAgent(AgentBase):
             return [*prepared, *non_system]
 
         def rebuild_prompt() -> list[dict]:
-            work_mode = self.tool_allowlist is None and not self.minimal_mode and not self.writing_mode
+            work_mode = self.tool_allowlist is None and not self.minimal_mode
             rebuilt = self.context.get_prompt(
                 content_overrides=self._vision_prompt_content_overrides(),
                 runtime_context=turn_context_text() if work_mode else None,
