@@ -42,6 +42,15 @@ assignments. The initial result may report pending readiness; use the later Team
 status to establish that it is actually available. A new assignment does not
 silently replenish the member's cumulative turn allowance.
 
+An idle episode publishes its report once to the parent's durable delegate
+inbox. The parent can finish its turn while that member remains alive; queued
+messages and active episodes still count as work to join. `delegate_poll` waits
+for current work to report and returns `episode_result` with worker status
+`idle`, while the process status remains `running`. Normal idle expiry does not
+repeat a delivered report. Cancellation still reaps idle members, and a later
+failure remains observable. A new parent turn can resume the Team and assign
+work to the same retained member with its existing conversation history.
+
 Runtime notices expose total usage, remaining turns and episode usage. An episode
 estimate is a planning target, not extra allowance. The task board and episode
 records retain actual consumption and outcomes for later estimates. Report

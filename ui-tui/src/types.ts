@@ -147,6 +147,8 @@ export type PyEvent =
         | "team_resumed"
         | "team_agent_created"
         | "team_agent_started"
+        | "team_agent_idle"
+        | "team_agent_awakened"
         | "team_agent_terminal"
         | "team_agent_cancelled"
         | "team_message"

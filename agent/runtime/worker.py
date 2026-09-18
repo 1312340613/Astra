@@ -197,7 +197,7 @@ class WorkerRun:
             worker_type=str(spec.get("worker_type") or process.kind),
             status=_normalize_worker_status(
                 str(process_info.get("status") or ""),
-                str(result.get("worker_status") or ""),
+                str(result.get("worker_status") or process.metadata.get("worker_status") or ""),
             ),
             goal=str(spec.get("goal") or process.label),
             task_id=str(spec.get("task_id") or process.task_id),
@@ -241,6 +241,8 @@ def _normalize_worker_status(
     if explicit is not None and explicit in TERMINAL_WORKER_STATUSES:
         return explicit
     if process_status == "running":
+        if explicit == WorkerStatus.IDLE:
+            return WorkerStatus.IDLE
         return WorkerStatus.RUNNING
     if process_status == "cancelled":
         return WorkerStatus.CANCELLED

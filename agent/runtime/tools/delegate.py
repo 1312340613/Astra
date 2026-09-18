@@ -277,7 +277,7 @@ class DelegateMailboxStore:
 
 
 class DelegateMailbox:
-    """Task-scoped, single-delivery completion inbox for background workers."""
+    """Single-delivery reports, independent of retained worker lifetimes."""
 
     def __init__(self, manager: ProcessManager, store: DelegateMailboxStore | None = None):
         self.manager = manager
@@ -290,6 +290,7 @@ class DelegateMailbox:
             str(process.task_id or ""),
         )
         self._adopted_processes: set[str] = set()
+        self.has_pending_messages: Callable[[Any], bool] = lambda process: False
         self._load_persisted()
 
     def sync_owners(self) -> None:
@@ -317,7 +318,7 @@ class DelegateMailbox:
             return
         for row in self.store.rows():
             owner_task_id = row.pop("owner_task_id")
-            if row["status"] == "running":
+            if row["status"] in {"running", "idle"}:
                 try:
                     process = self.manager.get(row["process_id"])
                     still_running = self.manager.status(process) == "running"
@@ -328,7 +329,7 @@ class DelegateMailbox:
                     row["payload"] = {
                         "worker_status": "interrupted",
                         "error": "Subagent process ended before its completion notice was persisted",
-                        "result": "",
+                        "result": row["payload"].get("result", ""),
                     }
                     row["delivered"] = False
                     self.store.upsert(owner_task_id, row)
@@ -385,7 +386,7 @@ class DelegateMailbox:
             if owner is None:
                 return
             current = self._runs.get(owner, {}).get(process.process_id)
-            if current is None or current["status"] != "running":
+            if current is None:
                 return
             if done.cancelled():
                 payload = {
@@ -403,10 +404,21 @@ class DelegateMailbox:
                         "error": f"{type(exc).__name__}: {exc}",
                         "result": "",
                     }
-            current["payload"] = self._bounded_payload(payload)
-            current["status"] = str(
+            final_status = str(
                 payload.get("worker_status") or ("failed" if payload.get("error") else "completed")
             )
+            # Idle expiry/shutdown closes a lifetime, not a new episode. Keep
+            # its delivery bit; cancellation/failure must still be observable.
+            same_report = (
+                current["status"] == "idle"
+                and final_status == "completed"
+                and not payload.get("error")
+                and self._result_text(payload) == self._result_text(current["payload"])
+            )
+            current["payload"] = self._bounded_payload(payload)
+            current["status"] = final_status
+            if not same_report:
+                current["delivered"] = False
             current["transcript_path"] = str(
                 process.metadata.get("session_transcript_path")
                 or current.get("transcript_path")
@@ -418,20 +430,76 @@ class DelegateMailbox:
 
         task.add_done_callback(completed)
 
+    def episode(self, process, payload: dict[str, Any] | None) -> None:
+        """Publish a report on idle, or mark a retained member active again."""
+        self.sync_owners()
+        owner = self.owner_for_process(process)
+        entry = self._runs.get(str(owner or ""), {}).get(process.process_id)
+        process.metadata["worker_status"] = "idle" if payload is not None else "running"
+        if entry is None:
+            return
+        entry["status"] = "idle" if payload is not None else "running"
+        entry["delivered"] = False
+        entry["payload"] = self._bounded_payload(payload) if payload is not None else {}
+        entry["transcript_path"] = str(process.metadata.get("session_transcript_path") or "")
+        if self.store is not None:
+            self.store.upsert(str(owner or ""), entry)
+        self._event(str(owner or "")).set()
+
+    def _pending(self, entry: dict[str, Any]) -> bool:
+        if entry["status"] == "running":
+            return True
+        if entry["status"] == "idle":
+            try:
+                process = self.manager.get(entry["process_id"])
+                return self.manager.status(process) == "running" and self.has_pending_messages(process)
+            except ValueError:
+                pass
+        return False
+
     def has_running(self, task_id: str) -> bool:
+        """Whether this turn must join work, not whether a member is alive."""
         self.sync_owners()
         return any(
-            entry["status"] == "running"
+            self._pending(entry)
             for entry in self._runs.get(str(task_id or ""), {}).values()
         )
 
     def running_ids(self, task_id: str) -> list[str]:
+        """Live processes owned by the turn, including idle members to cancel."""
         self.sync_owners()
-        return [
-            process_id
-            for process_id, entry in self._runs.get(str(task_id or ""), {}).items()
-            if entry["status"] == "running"
-        ]
+        result = []
+        for process_id in self._runs.get(str(task_id or ""), {}):
+            try:
+                if self.manager.status(self.manager.get(process_id)) == "running":
+                    result.append(process_id)
+            except ValueError:
+                continue
+        return result
+
+    async def wait_for_report(self, task_id: str, process_id: str, wait_ms: int) -> None:
+        deadline = asyncio.get_running_loop().time() + wait_ms / 1000
+        while True:
+            self.sync_owners()
+            entry = self._runs.get(task_id, {}).get(process_id)
+            if entry is None or not self._pending(entry):
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            event = self._event(task_id)
+            event.clear()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
+
+    def idle_report(self, task_id: str, process_id: str) -> dict[str, Any] | None:
+        self.sync_owners()
+        entry = self._runs.get(task_id, {}).get(process_id)
+        if entry is not None and entry["status"] == "idle" and not self._pending(entry):
+            return dict(entry["payload"])
+        return None
 
     def drain(self, task_id: str, *, exclude: set[str] | None = None) -> list[str]:
         self.sync_owners()
@@ -1292,6 +1360,13 @@ def register_delegate_tools(
 
     mailbox.owner_for_process = _process_owner
 
+    def _has_pending_messages(process) -> bool:
+        team = process.metadata.get("agent_team") or {}
+        agent_id = str(team.get("agent_id") or "")
+        return bool(agent_id and _team_runtime().store.has_pending_messages(agent_id))
+
+    mailbox.has_pending_messages = _has_pending_messages
+
     # ── Subagent ReAct loop (factory for ProcessManager) ──────────────
 
     async def _run_subagent_stream(
@@ -1304,6 +1379,7 @@ def register_delegate_tools(
         wall_deadline: float | None = None,
         on_transcript: Callable[[dict[str, Any]], None] | None = None,
         on_progress: Callable[..., None] | None = None,
+        on_episode: Callable[[dict[str, Any] | None], None] | None = None,
         sub_registry_override: ToolRegistry | None = None,
     ) -> dict:
         """Core subagent ReAct loop, streaming progress via on_output."""
@@ -1452,6 +1528,21 @@ def register_delegate_tools(
         keep_alive_state = "pending" if spec.keep_alive else "disabled"
         keep_alive_reason = ""
 
+        def _report_idle_episode() -> None:
+            if on_episode is not None:
+                on_episode({
+                    "worker_status": WorkerStatus.IDLE.value,
+                    "result": last_result,
+                    "execution_evidence": {
+                        "source": "tool_runtime",
+                        "scope": "worker_lifetime",
+                        "workspace_root": spec.workspace_root,
+                        "observations": execution_observations[-64:],
+                        "omitted_observations": max(0, len(execution_observations) - 64),
+                    },
+                })
+            _progress_event("delegate_idle", status="idle", message="Episode reported; teammate idle.")
+
         async def _deliver_team_messages() -> tuple[bool, bool]:
             """Use the same assignment boundary for active, just-reported and idle members."""
             nonlocal team_message_cursor
@@ -1465,6 +1556,8 @@ def register_delegate_tools(
                 pending_team_message_ids.clear()
                 await budget_tracker.finish(turns, outcome="shutdown")
                 return bool(deliveries), True
+            if deliveries and spec.keep_alive and on_episode is not None:
+                on_episode(None)
             for delivery in deliveries:
                 await _track_latest_assignment(delivery)
                 messages.append({"role": "user", "content": delivery.envelope})
@@ -1822,11 +1915,13 @@ def register_delegate_tools(
                         _log("stdout", "[subagent] idle quota unavailable; completing\n")
                         break
                     worker_status = WorkerStatus.IDLE
+                    _report_idle_episode()
                     team_runtime.emit(
                         "team_agent_idle",
                         team_id=spec.team_id,
                         agent_id=spec.team_agent_id,
                         status=WorkerStatus.IDLE.value,
+                        process_id=str(idle_result.get("process_id") or ""),
                     )
                     if active_budget is not None:
                         active_budget.pause()
@@ -1860,6 +1955,7 @@ def register_delegate_tools(
                                 WorkerStatus.RUNNING.value,
                             )
                             worker_status = WorkerStatus.RUNNING
+                            _progress_event("delegate_awakened", message="Teammate resumed.")
                             team_runtime.emit(
                                 "team_agent_awakened",
                                 team_id=spec.team_id,
@@ -2394,6 +2490,11 @@ def register_delegate_tools(
             if _progress is not None:
                 _progress(stage, **details)
 
+        def _record_episode(payload: dict[str, Any] | None) -> None:
+            process = process_holder.get("process")
+            if process is not None:
+                mailbox.episode(process, payload)
+
         def _record_session_event(event: dict[str, Any]) -> None:
             if on_session_event is None or not run_session_id:
                 return
@@ -2469,6 +2570,7 @@ def register_delegate_tools(
                     wall_deadline=wall_deadline,
                     on_transcript=_record_session_event,
                     on_progress=_record_progress,
+                    on_episode=_record_episode,
                     sub_registry_override=execution_registry,
                 )
             except asyncio.TimeoutError:
@@ -2707,16 +2809,23 @@ def register_delegate_tools(
     async def _delegate_poll(
         process_id: str, wait_ms: int = 0, _task_id: str = ""
     ) -> str:
-        """Check subagent status; optionally wait up to wait_ms for completion."""
+        """Wait for current work to report; retained idle members stay alive."""
         validate_wait_ms(wait_ms, name="wait_ms", maximum=POLL_MAX_MS)
         process = _owned_process(process_id, _task_id)
         if wait_ms and _sub_processes.status(process) == "running":
-            await _sub_processes.wait(process, wait_ms)
+            await mailbox.wait_for_report(_task_id, process_id, wait_ms)
         if process.task is not None and process.task.done():
             await asyncio.sleep(0)
         _owned_process(process_id, _task_id)
         _sub_processes.observe(process)
         info = attach_worker_run(_sub_processes, process)
+        episode = mailbox.idle_report(_task_id, process_id)
+        if episode is not None:
+            info["episode_result"] = episode
+            info["worker"]["status"] = "idle"
+            mailbox.acknowledge(_task_id, process_id)
+        elif _sub_processes.status(process) == "running":
+            info["worker"]["status"] = "running"
         if _sub_processes.status(process) != "running" and process.result is not None:
             info["result"] = process.result
             mailbox.acknowledge(_task_id, process_id)
@@ -3444,7 +3553,10 @@ def register_delegate_tools(
 
     registry.register(ToolDef(
         name="delegate_poll",
-        description="Check status of a background subagent. Optionally wait wait_ms for completion.",
+        description=(
+            "Check status of a background subagent. Optionally wait wait_ms for current work to finish. "
+            "A retained idle teammate returns episode_result while its process remains running."
+        ),
         parameters={
             "type": "object",
             "properties": {

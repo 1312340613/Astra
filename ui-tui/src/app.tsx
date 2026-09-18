@@ -1209,6 +1209,9 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
         // frame already shows the waiting stage.
         if (approvalRequests.length > 0 || event.stage === "awaiting_approval") break;
         setActiveTools((current) => {
+          if (["idle", "completed", "partial", "failed", "cancelled", "timed_out"].includes(event.status ?? "")) {
+            return current.filter((tool) => tool.id !== event.call_id);
+          }
           const progress = {
             stage: event.stage,
             status: event.status,
@@ -1265,6 +1268,9 @@ export default function App({ appshotClientFactory, appshotManifestReader, lifec
       }
       case "agent_team":
         setAgentTeams((current) => reduceAgentTeamEvent(current, event));
+        if (event.event === "team_agent_idle" && event.process_id) {
+          setActiveProcesses((current) => current.filter((item) => item.id !== `process:${event.process_id}`));
+        }
         break;
       case "tool_approval_request":
         closeToolDetails();

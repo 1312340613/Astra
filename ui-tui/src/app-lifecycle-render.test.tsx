@@ -47,6 +47,40 @@ async function setup(columns = 90, rows = 30, appshotClientFactory?: (consumer:a
 }
 async function tool(h: Awaited<ReturnType<typeof setup>>) { h.child.event({ type: "tool_result", name: "read_file", output: "detail line\n".repeat(20), error: "" }); await settle(); await h.key("\x0f"); assert.match(h.frame(), /Tool #1/); }
 
+test("idle teammate stops activity and a finished parent accepts a fresh turn", async () => {
+  const h = await setup(143, 40);
+  const dock = () => h.frame().split("\n").filter((line) => /\bCTX \d+%/.test(line)).join("\n");
+  try {
+    h.child.event({ type: "model_info", model: "test", total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, context_pct: 0 });
+    await settle();
+    await h.submit("run a retained teammate");
+    h.child.event({ type: "tool_progress", call_id: "spawn", name: "team_spawn", stage: "assistant_turn", status: "running", current: 2, total: 6 });
+    h.child.event({ type: "process_status", process_id: "retained", kind: "subagent", status: "running", label: "member", started_at: Date.now() / 1000, output_chars: 25, duration_ms: 10 });
+    await settle();
+    assert.match(dock(), /RUN team_spawn/);
+    h.child.event({ type: "tool_progress", call_id: "spawn", name: "team_spawn", stage: "delegate_idle", status: "idle" });
+    h.child.event({ type: "agent_team", kind: "agent_team", event: "team_agent_idle", team_id: "team", agent_id: "member", process_id: "retained", status: "idle" });
+    await settle();
+    assert.doesNotMatch(dock(), /RUN|ASSISTANT TURN/);
+    // Terminal progress must remove the synthetic parent join as well.
+    h.child.event({ type: "tool_progress", call_id: "join", name: "delegate_task", stage: "joining", status: "running" });
+    await settle();
+    assert.match(dock(), /RUN/);
+    h.child.event({ type: "tool_progress", call_id: "join", name: "delegate_task", stage: "joined", status: "completed" });
+    await settle();
+    assert.doesNotMatch(dock(), /RUN/);
+    h.child.event({ type: "done", content: "ready for the next turn" });
+    await settle();
+    assert.match(dock(), /READY/);
+    await h.submit("next assignment");
+    assert.deepEqual(h.child.commands.at(-1), { type: "message", text: "next assignment" });
+    assert.doesNotMatch(h.frame(), /steering.*next assignment/);
+    h.child.event({ type: "tool_progress", call_id: "spawn", name: "team_spawn", stage: "delegate_awakened", status: "running" });
+    await settle();
+    assert.match(dock(), /RUN team_spawn/);
+  } finally { h.app.unmount(); }
+});
+
 for (const outcome of ["completed", "failed", "cancelled", "disconnect"] as const) {
   test(`compaction stays visible while pending and clears on ${outcome}`, async () => {
     const h = await setup(143, 30);

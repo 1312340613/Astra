@@ -867,6 +867,10 @@ def test_keep_alive_idle_preserves_active_budget_and_lifetime_cap_reclaims(
         await _wait_for_agent_status(team_store, spawned["agent"]["id"], "idle")
         assert len(llm.requests) == 1
 
+        # Poll now returns an episode report while the member is retained.
+        # Wait on the actual lifetime to verify that the hard cap still reaps it.
+        process = manager.get(spawned["process"]["process_id"])
+        assert await manager.wait(process, 2000)
         polled = json.loads((await registry.execute(
             "delegate_poll",
             {"process_id": spawned["process"]["process_id"], "wait_ms": 2000},

@@ -824,6 +824,15 @@ class AgentTeamStore:
         assert row is not None
         return self._row(row) or {}
 
+    def has_pending_messages(self, agent_id: str) -> bool:
+        """Queued work counts as active before an idle member consumes it."""
+        with self._lock, self._connection() as db:
+            return db.execute(
+                "SELECT 1 FROM agent_messages WHERE recipient_agent_id=? "
+                "AND acknowledged_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",
+                (str(agent_id), time.time()),
+            ).fetchone() is not None
+
     def read_messages(self, agent_id: str, *, after_seq: int = 0, limit: int = 20) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 50))
         with self._lock, self._connection() as db:
