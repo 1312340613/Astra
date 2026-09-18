@@ -203,6 +203,8 @@ class TurnChangeStore:
         self._truncated = False
         # 本实例所有权令牌：owner.json 记录 (pid, token, session_id)（review R7）
         self._owner_token = os.urandom(16).hex()
+        # 接管决策时看到的 owner 快照：锁内复核"持有人未变"后才写入（F1）
+        self._owner_expectation: Any = None
         # 存储目录链身份：workspace → root → session dir（review F2）
         self._root_anchor: tuple[int, int] | None = None
         self._session_anchor: tuple[int, int] | None = None
@@ -388,13 +390,21 @@ class TurnChangeStore:
     # -- 生命周期 --
 
     def close(self) -> None:
-        """会话释放：仅在本实例仍持有该会话区时删除快照目录（之后可重新 begin_turn）."""
+        """会话释放：仅在本实例仍持有该会话区时删除快照目录（之后可重新 begin_turn）.
+
+        身份核验与删除都在会话锁内完成，避免与另一个实例的接管交错（F1）。
+        """
         with self._lock:
             self._active = None
             self._request_id = ""
             self._turn_bytes = 0
-            if self._storage_ok() and self._owner_is_ours():
-                shutil.rmtree(self.session_dir, ignore_errors=True)
+            if not self._storage_ok():
+                return
+            with _session_guard(self._session_lock_path()) as locked:
+                if not locked:
+                    return
+                if self._owner_is_ours():
+                    shutil.rmtree(self.session_dir, ignore_errors=True)
 
     @staticmethod
     def cleanup_orphans(
@@ -411,41 +421,19 @@ class TurnChangeStore:
             return removed
         probe = is_alive if is_alive is not None else _pid_alive
         for child in children:
+            if child.name == _LOCK_DIR_NAME:
+                continue
             if child.is_symlink():
                 # 符号链接目录项：绝不跟随（F2）
                 logger.warning("turn-change store: skip %s (symbolic link)", child)
                 continue
-            try:
-                owner = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                # 可能是其他实例刚建目录、尚未写入 owner 的窗口期：宁可不清理
-                logger.warning("turn-change store: skip %s (no readable owner.json)", child)
-                continue
-            pid = owner.get("pid") if isinstance(owner, dict) else None
-            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-                logger.warning("turn-change store: skip %s (owner.json has no usable pid)", child)
-                continue
-            try:
-                alive = bool(probe(pid))
-            except Exception as exc:  # noqa: BLE001 - 探活失败即视为"无法确认"
-                logger.warning("turn-change store: skip %s (liveness probe failed: %s)", child, exc)
-                continue
-            if alive:
-                continue
-            # 删除前复核同一 owner 身份：读取后、删除前所有权易主则跳过（review R7）
-            try:
-                current = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                current = None
-            if current != owner:
-                logger.warning("turn-change store: skip %s (owner changed before removal)", child)
-                continue
-            try:
-                shutil.rmtree(child)
-            except OSError as exc:
-                logger.warning("turn-change store: cannot remove orphan %s (%s)", child, exc)
-                continue
-            removed.append(str(child))
+            # 与接管/写入/淘汰共享同一会话锁；锁内复核持有人（review F1）
+            with _session_guard(base / _LOCK_DIR_NAME / f"{child.name}.lock") as locked:
+                if not locked:
+                    logger.warning("turn-change store: skip %s (session lock unavailable)", child)
+                    continue
+                if _remove_orphan_session(child, probe):
+                    removed.append(str(child))
         return removed
 
     # -- 内部：登记与收尾 --
@@ -457,6 +445,10 @@ class TurnChangeStore:
         except OSError:
             return False
         return (st.st_dev, st.st_ino) == self._anchor_identity
+
+    def _session_lock_path(self) -> Path:
+        """Per-session cross-instance lock shared by claim/write/evict/close/cleanup (F1)."""
+        return self.root / _LOCK_DIR_NAME / f"{self.session_dir.name}.lock"
 
     def _ensure_session_dir(self) -> bool:
         """Create the session area and establish/take over its ownership marker.
@@ -539,18 +531,23 @@ class TurnChangeStore:
         return True
 
     def _claim_ownership(self) -> bool:
+        """Read the owner marker, then claim/take over under the session lock.
+
+        读取旧 owner 与写入新 owner 之间可能被另一个实例插入；因此接管是
+        "乐观判断 + 锁内复核"：``_write_owner`` 只在锁内确认持有人仍是本次
+        决策看到的那个（或仍不存在）时才写入（review F1）。
+        """
         owner_path = self.session_dir / OWNER_NAME
-        try:
-            raw = owner_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return self._write_owner(owner_path)
-        except OSError as exc:
-            logger.warning("turn-change store: unreadable owner marker %s (%s)", owner_path, exc)
+        readable, owner = self._read_owner_state(owner_path)
+        if not readable:
+            logger.warning(
+                "turn-change store: unreadable owner marker %s; refusing writes", owner_path
+            )
             return False
-        try:
-            owner = json.loads(raw)
-        except ValueError:
-            owner = None
+        if owner is None:
+            # 尚无 owner.json：建立（锁内复核"仍不存在"）
+            self._owner_expectation = None
+            return self._write_owner(owner_path)
         if self._owner_matches(owner):
             return True
         pid = owner.get("pid") if isinstance(owner, dict) else None
@@ -566,23 +563,60 @@ class TurnChangeStore:
                 pid,
             )
             return False
-        # 旧实例已退出 → 原子接管
+        # 旧实例已退出 → 尝试接管；锁内复核持有人未变才写入
+        self._owner_expectation = owner
         return self._write_owner(owner_path)
 
-    def _write_owner(self, owner_path: Path) -> bool:
+    @staticmethod
+    def _read_owner_state(owner_path: Path) -> tuple[bool, Any]:
+        """Read the owner marker; ``(False, None)`` when it exists but is unusable."""
         try:
-            _write_json_atomic(
-                owner_path,
-                {
-                    "session_id": self.session_id,
-                    "pid": os.getpid(),
-                    "token": self._owner_token,
-                    "created_at": time.time(),
-                },
-            )
-        except OSError as exc:
-            logger.warning("turn-change store: cannot write owner marker %s (%s)", owner_path, exc)
-            return False
+            raw = owner_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return True, None
+        except OSError:
+            return False, None
+        try:
+            return True, json.loads(raw)
+        except ValueError:
+            return False, None
+
+    def _write_owner(self, owner_path: Path) -> bool:
+        """Write the owner marker under the session lock after re-checking the holder (F1).
+
+        只有锁内复核确认 owner 仍是决策时看到的快照（含"仍不存在"）才写入；
+        否则说明另一个实例已经接管，直接拒绝，绝不覆盖活跃 token。
+        """
+        expected = self._owner_expectation
+        with _session_guard(self._session_lock_path()) as locked:
+            if not locked:
+                logger.warning(
+                    "turn-change store: session lock unavailable for %s; refusing takeover",
+                    owner_path,
+                )
+                return False
+            readable, current = self._read_owner_state(owner_path)
+            if not readable or current != expected:
+                logger.warning(
+                    "turn-change store: owner marker %s changed while waiting; refusing takeover",
+                    owner_path,
+                )
+                return False
+            try:
+                _write_json_atomic(
+                    owner_path,
+                    {
+                        "session_id": self.session_id,
+                        "pid": os.getpid(),
+                        "token": self._owner_token,
+                        "created_at": time.time(),
+                    },
+                )
+            except OSError as exc:
+                logger.warning(
+                    "turn-change store: cannot write owner marker %s (%s)", owner_path, exc
+                )
+                return False
         return True
 
     def _owner_matches(self, owner: Any) -> bool:
@@ -652,23 +686,29 @@ class TurnChangeStore:
         """Bounded FIFO eviction; stops as soon as a removal makes no progress.
 
         Locked or permission-protected directories degrade the caller (quota
-        handling) instead of retrying the same failing entry forever.
+        handling) instead of retrying the same failing entry forever. All
+        removals happen under the session lock (review F1).
         """
-        while not condition():
-            turns = self._turn_dirs()
-            if not turns:
-                break
-            if not self._storage_ok():
-                # 目录链身份已变（被替换/换成符号链接）：不再删除任何回合目录（F2）
-                break
-            if not self._owner_is_ours():
-                # 未核验到同一 owner 身份前，不删除任何回合目录（review R7）
-                break
-            if not self._remove_turn(turns[0][1]):
-                break
-            if len(self._turn_dirs()) >= len(turns):
-                break  # no measurable progress; stop instead of looping
-        return condition()
+        if not self._storage_ok():
+            return condition()
+        with _session_guard(self._session_lock_path()) as locked:
+            if not locked:
+                return condition()
+            while not condition():
+                turns = self._turn_dirs()
+                if not turns:
+                    break
+                if not self._storage_ok():
+                    # 目录链身份已变（被替换/换成符号链接）：不再删除任何回合目录（F2）
+                    break
+                if not self._owner_is_ours():
+                    # 未核验到同一 owner 身份前，不删除任何回合目录（review R7）
+                    break
+                if not self._remove_turn(turns[0][1]):
+                    break
+                if len(self._turn_dirs()) >= len(turns):
+                    break  # no measurable progress; stop instead of looping
+            return condition()
 
     def _enforce_retention(self) -> None:
         """FIFO: 只保留最近 max_turns_retained 个回合；会话超量先淘汰最旧回合."""
@@ -703,6 +743,22 @@ class TurnChangeStore:
             return None, SIDE_UNCAPTURED
 
     def _persist(self, manifest: TurnChangesManifest, entries: list[_ResolvedEntry]) -> None:
+        """尽力落盘；写入门控在会话锁内完成（review F1）."""
+        # 先核验目录链与持有人再触碰锁目录：目录被替换时连锁都不落（F2/F1）
+        if not self._ensure_session_dir():
+            return
+        with _session_guard(self._session_lock_path()) as locked:
+            if not locked:
+                logger.warning(
+                    "turn-change store: session lock unavailable; skipping persist of turn %s",
+                    manifest.turn_seq,
+                )
+                return
+            self._persist_locked(manifest, entries)
+
+    def _persist_locked(
+        self, manifest: TurnChangesManifest, entries: list[_ResolvedEntry]
+    ) -> None:
         """尽力落盘；任何失败只降级（调用方仍拿到内存 manifest）."""
         turn_dir = self.session_dir / f"turn-{manifest.turn_seq}"
         try:
@@ -1231,6 +1287,144 @@ def _safe_dir_anchor(path: Path) -> tuple[int, int] | None:
         return _open_dir_anchor(path)
     except OSError:
         return None
+
+
+_LOCK_DIR_NAME = ".locks"
+_GUARD_LOCAL = threading.RLock()
+_GUARD_DEPTH = threading.local()
+
+
+def _lock_file_handle(lock_path: Path, timeout: float = 2.0) -> Any | None:
+    """Advisory exclusive lock on ``lock_path``; ``None`` when unavailable.
+
+    ``flock`` on POSIX keeps separate open file descriptions apart, so two
+    threads of one process exclude each other as well; Windows uses
+    ``msvcrt.locking``. Bounded retry, never blocks forever.
+    """
+    try:
+        handle = open(lock_path, "a+b")
+    except OSError:
+        return None
+    deadline = time.monotonic() + timeout
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        while True:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return handle
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    return None
+                time.sleep(0.01)
+    import fcntl
+
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except OSError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                return None
+            time.sleep(0.01)
+
+
+def _unlock_file_handle(handle: Any) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        handle.close()
+
+
+@contextmanager
+def _session_guard(lock_path: Path) -> Iterator[bool]:
+    """Cross-instance exclusion for one session area (review F1).
+
+    同进程线程先在模块级 RLock 上串行，跨进程再取文件锁；同一线程的嵌套获取
+    直接复用外层锁。取不到锁时产出 ``False``，调用方保守降级（拒绝写入/删除）。
+    """
+    depth = getattr(_GUARD_DEPTH, "depth", 0)
+    if depth:
+        _GUARD_DEPTH.depth = depth + 1
+        try:
+            yield True
+        finally:
+            _GUARD_DEPTH.depth -= 1
+        return
+    if not _GUARD_LOCAL.acquire(timeout=5):
+        logger.warning("turn-change store: busy session area %s; refusing storage I/O", lock_path)
+        yield False
+        return
+    handle: Any = None
+    _GUARD_DEPTH.depth = 1
+    try:
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = _lock_file_handle(lock_path)
+        except OSError as exc:
+            logger.warning("turn-change store: cannot lock %s (%s)", lock_path, exc)
+        if handle is None:
+            logger.warning(
+                "turn-change store: session lock unavailable for %s; degrading", lock_path
+            )
+        yield handle is not None
+    finally:
+        _GUARD_DEPTH.depth = 0
+        if handle is not None:
+            _unlock_file_handle(handle)
+        _GUARD_LOCAL.release()
+
+
+def _remove_orphan_session(child: Path, probe: Callable[[int], bool]) -> bool:
+    """Remove one orphaned session area; the caller holds that session's lock (F1)."""
+    try:
+        owner = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        # 可能是其他实例刚建目录、尚未写入 owner 的窗口期：宁可不清理
+        logger.warning("turn-change store: skip %s (no readable owner.json)", child)
+        return False
+    pid = owner.get("pid") if isinstance(owner, dict) else None
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        logger.warning("turn-change store: skip %s (owner.json has no usable pid)", child)
+        return False
+    try:
+        alive = bool(probe(pid))
+    except Exception as exc:  # noqa: BLE001 - 探活失败即视为"无法确认"
+        logger.warning("turn-change store: skip %s (liveness probe failed: %s)", child, exc)
+        return False
+    if alive:
+        return False
+    # 删除前复核同一 owner 身份：读取后、删除前所有权易主则跳过（review R7）
+    try:
+        current = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        current = None
+    if current != owner:
+        logger.warning("turn-change store: skip %s (owner changed before removal)", child)
+        return False
+    try:
+        shutil.rmtree(child)
+    except OSError as exc:
+        logger.warning("turn-change store: cannot remove orphan %s (%s)", child, exc)
+        return False
+    return True
 
 
 def _open_dir_anchor(path: Path) -> tuple[int, int]:

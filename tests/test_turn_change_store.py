@@ -1388,6 +1388,81 @@ def test_second_instance_refuses_an_active_owner(tmp_path: Path) -> None:
     assert first.manifest(0) is not None
 
 
+def test_concurrent_takeover_refuses_the_late_competitor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1：两个实例真正交错时，后到的接管不得覆盖活跃 owner 或删掉台账.
+
+    探针形状：两个线程同时读到同一个"死亡 pid"旧 owner、都决定接管，先放行 A
+    完成接管并写出 turn-1，再放行早已决策的 B。B 的写入必须在会话锁内被复核
+    拒绝（不是串行构造两个 store），且 B.close() 不得删除 A 的 manifest。
+    """
+    import threading
+
+    root = tmp_path / "ledger"
+    session = root / "review"
+    session.mkdir(parents=True)
+    (session / "owner.json").write_text(
+        json.dumps({"pid": 987654321, "session_id": "review", "token": "dead"}),
+        encoding="utf-8",
+    )
+    ready = {key: threading.Event() for key in ("A", "B")}
+    release = {key: threading.Event() for key in ("A", "B")}
+    stores: dict[str, store.TurnChangeStore] = {}
+    errors: list[str] = []
+    original_write_owner = store.TurnChangeStore._write_owner
+
+    def controlled_write(self, owner_path):
+        key = threading.current_thread().name
+        ready[key].set()
+        # 两个竞争者都先"读完旧 owner、决定接管"，再按释放顺序真正写入
+        assert release[key].wait(5), f"probe synchronization timeout for {key}"
+        return original_write_owner(self, owner_path)
+
+    def construct(key: str) -> None:
+        try:
+            stores[key] = store.TurnChangeStore(tmp_path, "review", root=root)
+        except Exception as exc:  # pragma: no cover - surfaced through `errors`
+            errors.append(f"{key}: {exc!r}")
+
+    monkeypatch.setattr(store, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(store.TurnChangeStore, "_write_owner", controlled_write)
+
+    threads = [
+        threading.Thread(target=construct, args=(key,), name=key) for key in ("A", "B")
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        assert all(event.wait(5) for event in ready.values()), errors
+
+        release["A"].set()
+        threads[0].join(5)
+        assert "A" in stores, errors
+        first = stores["A"]
+        (tmp_path / "real.txt").write_bytes(b"new\n")
+        first.begin_turn("A-live")
+        first.note_absent("real.txt")
+        assert first.seal() is not None
+        manifest_path = session / "turn-1" / "manifest.json"
+        assert manifest_path.exists()
+
+        release["B"].set()
+        threads[1].join(5)
+        assert "B" in stores, errors
+        second = stores["B"]
+
+        assert first._owner_is_ours() is True
+        assert second._owner_is_ours() is False  # 后来者不得抢走活跃所有权
+        second.close()
+        assert manifest_path.exists()  # 不得删除前一个实例的台账
+    finally:
+        for event in release.values():
+            event.set()
+        for thread in threads:
+            thread.join(5)
+
+
 # ---------------------------------------------------------------------------
 # 9. turn_store_scope / current_turn_change_store
 # ---------------------------------------------------------------------------
