@@ -250,12 +250,22 @@ class TurnChangeStore:
             entry.before_state = SIDE_ABSENT
 
     def note_tracked(self, path: str, before_fp: str | None, after_fp: str | None) -> None:
+        """登记一条 git 指纹变更；同一路径多次登记保留"首次 before + 末次 after".
+
+        混合规则：字节快照（note_capture/note_absent）优先于指纹。同一路径既有
+        快照又有 tracked 时，判定只走快照（首份 before 字节 vs 封存时读取），
+        tracked 链不参与，登记顺序不影响判定。
+        """
         with self._lock:
             entry = self._register(path)
             if entry is None:
                 return
             if entry.tracked is None:
                 entry.tracked = (before_fp, after_fp)
+            else:
+                # 回合首尾净变化语义：命令序列多次触碰同一路径时，比较首次
+                # before 与最后一次 after（改回原样/删除后重建都取净结果）。
+                entry.tracked = (entry.tracked[0], after_fp)
 
     def seal(self, *, cancelled: Callable[[], bool] | None = None) -> TurnChangesManifest | None:
         """净判定 + 配额 + 落盘 + FIFO；空回合返回 None。

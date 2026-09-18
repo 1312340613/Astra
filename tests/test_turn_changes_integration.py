@@ -16,6 +16,8 @@ import asyncio
 import copy
 import json
 import re
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from agent.core.msg import ContentBlock, Msg
@@ -27,7 +29,7 @@ from agent.runtime.tools import delegate as delegate_tools
 from agent.runtime.tools.delegate import register_delegate_tools
 from agent.runtime.tools.files import register_file_tools
 from agent.runtime.tools.processes import ProcessManager
-from agent.runtime.tools.registry import ToolRegistry
+from agent.runtime.tools.registry import ToolDef, ToolRegistry
 
 
 def run(coro):
@@ -257,6 +259,73 @@ def test_edits_reverted_to_original_are_not_listed(tmp_path, monkeypatch):
     assert "done" in types
     assert "turn_changes" not in types, f"reverted edit must not be listed; seen={types}"
     assert stores
+    assert stores[0].manifest(0) is None
+
+
+def test_tracked_real_command_sequence_reverting_to_original_is_not_listed(tmp_path, monkeypatch):
+    """R5: a real command sequence (git snapshots + real subprocess commands)
+    that returns the file to its turn-start state must not produce an event."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.py").write_text("value = 0\n", encoding="utf-8")
+    (repo / "codegen_step.py").write_text(
+        "import pathlib\nimport sys\n"
+        "pathlib.Path('sample.py').write_text(f'value = {sys.argv[1]}\\n')\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    (repo / "sample.py").write_text("value = 1\n", encoding="utf-8")  # 回合开始时已脏
+
+    def run_command(command: str) -> str:
+        completed = subprocess.run(
+            command, shell=True, cwd=str(repo), capture_output=True, text=True, timeout=30
+        )
+        return f"exit={completed.returncode}\n{completed.stdout}{completed.stderr}".strip()
+
+    registry = ToolRegistry()
+    register_file_tools(registry, workdir=str(repo))
+    registry.register(ToolDef(
+        "execute_shell",
+        "Run a shell command",
+        {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        run_command,
+        risk="execute",
+        group="code",
+    ))
+    registry.yolo = True
+    script = sys.executable.replace("\\", "/")
+    agent = ReActAgent(
+        "tracked-agent",
+        ScriptedLLM([
+            call("execute_shell", {"command": f"{script} codegen_step.py 2"}, call_id="c1"),
+            call("execute_shell", {"command": f"{script} codegen_step.py 1"}, call_id="c2"),
+            DONE,
+        ]),
+        registry,
+        timing_log_enabled=False,
+        query_profile_enabled=False,
+        max_iterations=8,
+    )
+    agent._sandbox = SimpleNamespace(workdir=str(repo))
+    stores = []
+
+    def fake_make_store(self, session_key):
+        store = tcs.TurnChangeStore(repo, session_key, root=tmp_path / "tc-root")
+        stores.append(store)
+        return store
+
+    monkeypatch.setattr(ReActAgent, "_make_turn_change_store", fake_make_store)
+
+    events = run(collect_stream(agent, Msg(content=[ContentBlock.text("regenerate")], id="m-tracked-revert")))
+    types = [e["type"] for e in events]
+    assert "done" in types
+    assert "turn_changes" not in types, f"reverted command sequence must not be listed; seen={types}"
+    assert (repo / "sample.py").read_text(encoding="utf-8") == "value = 1\n"
+    assert stores, "the turn should have created a session store"
     assert stores[0].manifest(0) is None
 
 

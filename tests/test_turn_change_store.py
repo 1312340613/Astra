@@ -446,6 +446,53 @@ def test_snapshot_evidence_outranks_tracked_fingerprints(tmp_path: Path) -> None
     assert change.reason == ""
 
 
+def test_tracked_sequence_reverting_to_original_is_not_listed(tmp_path: Path) -> None:
+    """R5：同一路径多次 tracked 取"首次 before + 末次 after"，改回原样=无净改动."""
+    subject = make_store(tmp_path)
+    subject.begin_turn("req-1")
+    subject.note_tracked("sample.py", "file:original", "file:changed")
+    subject.note_tracked("sample.py", "file:changed", "file:original")
+
+    assert subject.seal() is None
+
+
+def test_tracked_chain_uses_first_before_and_last_after(tmp_path: Path) -> None:
+    subject = make_store(tmp_path)
+    subject.begin_turn("req-1")
+    subject.note_tracked("created.py", "missing", "file:1")
+    subject.note_tracked("created.py", "file:1", "file:2")
+    subject.note_tracked("dead.py", "file:1", "file:2")
+    subject.note_tracked("dead.py", "file:2", "missing")
+    subject.note_tracked("drift.py", "file:1", "file:2")
+    subject.note_tracked("drift.py", "file:2", "file:3")
+
+    manifest = subject.seal()
+    assert manifest is not None
+    changes = {change.path: change for change in manifest.files}
+    assert changes["created.py"].state == store.STATE_MODIFIED  # missing → file:2
+    assert changes["dead.py"].state == store.STATE_DELETED      # file:1 → missing
+    assert changes["drift.py"].state == store.STATE_MODIFIED    # file:1 → file:3
+    assert all(change.reason == store.REASON_TRACKED for change in changes.values())
+
+
+def test_snapshot_evidence_outranks_a_repeated_tracked_chain(tmp_path: Path) -> None:
+    """混合规则：字节快照优先于指纹；快照存在时 tracked 链不参与判定."""
+    (tmp_path / "a.txt").write_bytes(b"new\n")
+    subject = make_store(tmp_path)
+    subject.begin_turn("req-1")
+
+    subject.note_tracked("a.txt", "file:1", "file:2")
+    subject.note_tracked("a.txt", "file:2", "missing")  # 单看链=deleted
+    subject.note_capture("a.txt", b"old\n")
+
+    manifest = subject.seal()
+    assert manifest is not None
+    change = manifest.files[0]
+    assert change.state == store.STATE_MODIFIED
+    assert change.compare == store.COMPARE_FULL
+    assert change.reason == ""
+
+
 # ---------------------------------------------------------------------------
 # path normalization and the per-turn path budget
 # ---------------------------------------------------------------------------
