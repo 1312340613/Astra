@@ -8,8 +8,9 @@ Behavior notes that the frozen contract left to this module (all are covered
 by ``tests/test_turn_change_store.py``):
 
 - 主清单（``files``）只收"存在性/字节已确认"的条目；任一侧 ``uncaptured``
-  一律进 ``unknown`` 区。超时/取消只降级计数（``compare=none``、
-  ``added/removed=None``、``reason=timeout|cancelled``），条目仍留在主清单。
+  一律进 ``unknown`` 区（review F5）。两侧都已确定、只是没算完计数的条目
+  留在主清单并降级（``compare=none``、``added/removed=None``、
+  ``reason=timeout|cancelled``）。
 - ``note_paths`` 仅登记候选：从未取得快照的候选路径进 ``unknown``（reason=error），
   绝不作为已确认改动出现。
 - tracked 行只有指纹、没有字节：``missing`` 侧记 ``absent``，有指纹侧记
@@ -1118,28 +1119,13 @@ class TurnChangeStore:
         )
 
     def _degraded_without_read(self, entry: _PathEntry, reason: str) -> _ResolvedEntry:
-        """取消/过期：停止新的可放弃捕获，不读取 after；条目按 before 侧降级保留."""
-        if entry.before_state == SIDE_ABSENT:
-            state = STATE_ADDED
-        elif entry.before_state == SIDE_CAPTURED:
-            state = STATE_MODIFIED
-        else:
-            state = STATE_UNKNOWN
-        return _ResolvedEntry(
-            change=FileChange(
-                path=entry.path,
-                display=entry.path,
-                state=state,
-                before_state=entry.before_state or SIDE_UNCAPTURED,
-                after_state=SIDE_UNCAPTURED,
-                added=None,
-                removed=None,
-                compare=COMPARE_NONE,
-                reason=reason,
-                checkpoint_ids=list(entry.checkpoint_ids),
-            ),
-            before_bytes=entry.before,
-            after_bytes=None,
+        """取消/过期：停止可放弃捕获且 after 未读取 → 进未知区（review F5）.
+
+        未读到最终状态、也没有可信最终指纹时，绝不能把"可能发生过写操作"报成
+        modified/added；保留 before 侧与停止原因即可。
+        """
+        return self._unknown_entry(
+            entry, entry.before_state or SIDE_UNCAPTURED, reason, SIDE_UNCAPTURED, None
         )
 
     def _no_change(self, entry: _PathEntry, before_state: str, after_state: str) -> FileChange:

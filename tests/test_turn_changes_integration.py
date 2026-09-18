@@ -407,7 +407,11 @@ def test_aborted_stream_still_seals_the_turn(tmp_path, monkeypatch):
     assert stores, "store should exist"
     manifest = stores[0].manifest(0)
     assert manifest is not None, "the aclose fallback must persist the sealed turn"
-    assert any(c.path == "draft.txt" for c in manifest.files)
+    # 中止的回合：写入未被读取确认 → 进未知区并保留停止原因（review F5）
+    assert manifest.files == []
+    assert [change.path for change in manifest.unknown] == ["draft.txt"]
+    assert manifest.unknown[0].reason == "cancelled"
+    assert manifest.unknown[0].after_state == tcs.SIDE_UNCAPTURED
 
 
 def test_model_error_path_still_publishes_once(tmp_path, monkeypatch):
@@ -550,9 +554,11 @@ def test_real_task_cancellation_keeps_the_write_and_degrades_counts(tmp_path, mo
 
     manifest = stores[0].manifest()
     assert manifest is not None
-    change = manifest.files[0]
+    # 取消后不再读取 after：条目进未知区，保留 before 与取消原因（review F5）
+    assert manifest.files == []
+    change = manifest.unknown[0]
     assert change.path == "cancel.txt"
-    assert change.state == tcs.STATE_ADDED
+    assert change.state == tcs.STATE_UNKNOWN
     assert change.before_state == tcs.SIDE_ABSENT
     assert change.after_state == tcs.SIDE_UNCAPTURED  # 取消后不再读取 after
     assert (change.compare, change.added, change.removed) == (tcs.COMPARE_NONE, None, None)
@@ -606,13 +612,19 @@ def test_pending_task_cancel_during_seal_stops_new_source_reads(tmp_path, monkey
     assert reads == ["a.txt"], f"pending cancel must stop new reads; reads={reads}"
     manifest = stores[0].manifest()
     assert manifest is not None
+    # a.txt 已读取：两侧已确定 → 主清单降级保留；b/c 未读 → 未知区（review F5）
     by_path = {change.path: change for change in manifest.files}
-    assert set(by_path) == {"a.txt", "b.txt", "c.txt"}
-    assert all(change.reason == "cancelled" for change in by_path.values())
-    assert all(
-        (change.compare, change.added, change.removed) == (tcs.COMPARE_NONE, None, None)
-        for change in by_path.values()
-    )
+    assert set(by_path) == {"a.txt"}
+    assert by_path["a.txt"].state == tcs.STATE_ADDED
+    assert by_path["a.txt"].reason == "cancelled"
+    assert (
+        by_path["a.txt"].compare, by_path["a.txt"].added, by_path["a.txt"].removed
+    ) == (tcs.COMPARE_NONE, None, None)
+    unread = {change.path: change for change in manifest.unknown}
+    assert set(unread) == {"b.txt", "c.txt"}
+    assert all(change.reason == "cancelled" for change in unread.values())
+    assert all(change.state == tcs.STATE_UNKNOWN for change in unread.values())
+    assert all(change.after_state == tcs.SIDE_UNCAPTURED for change in unread.values())
 
 
 def test_non_streaming_reply_records_without_events(tmp_path, monkeypatch):

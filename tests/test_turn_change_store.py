@@ -996,7 +996,7 @@ def test_turn_compute_budget_degrades_unfinished_entries(tmp_path: Path) -> None
 
     assert manifest is not None
     assert elapsed < 2.0  # 注入的慢 differ 不得拖住收尾
-    assert [change.path for change in manifest.files] == [f"f{i}.txt" for i in range(5)]
+    assert [change.path for change in manifest.files] == ["f0.txt", "f1.txt"]
     assert len(differ.calls) == 2  # 超预算后不再发起新的 diff
     assert differ.calls[0].deadline == pytest.approx(started + 0.050)  # 单文件截止时间
     assert differ.calls[1].deadline == pytest.approx(started + 0.100)  # 取较早的回合截止时间
@@ -1004,12 +1004,13 @@ def test_turn_compute_budget_degrades_unfinished_entries(tmp_path: Path) -> None
     assert clock.now - started == pytest.approx(0.180)
 
     confirmed = [change for change in manifest.files if change.compare == store.COMPARE_FULL]
-    degraded = [change for change in manifest.files if change.compare == store.COMPARE_NONE]
     assert len(confirmed) == 2
-    assert len(degraded) == 3
-    assert all(change.added is None and change.removed is None for change in degraded)
-    assert all(change.reason == REASON_TIMEOUT for change in degraded)
-    assert all(change.state == store.STATE_MODIFIED for change in degraded)
+    # 未读到 after 的条目进未知区，绝不报成 modified（review F5）
+    assert [change.path for change in manifest.unknown] == ["f2.txt", "f3.txt", "f4.txt"]
+    assert all(change.added is None and change.removed is None for change in manifest.unknown)
+    assert all(change.reason == REASON_TIMEOUT for change in manifest.unknown)
+    assert all(change.state == store.STATE_UNKNOWN for change in manifest.unknown)
+    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.unknown)
 
 
 # ---------------------------------------------------------------------------
@@ -1042,11 +1043,14 @@ def test_seal_forwards_the_cancel_callback_to_the_differ(tmp_path: Path) -> None
     assert manifest is not None
     assert received and received[0] is cancel_flag  # 取消信号贯通给 differ
     assert len(received) == 1                       # 取消后不再发起新的 diff
+    assert [change.path for change in manifest.files] == ["f0.txt"]
     assert manifest.files[0].compare == store.COMPARE_FULL
-    for change in manifest.files[1:]:
-        assert (change.compare, change.added, change.removed) == (store.COMPARE_NONE, None, None)
-        assert change.reason == REASON_CANCELLED
-        assert change.state == store.STATE_MODIFIED
+    # 取消时未读取 after 的条目进未知区（review F5）
+    assert [change.path for change in manifest.unknown] == ["f1.txt", "f2.txt"]
+    assert all(change.compare == store.COMPARE_NONE for change in manifest.unknown)
+    assert all(change.reason == REASON_CANCELLED for change in manifest.unknown)
+    assert all(change.state == store.STATE_UNKNOWN for change in manifest.unknown)
+    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.unknown)
 
 
 def test_cancel_before_any_diff_degrades_every_entry(tmp_path: Path) -> None:
@@ -1062,11 +1066,13 @@ def test_cancel_before_any_diff_degrades_every_entry(tmp_path: Path) -> None:
 
     assert manifest is not None
     assert differ.calls == []
-    change = manifest.files[0]
+    # 未读取 after：条目进未知区，不得报成 modified（review F5）
+    assert manifest.files == []
+    change = manifest.unknown[0]
     assert (change.compare, change.added, change.removed) == (store.COMPARE_NONE, None, None)
     assert change.reason == REASON_CANCELLED
-    # 取消后不再读取 after；before 侧已登记，条目降级保留（非计数）
-    assert change.state == store.STATE_MODIFIED
+    assert change.state == store.STATE_UNKNOWN
+    assert change.after_state == store.SIDE_UNCAPTURED
 
 
 def test_cancelled_seal_never_reads_source_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1095,12 +1101,14 @@ def test_cancelled_seal_never_reads_source_files(tmp_path: Path, monkeypatch: py
     assert manifest is not None
     assert reads == []
     assert elapsed < 0.5
-    assert [change.path for change in manifest.files] == [f"note-{i}.txt" for i in range(5)]
-    assert all(change.compare == store.COMPARE_NONE for change in manifest.files)
-    assert all(change.added is None and change.removed is None for change in manifest.files)
-    assert all(change.reason == REASON_CANCELLED for change in manifest.files)
-    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.files)
-    assert all(change.state == store.STATE_MODIFIED for change in manifest.files)
+    # 未读取 after 的条目全部进未知区（review F5）
+    assert manifest.files == []
+    assert [change.path for change in manifest.unknown] == [f"note-{i}.txt" for i in range(5)]
+    assert all(change.compare == store.COMPARE_NONE for change in manifest.unknown)
+    assert all(change.added is None and change.removed is None for change in manifest.unknown)
+    assert all(change.reason == REASON_CANCELLED for change in manifest.unknown)
+    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.unknown)
+    assert all(change.state == store.STATE_UNKNOWN for change in manifest.unknown)
 
 
 def test_expired_budget_stops_further_source_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1128,11 +1136,52 @@ def test_expired_budget_stops_further_source_reads(tmp_path: Path, monkeypatch: 
 
     assert manifest is not None
     assert reads == ["f0.txt", "f1.txt"]  # 预算 100ms：第二次读取后过期
-    confirmed = [change for change in manifest.files if change.compare == store.COMPARE_FULL]
-    degraded = [change for change in manifest.files if change.compare == store.COMPARE_NONE]
-    assert [change.path for change in confirmed] == ["f0.txt"]
-    assert [change.path for change in degraded] == [f"f{i}.txt" for i in range(1, 6)]
-    assert all(change.reason == REASON_TIMEOUT for change in degraded)
+    assert [change.path for change in manifest.files] == ["f0.txt", "f1.txt"]
+    assert manifest.files[0].compare == store.COMPARE_FULL
+    # f1 已读取但没算完计数：两侧已确定，留在主清单但降级
+    assert manifest.files[1].compare == store.COMPARE_NONE
+    assert manifest.files[1].reason == REASON_TIMEOUT
+    # f2 起未读取 after：进未知区（review F5）
+    assert [change.path for change in manifest.unknown] == [f"f{i}.txt" for i in range(2, 6)]
+    assert all(change.reason == REASON_TIMEOUT for change in manifest.unknown)
+    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.unknown)
+
+
+@pytest.mark.parametrize("reason", [REASON_CANCELLED, REASON_TIMEOUT])
+def test_unread_after_never_claims_a_net_change(tmp_path: Path, reason: str) -> None:
+    """F5：取消/超时下"改回原样"与"创建后删除"都不得报成 modified/added.
+
+    两者 after 均未读取（无字节、无指纹），净变化语义无从确认；只能进未知区
+    并保留停止原因，绝不能把"可能写过"当成"已确认的净改动"。
+    """
+    clock = FakeClock()
+    budget = 0 if reason == REASON_TIMEOUT else 60_000  # 0ms 预算 = 收尾前已过期
+    limits = store.TurnChangeLimits(compute_budget_ms=budget, diff_deadline_ms=60_000)
+    subject = make_store(tmp_path, "sess-1", clock=clock, limits=limits)
+    subject.begin_turn("req-1")
+    reverted = tmp_path / "reverted.txt"
+    reverted.write_bytes(b"original\n")
+    subject.note_capture("reverted.txt", b"original\n")
+    reverted.write_bytes(b"edited\n")
+    reverted.write_bytes(b"original\n")  # 改回原样
+    added = tmp_path / "created-then-deleted.txt"
+    subject.note_absent(added)
+    added.write_bytes(b"temporary\n")
+    added.unlink()  # 创建后删除
+
+    manifest = subject.seal(cancelled=(lambda: True) if reason == REASON_CANCELLED else None)
+
+    assert manifest is not None
+    assert manifest.files == []  # 实际净变化为零：绝不出现 modified/added
+    assert sorted(change.path for change in manifest.unknown) == [
+        "created-then-deleted.txt",
+        "reverted.txt",
+    ]
+    assert all(change.state == store.STATE_UNKNOWN for change in manifest.unknown)
+    assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.unknown)
+    assert all(change.reason == reason for change in manifest.unknown)
+    assert all(change.added is None and change.removed is None for change in manifest.unknown)
+    assert subject.load_sides(0, "reverted.txt").after is None  # 未读最终字节
 
 
 def test_bounded_read_caps_the_read_size(tmp_path: Path) -> None:
