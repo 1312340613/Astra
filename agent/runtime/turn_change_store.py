@@ -200,7 +200,7 @@ class TurnChangeStore:
         self.root = (
             Path(root).expanduser().resolve()
             if root is not None
-            else self.workspace.joinpath(*DEFAULT_ROOT_PARTS)
+            else self.workspace.joinpath(*DEFAULT_ROOT_PARTS).resolve()
         )
         self.session_dir = self.root / _safe_session_name(self.session_id)
         self._differ = differ
@@ -216,6 +216,8 @@ class TurnChangeStore:
         self._owner_expectation: Any = None
         # 最近一次合作式收尾是否在让出点收到了真实取消（review F4）
         self.seal_stopped_by_cancel = False
+        # 收尾完成但取消已传播的清单，供调用方取回（review G2）
+        self._stopped_manifest: TurnChangesManifest | None = None
         # 存储目录链身份：workspace → root → session dir（review F2）
         self._root_anchor: tuple[int, int] | None = None
         self._session_anchor: tuple[int, int] | None = None
@@ -344,8 +346,18 @@ class TurnChangeStore:
             outcome = self._resolve_entry(entry, deadline, effective)
             if outcome is not None:
                 resolved.append(outcome)
-        manifest = self._finish_seal(request_id, deadline, effective, resolved)
-        self.seal_stopped_by_cancel = effective is _ALWAYS_CANCELLED
+        forced = effective is _ALWAYS_CANCELLED
+        try:
+            manifest = await self._finish_seal_async(request_id, deadline, effective, resolved)
+        except asyncio.CancelledError:
+            self.seal_stopped_by_cancel = True
+            raise
+        if forced:
+            # 读取阶段的取消：清单已产出 → 暂存后继续传播取消语义（review G2）
+            self.seal_stopped_by_cancel = True
+            self._stopped_manifest = manifest
+            raise asyncio.CancelledError()
+        self.seal_stopped_by_cancel = False
         return manifest
 
     def _begin_seal(self) -> tuple[dict[str, _PathEntry], str, float] | None:
@@ -394,6 +406,33 @@ class TurnChangeStore:
         cancelled: Callable[[], bool] | None,
         resolved: list[_ResolvedEntry],
     ) -> TurnChangesManifest | None:
+        manifest = self._build_manifest(request_id, resolved)
+        if manifest is None:
+            return None
+        self._persist(manifest, resolved, deadline=deadline, cancelled=cancelled)
+        return manifest
+
+    async def _finish_seal_async(
+        self,
+        request_id: str,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+        resolved: list[_ResolvedEntry],
+    ) -> TurnChangesManifest | None:
+        manifest = self._build_manifest(request_id, resolved)
+        if manifest is None:
+            return None
+        try:
+            await self._persist_async(manifest, resolved, deadline=deadline, cancelled=cancelled)
+        except asyncio.CancelledError:
+            # 落盘阶段收到真实取消：清单已按有界策略写完，暂存后继续传播（G2/G3）
+            self._stopped_manifest = manifest
+            raise
+        return manifest
+
+    def _build_manifest(
+        self, request_id: str, resolved: list[_ResolvedEntry]
+    ) -> TurnChangesManifest | None:
         if not resolved:
             return None
         files = [
@@ -407,7 +446,7 @@ class TurnChangeStore:
             "added": sum(change.added for change in files if change.added is not None),
             "removed": sum(change.removed for change in files if change.removed is not None),
         }
-        manifest = TurnChangesManifest(
+        return TurnChangesManifest(
             session_id=self.session_id,
             request_id=request_id,
             turn_seq=self._next_seq(),
@@ -416,7 +455,11 @@ class TurnChangeStore:
             unknown=unknown,
             totals=totals,
         )
-        self._persist(manifest, resolved, deadline=deadline, cancelled=cancelled)
+
+    def take_stopped_manifest(self) -> TurnChangesManifest | None:
+        """取回"收尾完成但取消已传播"的清单（review G2）."""
+        manifest = self._stopped_manifest
+        self._stopped_manifest = None
         return manifest
 
     # -- 读取（M2/M3 用；M1 供测试） --
@@ -481,7 +524,35 @@ class TurnChangeStore:
                 if not locked:
                     return
                 if self._owner_is_ours():
-                    shutil.rmtree(self.session_dir, ignore_errors=True)
+                    self._remove_session_dir()
+
+    def _remove_session_dir(self) -> None:
+        """Delete the session area through verified handles (G1)."""
+        if not _HANDLE_IO_OK:
+            shutil.rmtree(self.session_dir, ignore_errors=True)
+            self._session_anchor = None
+            return
+        try:
+            parent_fd, name = _walk_open_parent(self.session_dir, self._storage_anchors())
+        except OSError as exc:
+            logger.warning(
+                "turn-change store: cannot reach session area %s (%s)", self.session_dir, exc
+            )
+            return
+        try:
+            try:
+                _remove_tree_at(parent_fd, name)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(
+                    "turn-change store: cannot remove session area %s (%s)", self.session_dir, exc
+                )
+                return
+        finally:
+            os.close(parent_fd)
+        # 目录已删：下一次建立时重新锚定，避免 close 后无法重新 begin_turn
+        self._session_anchor = None
 
     @staticmethod
     def cleanup_orphans(
@@ -489,28 +560,50 @@ class TurnChangeStore:
         *,
         is_alive: Callable[[int], bool] | None = None,
     ) -> list[str]:
-        """只清理"确认无活跃持有者"的会话目录；无 owner.json 一律跳过（行为要求 10）."""
+        """只清理"确认无活跃持有者"的会话目录；无 owner.json 一律跳过（行为要求 10）.
+
+        枚举、复核与删除都经根目录句柄完成：目录项被换成符号链接或路径被替换
+        时不会跟随（review F2/G1）。
+        """
         removed: list[str] = []
         base = Path(root).expanduser()
+        probe = is_alive if is_alive is not None else _pid_alive
+        if not _HANDLE_IO_OK:
+            return _cleanup_orphans_path_based(base, probe)
         try:
-            children = sorted(path for path in base.iterdir() if path.is_dir())
+            root_fd = os.open(base, _dir_open_flags())
         except OSError:
             return removed
-        probe = is_alive if is_alive is not None else _pid_alive
-        for child in children:
-            if child.name == _LOCK_DIR_NAME:
-                continue
-            if child.is_symlink():
-                # 符号链接目录项：绝不跟随（F2）
-                logger.warning("turn-change store: skip %s (symbolic link)", child)
-                continue
-            # 与接管/写入/淘汰共享同一会话锁；锁内复核持有人（review F1）
-            with _session_guard(base / _LOCK_DIR_NAME / f"{child.name}.lock") as locked:
-                if not locked:
-                    logger.warning("turn-change store: skip %s (session lock unavailable)", child)
+        try:
+            try:
+                names = sorted(os.listdir(root_fd))
+            except OSError:
+                return removed
+            for name in names:
+                if name == _LOCK_DIR_NAME:
                     continue
-                if _remove_orphan_session(child, probe):
-                    removed.append(str(child))
+                display = base / name
+                try:
+                    st = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(st.st_mode):
+                    # 符号链接目录项：绝不跟随（F2）
+                    logger.warning("turn-change store: skip %s (symbolic link)", display)
+                    continue
+                if not stat.S_ISDIR(st.st_mode):
+                    continue
+                # 与接管/写入/淘汰共享同一会话锁；锁内复核持有人（review F1）
+                with _session_guard(base / _LOCK_DIR_NAME / f"{name}.lock") as locked:
+                    if not locked:
+                        logger.warning(
+                            "turn-change store: skip %s (session lock unavailable)", display
+                        )
+                        continue
+                    if _remove_orphan_session(root_fd, name, display, probe):
+                        removed.append(str(display))
+        finally:
+            os.close(root_fd)
         return removed
 
     # -- 内部：登记与收尾 --
@@ -532,7 +625,8 @@ class TurnChangeStore:
 
         所有权身份 = (pid, token, session_id)：活跃占用（其他存活实例）一律
         拒绝写入；旧实例已退出则原子接管（review R7）。建立与校验绑定
-        workspace → root → session 目录链身份；路径被替换时不写任何字节（F2）。
+        workspace → root → session 目录链身份，且建立/打开只经目录句柄完成
+        （review F2/G1）。
         """
         if not self._anchor_ok():
             logger.warning(
@@ -546,6 +640,88 @@ class TurnChangeStore:
                 self.root,
             )
             return False
+        if not _HANDLE_IO_OK:
+            return self._ensure_session_dir_path_based()
+        if not self._mkdir_chain(self.session_dir):
+            return False
+        try:
+            root_fd, session_name = _walk_open_parent(self.session_dir, self._storage_anchors())
+        except OSError as exc:
+            logger.warning(
+                "turn-change store: refusing to open snapshot area %s (%s)", self.session_dir, exc
+            )
+            return False
+        created = False
+        try:
+            try:
+                session_fd = os.open(
+                    session_name,
+                    _dir_open_flags() | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=root_fd,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(session_name, dir_fd=root_fd)
+                    created = True
+                except FileExistsError:
+                    created = False
+                except OSError as exc:
+                    logger.warning(
+                        "turn-change store: cannot prepare snapshot area %s (%s)",
+                        self.session_dir,
+                        exc,
+                    )
+                    return False
+                try:
+                    session_fd = os.open(
+                        session_name,
+                        _dir_open_flags() | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=root_fd,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "turn-change store: session path %s is not a plain directory (%s)",
+                        self.session_dir,
+                        exc,
+                    )
+                    return False
+            except OSError as exc:
+                logger.warning(
+                    "turn-change store: session path %s is not a plain directory (%s)",
+                    self.session_dir,
+                    exc,
+                )
+                return False
+            try:
+                st = os.fstat(session_fd)
+                current = (st.st_dev, st.st_ino)
+                if created or self._session_anchor is None:
+                    self._session_anchor = current
+                elif current != self._session_anchor:
+                    logger.warning(
+                        "turn-change store: session directory identity changed for %s; refusing to write",
+                        self.session_dir,
+                    )
+                    return False
+            finally:
+                os.close(session_fd)
+        finally:
+            os.close(root_fd)
+        if self._root_anchor is None:
+            self._root_anchor = _safe_dir_anchor(self.root)
+        return self._claim_ownership()
+
+    def _storage_anchors(self) -> dict[Path, tuple[int, int]]:
+        """Recorded directory identities re-checked on every opened handle (F2/G1)."""
+        anchors: dict[Path, tuple[int, int]] = {}
+        if self._root_anchor is not None:
+            anchors[self.root] = self._root_anchor
+        if self._session_anchor is not None:
+            anchors[self.session_dir] = self._session_anchor
+        return anchors
+
+    def _ensure_session_dir_path_based(self) -> bool:
+        """Windows fallback: create/verify the session area by path (no dir handles)."""
         try:
             current = _open_dir_anchor(self.session_dir)
         except OSError:
@@ -561,7 +737,9 @@ class TurnChangeStore:
                 self.session_dir.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 logger.warning(
-                    "turn-change store: cannot prepare snapshot area %s (%s)", self.session_dir, exc
+                    "turn-change store: cannot prepare snapshot area %s (%s)",
+                    self.session_dir,
+                    exc,
                 )
                 return False
         elif self._session_anchor is not None and current != self._session_anchor:
@@ -572,8 +750,14 @@ class TurnChangeStore:
             return False
         if self._root_anchor is None:
             self._root_anchor = _safe_dir_anchor(self.root)
-        self._session_anchor = current if current is not None else _safe_dir_anchor(self.session_dir)
+        self._session_anchor = (
+            current if current is not None else _safe_dir_anchor(self.session_dir)
+        )
         return self._claim_ownership()
+
+    def _mkdir_chain(self, path: Path) -> bool:
+        """Create ``path`` (and missing components) relative to verified handles (G1)."""
+        return _ensure_dir_chain(path)
 
     def _root_ok(self) -> bool:
         if self._root_anchor is None:
@@ -644,14 +828,13 @@ class TurnChangeStore:
         self._owner_expectation = owner
         return self._write_owner(owner_path)
 
-    @staticmethod
-    def _read_owner_state(owner_path: Path) -> tuple[bool, Any]:
+    def _read_owner_state(self, owner_path: Path) -> tuple[bool, Any]:
         """Read the owner marker; ``(False, None)`` when it exists but is unusable."""
         try:
-            raw = owner_path.read_text(encoding="utf-8")
+            raw = _read_all_bytes(owner_path, anchors=self._storage_anchors()).decode("utf-8")
         except FileNotFoundError:
             return True, None
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return False, None
         try:
             return True, json.loads(raw)
@@ -688,6 +871,7 @@ class TurnChangeStore:
                         "token": self._owner_token,
                         "created_at": time.time(),
                     },
+                    anchors=self._storage_anchors(),
                 )
             except OSError as exc:
                 logger.warning(
@@ -706,11 +890,8 @@ class TurnChangeStore:
 
     def _owner_is_ours(self) -> bool:
         """True only while owner.json still records this instance's identity."""
-        try:
-            owner = json.loads((self.session_dir / OWNER_NAME).read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return False
-        return self._owner_matches(owner)
+        readable, owner = self._read_owner_state(self.session_dir / OWNER_NAME)
+        return readable and owner is not None and self._owner_matches(owner)
 
     def _turn_dirs(self) -> list[tuple[int, Path]]:
         found: list[tuple[int, Path]] = []
@@ -749,15 +930,38 @@ class TurnChangeStore:
         return total
 
     def _remove_turn(self, turn_dir: Path) -> bool:
-        """Remove one stale turn area; True when the directory is gone."""
+        """Remove one stale turn area through verified handles; True when gone (G1)."""
+        if not _HANDLE_IO_OK:
+            try:
+                shutil.rmtree(turn_dir)
+                return True
+            except FileNotFoundError:
+                return True
+            except OSError as exc:
+                logger.warning(
+                    "turn-change store: cannot remove stale turn area %s (%s)", turn_dir, exc
+                )
+                return False
         try:
-            shutil.rmtree(turn_dir)
-            return True
-        except FileNotFoundError:
-            return True
+            parent_fd, name = _walk_open_parent(turn_dir, self._storage_anchors())
         except OSError as exc:
-            logger.warning("turn-change store: cannot remove stale turn area %s (%s)", turn_dir, exc)
+            logger.warning(
+                "turn-change store: cannot reach stale turn area %s (%s)", turn_dir, exc
+            )
             return False
+        try:
+            try:
+                _remove_tree_at(parent_fd, name)
+            except FileNotFoundError:
+                return True
+            except OSError as exc:
+                logger.warning(
+                    "turn-change store: cannot remove stale turn area %s (%s)", turn_dir, exc
+                )
+                return False
+        finally:
+            os.close(parent_fd)
+        return True
 
     def _evict_until(
         self, condition: Callable[[], bool], *, stop: Callable[[], bool] | None = None
@@ -802,17 +1006,19 @@ class TurnChangeStore:
             stop=stop,
         )
 
-    @staticmethod
-    def _read_manifest_payload(turn_dir: Path) -> dict[str, Any] | None:
+    def _read_manifest_payload(self, turn_dir: Path) -> dict[str, Any] | None:
         try:
-            payload = json.loads((turn_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
+            payload = json.loads(
+                _read_all_bytes(
+                    turn_dir / MANIFEST_NAME, anchors=self._storage_anchors()
+                ).decode("utf-8")
+            )
+        except (OSError, ValueError, TypeError, UnicodeDecodeError) as exc:
             logger.warning("turn-change store: unreadable turn manifest %s (%s)", turn_dir, exc)
             return None
         return payload if isinstance(payload, dict) else None
 
-    @staticmethod
-    def _load_side(turn_dir: Path, name: Any, state: Any) -> tuple[bytes | None, str]:
+    def _load_side(self, turn_dir: Path, name: Any, state: Any) -> tuple[bytes | None, str]:
         if state == SIDE_ABSENT:
             return None, SIDE_ABSENT
         if state != SIDE_CAPTURED:
@@ -820,7 +1026,12 @@ class TurnChangeStore:
         if not isinstance(name, str) or not name:
             return None, SIDE_UNCAPTURED
         try:
-            return (turn_dir / Path(name).name).read_bytes(), SIDE_CAPTURED
+            return (
+                _read_all_bytes(
+                    turn_dir / Path(name).name, anchors=self._storage_anchors()
+                ),
+                SIDE_CAPTURED,
+            )
         except OSError as exc:
             logger.warning("turn-change store: unreadable snapshot %s (%s)", name, exc)
             return None, SIDE_UNCAPTURED
@@ -833,11 +1044,13 @@ class TurnChangeStore:
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> None:
-        """尽力落盘；写入门控在会话锁内完成（review F1）."""
+        """尽力落盘；写入门控与锁等待按剩余预算完成（review F1/G3）."""
         # 先核验目录链与持有人再触碰锁目录：目录被替换时连锁都不落（F2/F1）
         if not self._ensure_session_dir():
             return
-        with _session_guard(self._session_lock_path()) as locked:
+        wait = None if deadline is None else max(0.0, deadline - self._clock())
+        stop = self._stop_predicate(deadline, cancelled)
+        with _session_guard(self._session_lock_path(), wait_seconds=wait, stop=stop) as locked:
             if not locked:
                 logger.warning(
                     "turn-change store: session lock unavailable; skipping persist of turn %s",
@@ -845,6 +1058,100 @@ class TurnChangeStore:
                 )
                 return
             self._persist_locked(manifest, entries, deadline=deadline, cancelled=cancelled)
+
+    async def _persist_async(
+        self,
+        manifest: TurnChangesManifest,
+        entries: list[_ResolvedEntry],
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        """Cooperative persist: bounded lock wait, then yielding writes (review G3)."""
+        if not self._ensure_session_dir():
+            return
+        wait = None if deadline is None else max(0.0, deadline - self._clock())
+        stop = self._stop_predicate(deadline, cancelled)
+        with _session_guard(self._session_lock_path(), wait_seconds=wait, stop=stop) as locked:
+            if not locked:
+                logger.warning(
+                    "turn-change store: session lock unavailable; skipping persist of turn %s",
+                    manifest.turn_seq,
+                )
+                return
+            await self._persist_locked_async(
+                manifest, entries, deadline=deadline, cancelled=cancelled
+            )
+
+    def _persist_iter(
+        self,
+        manifest: TurnChangesManifest,
+        entries: list[_ResolvedEntry],
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        forced: Callable[[], bool] | None = None,
+    ) -> Iterator[None]:
+        """可放弃落盘的步骤序列：每次快照写入后 yield 一次（review G3）.
+
+        驱动方可以同步跑完（``seal``），也可以在让出点交还事件循环
+        （``seal_async``），让排期的真实取消得到投递。每次写入前都重新看一次
+        取消/预算，停止后不再启动新的可放弃写入；清单仍会写完。
+        """
+        turn_dir = self.session_dir / f"turn-{manifest.turn_seq}"
+        if not self._ensure_session_dir():
+            return
+        self._mkdir_chain(turn_dir)
+        stop = self._stop_predicate(deadline, cancelled)
+
+        def stopped() -> bool:
+            if forced is not None and forced():
+                return True
+            return stop is not None and stop()
+
+        by_identity = {id(item.change): item for item in entries}
+        payload_entries: list[dict[str, Any]] = []
+        for index, change in enumerate([*manifest.files, *manifest.unknown]):
+            item = by_identity.get(id(change))
+            sides: dict[str, str | None] = {"before": None, "after": None}
+            if item is not None and item.before_bytes is not None and not stopped():
+                sides["before"] = f"before.{index}.bin"
+                _write_bytes(turn_dir / sides["before"], item.before_bytes)
+                yield
+            if item is not None and item.after_bytes is not None and not stopped():
+                sides["after"] = f"after.{index}.bin"
+                _write_bytes(turn_dir / sides["after"], item.after_bytes)
+                yield
+            payload_entries.append(
+                _change_payload(
+                    change,
+                    sides,
+                    before_state=(
+                        SIDE_UNCAPTURED
+                        if change.before_state == SIDE_CAPTURED and sides["before"] is None
+                        else change.before_state
+                    ),
+                    after_state=(
+                        SIDE_UNCAPTURED
+                        if change.after_state == SIDE_CAPTURED and sides["after"] is None
+                        else change.after_state
+                    ),
+                )
+            )
+        _write_json_atomic(
+            turn_dir / MANIFEST_NAME,
+            {
+                "session_id": manifest.session_id,
+                "request_id": manifest.request_id,
+                "turn_seq": manifest.turn_seq,
+                "created_at": manifest.created_at,
+                "files": payload_entries[: len(manifest.files)],
+                "unknown": payload_entries[len(manifest.files):],
+                "totals": dict(manifest.totals),
+            },
+        )
+        if not stopped():
+            self._enforce_retention(stop=stop)
 
     def _persist_locked(
         self,
@@ -857,51 +1164,11 @@ class TurnChangeStore:
         """尽力落盘；任何失败只降级（调用方仍拿到内存 manifest）."""
         turn_dir = self.session_dir / f"turn-{manifest.turn_seq}"
         try:
-            if not self._ensure_session_dir():
-                return
-            turn_dir.mkdir(parents=True, exist_ok=True)
-            by_identity = {id(item.change): item for item in entries}
-            payload_entries: list[dict[str, Any]] = []
-            stop = self._stop_predicate(deadline, cancelled)
-            for index, change in enumerate([*manifest.files, *manifest.unknown]):
-                item = by_identity.get(id(change))
-                sides: dict[str, str | None] = {"before": None, "after": None}
-                if stop is None or not stop():
-                    if item is not None and item.before_bytes is not None:
-                        sides["before"] = f"before.{index}.bin"
-                        _write_bytes(turn_dir / sides["before"], item.before_bytes)
-                    if item is not None and item.after_bytes is not None:
-                        sides["after"] = f"after.{index}.bin"
-                        _write_bytes(turn_dir / sides["after"], item.after_bytes)
-                payload_entries.append(
-                    _change_payload(
-                        change,
-                        sides,
-                        before_state=(
-                            SIDE_UNCAPTURED
-                            if change.before_state == SIDE_CAPTURED and sides["before"] is None
-                            else change.before_state
-                        ),
-                        after_state=(
-                            SIDE_UNCAPTURED
-                            if change.after_state == SIDE_CAPTURED and sides["after"] is None
-                            else change.after_state
-                        ),
-                    )
-                )
-            _write_json_atomic(
-                turn_dir / MANIFEST_NAME,
-                {
-                    "session_id": manifest.session_id,
-                    "request_id": manifest.request_id,
-                    "turn_seq": manifest.turn_seq,
-                    "created_at": manifest.created_at,
-                    "files": payload_entries[: len(manifest.files)],
-                    "unknown": payload_entries[len(manifest.files):],
-                    "totals": dict(manifest.totals),
-                },
-            )
-            self._enforce_retention(stop=stop)
+            with _io_anchor_scope(self._storage_anchors()):
+                for _ in self._persist_iter(
+                    manifest, entries, deadline=deadline, cancelled=cancelled
+                ):
+                    pass
         except Exception as exc:  # noqa: BLE001 - ledger never breaks the turn
             logger.warning(
                 "turn-change store: cannot persist turn %s (%s: %s)",
@@ -910,6 +1177,51 @@ class TurnChangeStore:
                 exc,
             )
             self._remove_turn(turn_dir)
+
+    async def _persist_locked_async(
+        self,
+        manifest: TurnChangesManifest,
+        entries: list[_ResolvedEntry],
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        """合作式落盘：每次写入之间让出事件循环，取消在让出点被处理（review G3）."""
+        turn_dir = self.session_dir / f"turn-{manifest.turn_seq}"
+        flag = {"stop": False}
+        with _io_anchor_scope(self._storage_anchors()):
+            steps = self._persist_iter(
+                manifest,
+                entries,
+                deadline=deadline,
+                cancelled=cancelled,
+                forced=lambda: flag["stop"],
+            )
+            try:
+                for _ in steps:
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                # 剩余可放弃写入已被拦下；同步收口（清单照写）后再传播取消（G2/G3）
+                flag["stop"] = True
+                try:
+                    for _ in steps:
+                        pass
+                except Exception as exc:  # noqa: BLE001 - ledger never breaks the turn
+                    logger.warning(
+                        "turn-change store: cannot finish persist of turn %s (%s: %s)",
+                        manifest.turn_seq,
+                        type(exc).__name__,
+                        exc,
+                    )
+                raise
+            except Exception as exc:  # noqa: BLE001 - ledger never breaks the turn
+                logger.warning(
+                    "turn-change store: cannot persist turn %s (%s: %s)",
+                    manifest.turn_seq,
+                    type(exc).__name__,
+                    exc,
+                )
+                self._remove_turn(turn_dir)
 
     def _stop_predicate(
         self, deadline: float | None, cancelled: Callable[[], bool] | None
@@ -1056,7 +1368,9 @@ class TurnChangeStore:
             # 超限的 after 字节绝不落盘
             return SIDE_UNCAPTURED, None, reason
         try:
-            data = _read_bytes_bounded(path, self.limits.max_file_bytes)
+            # 读取绑定到已验证的目标目录身份（经句柄复核；review G1）
+            with _io_anchor_scope({path.parent: entry.anchor} if entry.anchor else None):
+                data = _read_bytes_bounded(path, self.limits.max_file_bytes)
         except OSError as exc:
             self._turn_bytes -= size
             logger.warning("turn-change store: cannot read %s (%s)", entry.path, exc)
@@ -1308,39 +1622,269 @@ def _tracked_state(before_fp: str | None, after_fp: str | None) -> str | None:
     return STATE_UNKNOWN  # pragma: no cover - 穷尽分支
 
 
-def _read_bytes_bounded(path: Path, limit: int) -> bytes:
-    """Read at most ``limit + 1`` bytes without following a final symlink.
+def _dir_open_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
 
-    Bounded so a growing file cannot be pulled in, and bound to the opened
-    handle so a path that is swapped for a symlink after the caller's checks
-    cannot redirect the read (review F2/R6).
+
+def _check_dir_anchor(
+    prefix: Path, fd: int, anchors: dict[Path, tuple[int, int]] | None
+) -> None:
+    """Refuse a directory whose already-opened handle no longer matches its anchor."""
+    if not anchors:
+        return
+    expected = anchors.get(prefix)
+    if expected is None:
+        return
+    st = os.fstat(fd)
+    if (st.st_dev, st.st_ino) != expected:
+        raise OSError(f"directory identity changed for {prefix}")
+
+
+def _walk_open_parent(
+    path: Path, anchors: dict[Path, tuple[int, int]] | None = None
+) -> tuple[int, str]:
+    """Open ``path.parent`` component-wise, refusing symlinked components.
+
+    Every component is opened with ``O_NOFOLLOW`` relative to the previous one
+    and any component with a recorded anchor must still match it, so the fd the
+    caller then uses for real I/O cannot be redirected by a later swap
+    (review F2/G1). Returns ``(parent_fd, name)``; the caller closes the fd.
     """
+    if os.name == "nt":  # Windows 无可比的 O_NOFOLLOW/O_DIRECTORY：退化为普通打开
+        return os.open(str(path.parent), os.O_RDONLY), path.name
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    parts = path.parent.parts
+    fd = os.open(parts[0], _dir_open_flags())
+    prefix = Path(parts[0])
+    try:
+        _check_dir_anchor(prefix, fd, anchors)
+        for part in parts[1:]:
+            next_fd = os.open(part, _dir_open_flags() | no_follow, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            prefix = prefix / part
+            _check_dir_anchor(prefix, fd, anchors)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, path.name
+
+
+def _read_bounded_fd(fd: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = limit + 1
+    while remaining > 0:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _read_bounded_path(path: Path, limit: int) -> bytes:
+    """Path-based bounded read used where directory handles are unavailable."""
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        chunks: list[bytes] = []
-        remaining = limit + 1
-        while remaining > 0:
-            chunk = os.read(fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
+        return _read_bounded_fd(fd, limit)
     finally:
         os.close(fd)
 
 
-def _write_bytes(path: Path, data: bytes) -> None:
-    path.write_bytes(data)
+def _read_bytes_bounded(
+    path: Path, limit: int, *, anchors: dict[Path, tuple[int, int]] | None = None
+) -> bytes:
+    """Read at most ``limit + 1`` bytes bound to verified directory handles.
+
+    ``path.parent`` is opened component-wise (no symlinked component, anchors
+    re-checked on the opened objects), the file itself is opened relative to
+    that handle with ``O_NOFOLLOW``, and the bytes come from the same fd, so a
+    swap after earlier checks cannot redirect the read (review F2/G1/R6).
+    """
+    if not _HANDLE_IO_OK:
+        return _read_bounded_path(path, limit)
+    parent_fd, name = _walk_open_parent(path, _effective_anchors(anchors))
+    try:
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        try:
+            return _read_bounded_fd(fd, limit)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    temp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    temp.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    os.replace(temp, path)
+def _read_all_bytes(
+    path: Path, *, anchors: dict[Path, tuple[int, int]] | None = None
+) -> bytes:
+    """Read a snapshot file fully through verified directory handles (G1)."""
+    if not _HANDLE_IO_OK:
+        return path.read_bytes()
+    parent_fd, name = _walk_open_parent(path, _effective_anchors(anchors))
+    try:
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        try:
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _read_text_at(dir_fd: int, name: str) -> str:
+    """Read one file relative to an already-verified directory handle (G1)."""
+    fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd)
+    try:
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def _write_all_fd(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
+def _write_bytes(
+    path: Path, data: bytes, *, anchors: dict[Path, tuple[int, int]] | None = None
+) -> None:
+    """Write a snapshot file through a verified parent handle (G1)."""
+    if not _HANDLE_IO_OK:
+        path.write_bytes(data)
+        return
+    parent_fd, name = _walk_open_parent(path, _effective_anchors(anchors))
+    try:
+        fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            _write_all_fd(fd, data)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _write_json_atomic(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    anchors: dict[Path, tuple[int, int]] | None = None,
+) -> None:
+    """Atomic JSON write (temp + ``os.replace``) through one parent handle (G1)."""
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if not _HANDLE_IO_OK:
+        temp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temp.write_bytes(body)
+        os.replace(temp, path)
+        return
+    parent_fd, name = _walk_open_parent(path, _effective_anchors(anchors))
+    temp_name = f".{name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        try:
+            fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                _write_all_fd(fd, body)
+            finally:
+                os.close(fd)
+            os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(parent_fd)
+
+
+def _remove_children(fd: int) -> None:
+    """Delete everything inside an already-opened directory (files + subdirs)."""
+    for entry in os.listdir(fd):
+        st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISDIR(st.st_mode):
+            child_fd = os.open(entry, _dir_open_flags() | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            try:
+                _remove_children(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(entry, dir_fd=fd)
+        else:
+            os.unlink(entry, dir_fd=fd)
+
+
+def _remove_tree_at(parent_fd: int, name: str) -> None:
+    """Remove one directory tree relative to a verified parent handle (G1)."""
+    fd = os.open(name, _dir_open_flags() | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+    try:
+        _remove_children(fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _open_deepest_ancestor(path: Path) -> tuple[int, list[str]]:
+    """Open the deepest existing ancestor of ``path`` component-wise (G1).
+
+    Returns ``(fd, missing_names)`` where ``missing_names`` are the components
+    that still have to be created below the opened directory.  Symlinked
+    components raise instead of being followed.
+    """
+    if os.name == "nt":  # Windows 退化为逐级打开
+        missing: list[str] = []
+        fd = os.open(path.anchor or "/", os.O_RDONLY)
+        for part in path.parts[1:]:
+            if missing:
+                missing.append(part)
+                continue
+            try:
+                next_fd = os.open(part, os.O_RDONLY, dir_fd=fd)
+            except FileNotFoundError:
+                missing.append(part)
+                continue
+            os.close(fd)
+            fd = next_fd
+        return fd, missing
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    parts = path.parts
+    fd = os.open(parts[0], _dir_open_flags())
+    missing = []
+    try:
+        for part in parts[1:]:
+            if missing:
+                missing.append(part)
+                continue
+            try:
+                next_fd = os.open(part, _dir_open_flags() | no_follow, dir_fd=fd)
+            except FileNotFoundError:
+                missing.append(part)
+                continue
+            os.close(fd)
+            fd = next_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, missing
 
 
 def _payload_list(value: Any) -> list[Any]:
@@ -1401,21 +1945,110 @@ def _safe_dir_anchor(path: Path) -> tuple[int, int] | None:
 
 
 _LOCK_DIR_NAME = ".locks"
+# 目录句柄式 I/O（O_NOFOLLOW / dir_fd / flock）只在 POSIX 可用；
+# Windows 退化为带既有弱点的路径式实现，而不是直接不可用（G1）。
+_HANDLE_IO_OK = os.name != "nt"
 _GUARD_LOCAL = threading.RLock()
 _GUARD_DEPTH = threading.local()
+_IO_ANCHORS: ContextVar[dict[Path, tuple[int, int]] | None] = ContextVar(
+    "turn_change_io_anchors", default=None
+)
 
 
-def _lock_file_handle(lock_path: Path, timeout: float = 2.0) -> Any | None:
+@contextmanager
+def _io_anchor_scope(
+    anchors: dict[Path, tuple[int, int]] | None,
+) -> Iterator[None]:
+    """Bind the verified directory identities for the current I/O scope (G1).
+
+    Passed through a context variable instead of extra call arguments so that
+    wrappers around the low-level I/O helpers (tests, probes, instrumentation)
+    keep working while the real open still verifies every opened directory.
+    """
+    token = _IO_ANCHORS.set(anchors or None)
+    try:
+        yield
+    finally:
+        _IO_ANCHORS.reset(token)
+
+
+def _effective_anchors(
+    anchors: dict[Path, tuple[int, int]] | None,
+) -> dict[Path, tuple[int, int]] | None:
+    return anchors if anchors is not None else _IO_ANCHORS.get()
+
+
+def _ensure_dir_chain(path: Path) -> bool:
+    """Create ``path`` (and missing components) relative to verified handles (G1)."""
+    if not _HANDLE_IO_OK:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("turn-change store: cannot create %s (%s)", path, exc)
+            return False
+        return True
+    try:
+        fd, missing = _open_deepest_ancestor(path)
+    except OSError as exc:
+        logger.warning("turn-change store: cannot reach %s (%s)", path, exc)
+        return False
+    try:
+        for name in missing:
+            try:
+                os.mkdir(name, dir_fd=fd)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                logger.warning("turn-change store: cannot create %s (%s)", path, exc)
+                return False
+            next_fd = os.open(
+                name, _dir_open_flags() | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd
+            )
+            os.close(fd)
+            fd = next_fd
+    except OSError as exc:
+        logger.warning("turn-change store: cannot create %s (%s)", path, exc)
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return True
+
+
+def _lock_file_handle(
+    lock_path: Path, timeout: float = 2.0, stop: Callable[[], bool] | None = None
+) -> Any | None:
     """Advisory exclusive lock on ``lock_path``; ``None`` when unavailable.
 
     ``flock`` on POSIX keeps separate open file descriptions apart, so two
     threads of one process exclude each other as well; Windows uses
-    ``msvcrt.locking``. Bounded retry, never blocks forever.
+    ``msvcrt.locking``. The lock file is opened through verified directory
+    handles (G1); the retry loop is bounded by ``timeout`` and stops as soon as
+    ``stop()`` reports cancellation/expiry (G3).
     """
-    try:
-        handle = open(lock_path, "a+b")
-    except OSError:
-        return None
+    if _HANDLE_IO_OK:
+        try:
+            parent_fd, name = _walk_open_parent(lock_path)
+        except OSError:
+            return None
+        try:
+            fd = os.open(name, os.O_RDWR | os.O_CREAT, dir_fd=parent_fd)
+        except OSError:
+            return None
+        finally:
+            os.close(parent_fd)
+        try:
+            handle = os.fdopen(fd, "r+b")
+        except OSError:
+            os.close(fd)
+            return None
+    else:
+        try:
+            handle = open(lock_path, "a+b")
+        except OSError:
+            return None
     deadline = time.monotonic() + timeout
     if os.name == "nt":
         import msvcrt
@@ -1430,6 +2063,9 @@ def _lock_file_handle(lock_path: Path, timeout: float = 2.0) -> Any | None:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                 return handle
             except OSError:
+                if stop is not None and stop():
+                    handle.close()
+                    return None
                 if time.monotonic() >= deadline:
                     handle.close()
                     return None
@@ -1441,6 +2077,10 @@ def _lock_file_handle(lock_path: Path, timeout: float = 2.0) -> Any | None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return handle
         except OSError:
+            # 先试一次非阻塞获取；重试才受取消/预算约束（review G3）
+            if stop is not None and stop():
+                handle.close()
+                return None
             if time.monotonic() >= deadline:
                 handle.close()
                 return None
@@ -1465,11 +2105,17 @@ def _unlock_file_handle(handle: Any) -> None:
 
 
 @contextmanager
-def _session_guard(lock_path: Path) -> Iterator[bool]:
-    """Cross-instance exclusion for one session area (review F1).
+def _session_guard(
+    lock_path: Path,
+    *,
+    wait_seconds: float | None = None,
+    stop: Callable[[], bool] | None = None,
+) -> Iterator[bool]:
+    """Cross-instance exclusion for one session area (review F1/G3).
 
     同进程线程先在模块级 RLock 上串行，跨进程再取文件锁；同一线程的嵌套获取
-    直接复用外层锁。取不到锁时产出 ``False``，调用方保守降级（拒绝写入/删除）。
+    直接复用外层锁。等待受 ``wait_seconds``（通常是回合剩余预算）和 ``stop()``
+    约束；取不到锁时产出 ``False``，调用方保守降级（拒绝写入/删除）。
     """
     depth = getattr(_GUARD_DEPTH, "depth", 0)
     if depth:
@@ -1479,7 +2125,9 @@ def _session_guard(lock_path: Path) -> Iterator[bool]:
         finally:
             _GUARD_DEPTH.depth -= 1
         return
-    if not _GUARD_LOCAL.acquire(timeout=5):
+    total = 2.0 if wait_seconds is None else max(0.0, float(wait_seconds))
+    deadline = time.monotonic() + total
+    if not _GUARD_LOCAL.acquire(timeout=max(0.0, deadline - time.monotonic())):
         logger.warning("turn-change store: busy session area %s; refusing storage I/O", lock_path)
         yield False
         return
@@ -1487,8 +2135,12 @@ def _session_guard(lock_path: Path) -> Iterator[bool]:
     _GUARD_DEPTH.depth = 1
     try:
         try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            handle = _lock_file_handle(lock_path)
+            if _ensure_dir_chain(lock_path.parent):
+                handle = _lock_file_handle(
+                    lock_path,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    stop=stop,
+                )
         except OSError as exc:
             logger.warning("turn-change store: cannot lock %s (%s)", lock_path, exc)
         if handle is None:
@@ -1503,12 +2155,34 @@ def _session_guard(lock_path: Path) -> Iterator[bool]:
         _GUARD_LOCAL.release()
 
 
-def _remove_orphan_session(child: Path, probe: Callable[[int], bool]) -> bool:
-    """Remove one orphaned session area; the caller holds that session's lock (F1)."""
+def _cleanup_orphans_path_based(base: Path, probe: Callable[[int], bool]) -> list[str]:
+    """Windows fallback for :meth:`TurnChangeStore.cleanup_orphans` (no dir_fd)."""
+    removed: list[str] = []
     try:
-        owner = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
+        children = sorted(path for path in base.iterdir() if path.is_dir())
+    except OSError:
+        return removed
+    for child in children:
+        if child.name == _LOCK_DIR_NAME:
+            continue
+        if child.is_symlink():
+            logger.warning("turn-change store: skip %s (symbolic link)", child)
+            continue
+        with _session_guard(base / _LOCK_DIR_NAME / f"{child.name}.lock") as locked:
+            if not locked:
+                logger.warning("turn-change store: skip %s (session lock unavailable)", child)
+                continue
+            if _remove_orphan_session_path(child, probe):
+                removed.append(str(child))
+    return removed
+
+
+def _remove_orphan_session_path(child: Path, probe: Callable[[int], bool]) -> bool:
+    """Windows fallback for :func:`_remove_orphan_session` (path-based)."""
+    try:
+        raw = (child / OWNER_NAME).read_text(encoding="utf-8")
+        owner = json.loads(raw)
     except (OSError, ValueError, TypeError):
-        # 可能是其他实例刚建目录、尚未写入 owner 的窗口期：宁可不清理
         logger.warning("turn-change store: skip %s (no readable owner.json)", child)
         return False
     pid = owner.get("pid") if isinstance(owner, dict) else None
@@ -1522,12 +2196,11 @@ def _remove_orphan_session(child: Path, probe: Callable[[int], bool]) -> bool:
         return False
     if alive:
         return False
-    # 删除前复核同一 owner 身份：读取后、删除前所有权易主则跳过（review R7）
     try:
-        current = json.loads((child / OWNER_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+        current = (child / OWNER_NAME).read_text(encoding="utf-8")
+    except OSError:
         current = None
-    if current != owner:
+    if current != raw:
         logger.warning("turn-change store: skip %s (owner changed before removal)", child)
         return False
     try:
@@ -1536,6 +2209,63 @@ def _remove_orphan_session(child: Path, probe: Callable[[int], bool]) -> bool:
         logger.warning("turn-change store: cannot remove orphan %s (%s)", child, exc)
         return False
     return True
+
+
+def _remove_orphan_session(
+    root_fd: int, name: str, display: Path, probe: Callable[[int], bool]
+) -> bool:
+    """Remove one orphaned session area relative to the root handle (F1/G1).
+
+    读取、复核与删除都绑定在同一个已打开目录句柄上：路径被替换不会让清理
+    走到别处，删除前也仍复核同一 owner 身份（review R7/G1）。
+    """
+    try:
+        child_fd = os.open(
+            name, _dir_open_flags() | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd
+        )
+    except OSError as exc:
+        logger.warning("turn-change store: skip %s (unreadable area: %s)", display, exc)
+        return False
+    try:
+        try:
+            raw = _read_text_at(child_fd, OWNER_NAME)
+        except (OSError, UnicodeDecodeError):
+            # 可能是其他实例刚建目录、尚未写入 owner 的窗口期：宁可不清理
+            logger.warning("turn-change store: skip %s (no readable owner.json)", display)
+            return False
+        try:
+            owner = json.loads(raw)
+        except ValueError:
+            logger.warning("turn-change store: skip %s (owner.json unreadable)", display)
+            return False
+        pid = owner.get("pid") if isinstance(owner, dict) else None
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            logger.warning("turn-change store: skip %s (owner.json has no usable pid)", display)
+            return False
+        try:
+            alive = bool(probe(pid))
+        except Exception as exc:  # noqa: BLE001 - 探活失败即视为"无法确认"
+            logger.warning("turn-change store: skip %s (liveness probe failed: %s)", display, exc)
+            return False
+        if alive:
+            return False
+        # 删除前复核同一 owner 身份：读取后、删除前所有权易主则跳过（review R7）
+        try:
+            current = _read_text_at(child_fd, OWNER_NAME)
+        except (OSError, UnicodeDecodeError):
+            current = None
+        if current != raw:
+            logger.warning("turn-change store: skip %s (owner changed before removal)", display)
+            return False
+        try:
+            _remove_children(child_fd)
+            os.rmdir(name, dir_fd=root_fd)
+        except OSError as exc:
+            logger.warning("turn-change store: cannot remove orphan %s (%s)", display, exc)
+            return False
+        return True
+    finally:
+        os.close(child_fd)
 
 
 def _open_dir_anchor(path: Path) -> tuple[int, int]:

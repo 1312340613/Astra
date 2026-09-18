@@ -4498,10 +4498,11 @@ class ReActAgent(AgentBase):
     async def _seal_turn_changes_async(
         self, store, *, cancelled: "Callable[[], bool] | None" = None
     ) -> None:
-        """Cooperative seal for the streaming done path (review F4).
+        """Cooperative seal for the streaming done path (review F4/G2).
 
         收尾在条目之间把控制权交还事件循环：排期的外部取消能在其中得到投递，
-        剩余可放弃工作（读取/写入/淘汰）随即停止。
+        剩余可放弃工作（读取/写入/淘汰）随即停止；收尾完成后的取消语义继续
+        传播（清单先暂存），由调用方走取消终态路径。
         """
         if store is None:
             return
@@ -4509,6 +4510,12 @@ class ReActAgent(AgentBase):
             cancelled = self._turn_cancel_probe()
         try:
             manifest = await store.seal_async(cancelled=cancelled)
+        except asyncio.CancelledError:
+            # 收尾期间的取消：清单已产出 → 暂存 payload 后继续传播（review G2）
+            stopped = store.take_stopped_manifest()
+            if stopped is not None:
+                self._turn_changes_ready = self._turn_changes_event(stopped)
+            raise
         except Exception:
             logger.exception("turn-change seal failed")
             return

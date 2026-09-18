@@ -627,6 +627,76 @@ def test_pending_task_cancel_during_seal_stops_new_source_reads(tmp_path, monkey
     assert all(change.after_state == tcs.SIDE_UNCAPTURED for change in unread.values())
 
 
+def test_real_cancel_during_the_final_seal_reports_cancelled(tmp_path, monkeypatch):
+    """G2：收尾期间的排期取消走取消终态（台账一次 + cancelled error + done）."""
+    agent, stores = make_turn_agent(tmp_path, [
+        call("write_file", {"path": "a.txt", "content": "a\n"}, call_id="a"),
+        call("write_file", {"path": "b.txt", "content": "b\n"}, call_id="b"),
+        DONE,
+    ], monkeypatch)
+    original = tcs._read_bytes_bounded
+    state = {"cancel_requested": False}
+
+    def read_and_schedule_cancel(path, limit):
+        if not state["cancel_requested"]:
+            task = asyncio.current_task()
+
+            def request_cancel() -> None:
+                state["cancel_requested"] = True
+                task.cancel()
+
+            asyncio.get_running_loop().call_soon(request_cancel)
+        return original(path, limit)
+
+    monkeypatch.setattr(tcs, "_read_bytes_bounded", read_and_schedule_cancel)
+
+    async def scenario():
+        events = []
+        async for event in agent.reply_stream(
+            Msg(content=[ContentBlock.text("write two files")], id="m-seal-cancel")
+        ):
+            events.append(event)
+        return events
+
+    events = run(scenario())
+    types = [event["type"] for event in events]
+
+    assert state["cancel_requested"] is True
+    assert types.count("turn_changes") == 1  # publish-once
+    assert any(event.get("cancelled") for event in events if event["type"] == "error"), events
+    assert types[-1] == "done"
+    payload = next(event for event in events if event["type"] == "turn_changes")
+    assert payload["unknown_count"] >= 1  # 未读条目仍交付为未知区
+
+
+def test_cancel_during_reply_seal_propagates_to_the_caller(tmp_path, monkeypatch):
+    """G2：非流式 reply() 收尾期间的取消对调用者可见（不被吞掉）."""
+    agent, _stores = make_turn_agent(tmp_path, [
+        call("write_file", {"path": "note.txt", "content": "kept\n"}),
+        DONE,
+    ], monkeypatch)
+    original = tcs._read_bytes_bounded
+    state = {"scheduled": False}
+
+    def read_and_schedule_cancel(path, limit):
+        if not state["scheduled"]:
+            state["scheduled"] = True
+            task = asyncio.current_task()
+            asyncio.get_running_loop().call_soon(task.cancel)
+        return original(path, limit)
+
+    monkeypatch.setattr(tcs, "_read_bytes_bounded", read_and_schedule_cancel)
+
+    async def scenario():
+        try:
+            await agent.reply(Msg(content=[ContentBlock.text("write a note")], id="m-reply-cancel"))
+        except asyncio.CancelledError:
+            return "cancelled"
+        return "completed"
+
+    assert run(scenario()) == "cancelled"
+
+
 def test_non_streaming_reply_records_without_events(tmp_path, monkeypatch):
     """reply() runs the same bookkeeping with no event channel to publish on."""
     agent, stores = make_turn_agent(tmp_path, [

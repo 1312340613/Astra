@@ -1295,13 +1295,18 @@ def test_external_cancel_is_processed_during_cooperative_seal(
             task.cancel()
 
         asyncio.get_running_loop().call_later(0.01, request_cancel)
-        manifest = await subject.seal_async(cancelled=lambda: bool(task.cancelling()))
+        try:
+            await subject.seal_async(cancelled=lambda: bool(task.cancelling()))
+        except asyncio.CancelledError:
+            # 收尾完成后取消语义继续传播（review G2）
+            observed["cancel_propagated"] = True
         observed["seal_return_ms"] = (time.monotonic() - start) * 1000.0
         await asyncio.sleep(0)
-        return manifest
+        return subject.take_stopped_manifest()
 
     manifest = asyncio.run(scenario())
 
+    assert observed.get("cancel_propagated") is True
     assert manifest is not None
     # 取消在让出点投递：剩余的读取全部停止（只允许在途的最后一个条目算完）
     assert 1 <= len(reads) <= 3, f"external cancel must stop new reads; reads={reads}"
@@ -1311,6 +1316,212 @@ def test_external_cancel_is_processed_during_cooperative_seal(
     assert len(manifest.unknown) == 5 - len(reads)  # 未读条目 → 未知区
     assert all(change.reason == "cancelled" for change in manifest.unknown)
     assert all(change.after_state == store.SIDE_UNCAPTURED for change in manifest.unknown)
+
+
+def test_after_read_refuses_a_parent_swap_between_check_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G1：父目录锚与 lstat 检查通过后、实际 open 前被换成链接，也不得读到链外."""
+    workspace = tmp_path / "workspace"
+    folder = workspace / "sub"
+    outside = tmp_path / "outside"
+    folder.mkdir(parents=True)
+    outside.mkdir()
+    target = folder / "note.txt"
+    target.write_bytes(b"inside\n")
+    (outside / "note.txt").write_bytes(b"SYNTHETIC-OUTSIDE-DATA\n")
+
+    subject = make_store(workspace)
+    subject.begin_turn("parent-swap")
+    subject.note_capture(target, b"before\n")
+
+    original = store._read_bytes_bounded
+    swapped = False
+
+    def swap_then_open(path, limit):
+        nonlocal swapped
+        if not swapped:
+            folder.rename(workspace / "sub-held")
+            folder.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original(path, limit)
+
+    monkeypatch.setattr(store, "_read_bytes_bounded", swap_then_open)
+    manifest = subject.seal()
+
+    assert swapped is True
+    assert manifest is not None
+    assert manifest.files == []
+    change = manifest.unknown[0]
+    assert change.path == "sub/note.txt"
+    assert change.after_state == store.SIDE_UNCAPTURED
+    assert subject.load_sides(0, "sub/note.txt").after is None
+
+
+def test_snapshot_write_refuses_a_storage_swap_between_check_and_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G1：存储链检查通过后、首次快照写入前换掉 session 目录，不得写到链外."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "turn-1").mkdir(parents=True)
+    target = workspace / "note.txt"
+    target.write_bytes(b"after\n")
+
+    subject = store.TurnChangeStore(workspace, "review", root=tmp_path / "ledger")
+    subject.begin_turn("storage-swap")
+    subject.note_capture(target, b"before\n")
+
+    original = store._write_bytes
+    swapped = False
+
+    def swap_then_write(path, data):
+        nonlocal swapped
+        if not swapped:
+            subject.session_dir.rename(subject.root / "review-held")
+            subject.session_dir.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        original(path, data)
+
+    monkeypatch.setattr(store, "_write_bytes", swap_then_write)
+    subject.seal()
+
+    assert swapped is True
+    created = sorted(
+        str(path.relative_to(outside)) for path in outside.rglob("*") if path.is_file()
+    )
+    assert created == []
+
+
+def test_deadline_between_snapshot_sides_skips_the_second_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G3：两个快照侧之间也检查预算；过期后不再启动第二次写入."""
+    clock = FakeClock()
+    subject = make_store(
+        tmp_path, "sess-1", clock=clock, limits=store.TurnChangeLimits(compute_budget_ms=20)
+    )
+    target = tmp_path / "note.txt"
+    target.write_bytes(b"new\n")
+    subject.begin_turn("write-deadline")
+    subject.note_capture(target, b"old\n")
+
+    writes: list[str] = []
+    original = store._write_bytes
+
+    def slow_write(path, data):
+        writes.append(Path(path).name)
+        clock.advance(40)  # 40ms 的受控慢写入（推进假时钟，与既有预算测试同口径）
+        original(path, data)
+
+    monkeypatch.setattr(store, "_write_bytes", slow_write)
+    manifest = subject.seal()
+
+    assert manifest is not None
+    # 预算 20ms：40ms 的 before 写入之后，after 写入属于新启动的可放弃工作
+    assert writes == ["before.0.bin"]
+    assert subject.load_sides(0, "note.txt").after is None
+
+
+def test_external_cancel_stops_persist_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G3/G2：落盘阶段的真实取消在让出点投递，停止剩余写入并传播取消."""
+    import asyncio
+
+    subject = make_store(tmp_path, "sess-1", limits=store.TurnChangeLimits(compute_budget_ms=1000))
+    subject.begin_turn("cancel-during-write")
+    for index in range(3):
+        target = tmp_path / f"note-{index}.txt"
+        target.write_bytes(b"new\n")
+        subject.note_capture(target, b"old\n")
+
+    writes: list[str] = []
+    original = store._write_bytes
+    observed: dict[str, float] = {}
+    started = [0.0]
+
+    def slow_write(path, data):
+        if not writes:
+            task = asyncio.current_task()
+
+            def request_cancel() -> None:
+                observed["cancel_callback_ms"] = (time.monotonic() - started[0]) * 1000.0
+                task.cancel()
+
+            asyncio.get_running_loop().call_later(0.01, request_cancel)
+        writes.append(Path(path).name)
+        time.sleep(0.04)  # 受控慢 I/O
+        original(path, data)
+
+    async def scenario():
+        task = asyncio.current_task()
+        assert task is not None
+        started[0] = time.monotonic()
+        try:
+            await subject.seal_async(cancelled=lambda: bool(task.cancelling()))
+        except asyncio.CancelledError:
+            observed["cancel_propagated"] = True
+        manifest = subject.take_stopped_manifest()
+        await asyncio.sleep(0)
+        return manifest
+
+    monkeypatch.setattr(store, "_write_bytes", slow_write)
+    manifest = asyncio.run(scenario())
+
+    assert observed.get("cancel_propagated") is True
+    assert manifest is not None
+    assert len(writes) < 6, f"cancel must stop later snapshot writes; writes={writes}"
+    assert (subject.session_dir / "turn-1" / "manifest.json").exists()  # 清单仍落盘
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock probe")
+def test_lock_wait_respects_the_turn_budget(tmp_path: Path) -> None:
+    """G3：持锁等待受回合剩余预算约束，不再固定干等."""
+    import asyncio
+    import subprocess as _subprocess
+    import sys as _sys
+    import threading
+
+    subject = make_store(tmp_path, "sess-1", limits=store.TurnChangeLimits(compute_budget_ms=20))
+    target = tmp_path / "note.txt"
+    target.write_bytes(b"new\n")
+    subject.begin_turn("lock-budget")
+    subject.note_capture(target, b"old\n")
+    script = (
+        "import fcntl, sys\n"
+        "f = open(sys.argv[1], 'a+b')\n"
+        "fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+        "print('locked', flush=True)\n"
+        "sys.stdin.readline()\n"
+    )
+    proc = _subprocess.Popen(
+        [_sys.executable, "-c", script, str(subject._session_lock_path())],
+        stdin=_subprocess.PIPE,
+        stdout=_subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None and proc.stdout.readline().strip() == "locked"
+
+    def release() -> None:
+        assert proc.stdin is not None
+        proc.stdin.write("release\n")
+        proc.stdin.flush()
+
+    timer = threading.Timer(0.25, release)
+    try:
+        timer.start()
+        start = time.monotonic()
+        asyncio.run(subject.seal_async())
+        elapsed = time.monotonic() - start
+    finally:
+        timer.join(1)
+        if proc.poll() is None:
+            proc.terminate()
+        proc.wait(timeout=2)
+
+    assert elapsed < 0.15, f"lock wait must follow the turn budget; elapsed={elapsed:.3f}s"
 
 
 def test_bounded_read_caps_the_read_size(tmp_path: Path) -> None:
@@ -1693,12 +1904,12 @@ def test_locked_turn_eviction_stops_instead_of_looping(tmp_path: Path) -> None:
         root = Path(sys.argv[1])
         calls = 0
 
-        def failing_rmtree(*args, **kwargs):
+        def failing_remove(parent_fd, name):
             global calls
             calls += 1
             raise PermissionError("simulated locked snapshot directory")
 
-        tcs.shutil.rmtree = failing_rmtree
+        tcs._remove_tree_at = failing_remove
 
         store = tcs.TurnChangeStore(
             root, "review", root=root / "ledger",
