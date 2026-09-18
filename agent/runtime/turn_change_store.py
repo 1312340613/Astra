@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import turn_diff
+from .process_env import pid_alive
 from .turn_diff import DiffStats
 
 # 五态
@@ -174,7 +176,14 @@ class TurnChangeStore:
         differ: Callable[..., DiffStats] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.workspace = Path(workspace).expanduser().resolve()
+        raw_workspace = Path(workspace).expanduser()
+        if not raw_workspace.is_absolute():
+            raw_workspace = Path.cwd() / raw_workspace
+        # Refuse a swapped final symlink; identity is re-checked before every
+        # write so a later swap degrades instead of escaping the workspace (R1).
+        self._workspace_raw = raw_workspace
+        self._anchor_identity = _open_dir_anchor(raw_workspace)
+        self.workspace = raw_workspace.resolve()
         self.session_id = str(session_id)
         self.limits = limits if limits is not None else TurnChangeLimits()
         self.root = (
@@ -341,7 +350,8 @@ class TurnChangeStore:
             self._active = None
             self._request_id = ""
             self._turn_bytes = 0
-            shutil.rmtree(self.session_dir, ignore_errors=True)
+            if self._anchor_ok():
+                shutil.rmtree(self.session_dir, ignore_errors=True)
 
     @staticmethod
     def cleanup_orphans(
@@ -385,8 +395,22 @@ class TurnChangeStore:
 
     # -- 内部：登记与收尾 --
 
+    def _anchor_ok(self) -> bool:
+        """True while the workspace path still resolves to the anchored directory."""
+        try:
+            st = os.stat(self._workspace_raw)
+        except OSError:
+            return False
+        return (st.st_dev, st.st_ino) == self._anchor_identity
+
     def _ensure_session_dir(self) -> bool:
         """Create the session area and its owner marker before any content."""
+        if not self._anchor_ok():
+            logger.warning(
+                "turn-change store: workspace identity changed for %s; refusing to write",
+                self._workspace_raw,
+            )
+            return False
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
             owner = self.session_dir / OWNER_NAME
@@ -438,27 +462,41 @@ class TurnChangeStore:
                     continue
         return total
 
-    def _remove_turn(self, turn_dir: Path) -> None:
+    def _remove_turn(self, turn_dir: Path) -> bool:
+        """Remove one stale turn area; True when the directory is gone."""
         try:
             shutil.rmtree(turn_dir)
+            return True
         except FileNotFoundError:
-            return
+            return True
         except OSError as exc:
             logger.warning("turn-change store: cannot remove stale turn area %s (%s)", turn_dir, exc)
+            return False
+
+    def _evict_until(self, condition: Callable[[], bool]) -> bool:
+        """Bounded FIFO eviction; stops as soon as a removal makes no progress.
+
+        Locked or permission-protected directories degrade the caller (quota
+        handling) instead of retrying the same failing entry forever.
+        """
+        while not condition():
+            turns = self._turn_dirs()
+            if not turns:
+                break
+            if not self._remove_turn(turns[0][1]):
+                break
+            if len(self._turn_dirs()) >= len(turns):
+                break  # no measurable progress; stop instead of looping
+        return condition()
 
     def _enforce_retention(self) -> None:
         """FIFO: 只保留最近 max_turns_retained 个回合；会话超量先淘汰最旧回合."""
         keep = max(1, int(self.limits.max_turns_retained))
-        while True:
-            turns = self._turn_dirs()
-            if len(turns) <= keep:
-                break
-            self._remove_turn(turns[0][1])
-        while True:
-            turns = self._turn_dirs()
-            if len(turns) <= 1 or self._session_bytes() <= self.limits.max_session_bytes:
-                break
-            self._remove_turn(turns[0][1])
+        self._evict_until(lambda: len(self._turn_dirs()) <= keep)
+        self._evict_until(
+            lambda: len(self._turn_dirs()) <= 1
+            or self._session_bytes() <= self.limits.max_session_bytes
+        )
 
     @staticmethod
     def _read_manifest_payload(turn_dir: Path) -> dict[str, Any] | None:
@@ -487,7 +525,8 @@ class TurnChangeStore:
         """尽力落盘；任何失败只降级（调用方仍拿到内存 manifest）."""
         turn_dir = self.session_dir / f"turn-{manifest.turn_seq}"
         try:
-            self._ensure_session_dir()
+            if not self._ensure_session_dir():
+                return
             turn_dir.mkdir(parents=True, exist_ok=True)
             by_identity = {id(item.change): item for item in entries}
             payload_entries: list[dict[str, Any]] = []
@@ -584,11 +623,10 @@ class TurnChangeStore:
         limit = self.limits.max_session_bytes
         if self._session_bytes() + self._turn_bytes + extra <= limit:
             return True
-        while True:
-            turns = self._turn_dirs()
-            if not turns or self._session_bytes() + self._turn_bytes + extra <= limit:
-                break
-            self._remove_turn(turns[0][1])
+        self._evict_until(
+            lambda: not self._turn_dirs()
+            or self._session_bytes() + self._turn_bytes + extra <= limit
+        )
         return self._session_bytes() + self._turn_bytes + extra <= limit
 
     def _resolve(
@@ -606,6 +644,12 @@ class TurnChangeStore:
         return self._unknown_entry(entry, SIDE_UNCAPTURED, REASON_ERROR, after_state, after_bytes)
 
     def _read_after(self, entry: _PathEntry) -> tuple[str, bytes | None, str]:
+        if not self._anchor_ok():
+            logger.warning(
+                "turn-change store: workspace identity changed for %s; skipping read",
+                self._workspace_raw,
+            )
+            return SIDE_UNCAPTURED, None, REASON_ERROR
         path = entry.resolved
         try:
             size = path.stat().st_size
@@ -909,19 +953,41 @@ def _change_from_payload(raw: Any) -> FileChange:
     )
 
 
+def _open_dir_anchor(path: Path) -> tuple[int, int]:
+    """Directory identity of ``path`` without following a swapped final symlink.
+
+    Returns ``(st_dev, st_ino)`` of the physical directory. Raises ``OSError``
+    when the final component is a symbolic link (the shape of the audit
+    path-swap attack), so callers degrade instead of writing through the swap.
+    """
+    if os.name != "nt":
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        parent_fd = os.open(str(path.parent), dir_flags)
+        try:
+            last_fd = os.open(
+                path.name, dir_flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd
+            )
+        finally:
+            os.close(parent_fd)
+        try:
+            st = os.fstat(last_fd)
+            return (st.st_dev, st.st_ino)
+        finally:
+            os.close(last_fd)
+    if stat.S_ISLNK(os.lstat(path).st_mode):
+        raise OSError(f"workspace path is a symbolic link: {path}")
+    st = os.stat(path)
+    return (st.st_dev, st.st_ino)
+
+
 def _pid_alive(pid: int) -> bool:
     """Best-effort liveness probe; anything uncertain counts as alive."""
     if pid == os.getpid():
         return True
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+        return pid_alive(pid)
+    except Exception:
         return True
-    except OSError:
-        return True
-    return True
 
 
 def current_turn_change_store() -> TurnChangeStore | None:

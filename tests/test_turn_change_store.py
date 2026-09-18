@@ -1109,3 +1109,105 @@ def test_turn_store_scope_resets_after_an_exception(tmp_path: Path) -> None:
         raise ValueError("boom")
 
     assert store.current_turn_change_store() is None
+
+
+def test_locked_turn_eviction_stops_instead_of_looping(tmp_path: Path) -> None:
+    """A locked FIFO delete must degrade, not spin forever (review R2).
+
+    Runs in a subprocess: the pre-fix behavior was an infinite loop, which
+    would also hang the test runner itself.
+    """
+    import json as _json
+    import subprocess as _subprocess
+    import sys as _sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import json
+        import sys
+        from pathlib import Path
+
+        import agent.runtime.turn_change_store as tcs
+
+        root = Path(sys.argv[1])
+        calls = 0
+
+        def failing_rmtree(*args, **kwargs):
+            global calls
+            calls += 1
+            raise PermissionError("simulated locked snapshot directory")
+
+        tcs.shutil.rmtree = failing_rmtree
+
+        store = tcs.TurnChangeStore(
+            root, "review", root=root / "ledger",
+            limits=tcs.TurnChangeLimits(max_turns_retained=1),
+        )
+        second_manifest = None
+        for index in range(2):
+            target = root / f"file-{index}.txt"
+            target.write_bytes(b"new\\n")
+            store.begin_turn(f"turn-{index}")
+            store.note_absent(target.name)
+            second_manifest = store.seal()
+        print(json.dumps({
+            "done": True,
+            "delete_calls": calls,
+            "second_manifest_persisted": second_manifest is not None,
+        }))
+        """
+    )
+    completed = _subprocess.run(
+        [_sys.executable, "-c", script, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = _json.loads(completed.stdout.strip().splitlines()[-1])
+    assert payload["done"] is True
+    # The deletion fault was exercised, yet eviction stopped after a bounded
+    # number of attempts instead of looping on the same directory.
+    assert 1 <= payload["delete_calls"] <= 4
+    assert payload["second_manifest_persisted"] is True
+
+
+def test_store_refuses_a_swapped_workspace_symlink(tmp_path: Path) -> None:
+    """Constructing on a symlinked workspace refuses instead of following it.
+
+    That is the shape of the audit path-swap attack (review R1): once the
+    final component is a symbolic link, the ledger must degrade rather than
+    write through it.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        store.TurnChangeStore(linked, "review", root=tmp_path / "ledger")
+
+
+def test_store_stops_writing_after_the_workspace_is_swapped(tmp_path: Path) -> None:
+    """A workspace swap after construction must not redirect writes (R1)."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    ledger = store.TurnChangeStore(workspace, "review")
+
+    ledger.begin_turn("t1")
+    (workspace / "note.txt").write_bytes(b"after\n")
+    ledger.note_capture("note.txt", b"before\n")
+
+    held = tmp_path / "held"
+    workspace.rename(held)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    ledger.seal()
+    assert not (outside / ".astra").exists()
+
+    ledger.close()
+    assert not (outside / ".astra").exists()

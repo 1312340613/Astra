@@ -4404,9 +4404,22 @@ class ReActAgent(AgentBase):
 
     # -- Turn-change ledger (M1) ------------------------------------------
 
+    def _turn_change_workspace(self) -> Path:
+        """Sandbox workdir for the ledger *without* resolving symlinks.
+
+        The store anchors the workspace identity and refuses a swapped final
+        symlink; resolving here would follow the swap before the store can
+        check it (review R1).
+        """
+        sandbox = self._sandbox
+        current = getattr(sandbox, "current", None)
+        if callable(current):
+            sandbox = current()
+        return Path(getattr(sandbox, "workdir", Path.cwd()))
+
     def _make_turn_change_store(self, session_key: str) -> "TurnChangeStore":
         """Factory seam: tests isolate the snapshot root by overriding this."""
-        return TurnChangeStore(self._source_tracking_workdir(), session_key)
+        return TurnChangeStore(self._turn_change_workspace(), session_key)
 
     def _close_turn_change_store(self) -> None:
         store = getattr(self, "_turn_change_store", None)

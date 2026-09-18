@@ -48,6 +48,44 @@ def mark_agent_environment(
     return target
 
 
+def pid_alive(pid: int) -> bool:
+    """Side-effect-free liveness probe for another process.
+
+    POSIX uses a zero signal (a harmless existence check). Windows must
+    *query* the process handle instead: CPython routes ``os.kill`` on Windows
+    through ``TerminateProcess`` for non-console signals, so a probe there can
+    kill the process it is asking about. Anything uncertain counts as alive so
+    callers never clean up state that may still be owned.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 def hidden_process_creationflags(*, new_process_group: bool = False) -> int:
     """Return Windows flags for a console-free child process.
 
