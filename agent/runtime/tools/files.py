@@ -21,6 +21,7 @@ from pathlib import Path
 
 from ..tool_failure import ToolFailure
 from ..file_checkpoints import FileCheckpointStore
+from ..turn_change_store import current_turn_change_store
 from .file_patch import PatchError, apply_patch as apply_file_patch, parse_patch, patch_summary
 from .registry import ToolRegistry, ToolDef, approval_justification_schema
 
@@ -394,6 +395,26 @@ def _clean_path(path: str) -> str:
     return normalized
 
 
+def _note_turn_capture(pending, checkpoint_id: str) -> None:
+    """Feed captured before-bytes into the active turn-change store (best effort).
+
+    The store is only visible while a turn store scope is bound; turn-change
+    bookkeeping must never propagate failures into the file tools, so every
+    path here degrades to a logged no-op.
+    """
+    try:
+        store = current_turn_change_store()
+        if store is None or pending is None:
+            return
+        for captured in pending.files:
+            if captured.existed:
+                store.note_capture(captured.relative, captured.before, checkpoint_id=checkpoint_id)
+            else:
+                store.note_absent(captured.relative, checkpoint_id=checkpoint_id)
+    except Exception:
+        logger.exception("Failed to note turn-change capture")
+
+
 def register_file_tools(
     registry: ToolRegistry,
     workdir: str = ".",
@@ -424,14 +445,18 @@ def register_file_tools(
                 operation,
                 ", ".join(pending.skipped_paths[:8]),
             )
+        _note_turn_capture(pending, "")
         return pending
 
     def _finalize_checkpoint(pending) -> str:
         try:
-            return checkpoints.finalize(pending)
+            checkpoint_id = checkpoints.finalize(pending)
         except Exception:
             logger.exception("Failed to finalize file checkpoint")
             return ""
+        if checkpoint_id:
+            _note_turn_capture(pending, checkpoint_id)
+        return checkpoint_id
     transactions: dict[str, FileWriteTransaction] = {}
     transaction_dir = access.workspace / ".astra" / "file-transactions"
 

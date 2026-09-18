@@ -1554,6 +1554,16 @@ async def _main(startup_started: float):
                         ),
                     }
                     _send(vision_event)
+                elif event["type"] == "turn_changes":
+                    _send({
+                        "type": "turn_changes",
+                        "session_id": event.get("session_id", ""),
+                        "request_id": event.get("request_id", ""),
+                        "turn_seq": event.get("turn_seq", 0),
+                        "files": list(event.get("files") or []),
+                        "unknown_count": int(event.get("unknown_count") or 0),
+                        "totals": dict(event.get("totals") or {}),
+                    })
                 elif event["type"] == "done":
                     turn_completed = True
                     _reply_done = True

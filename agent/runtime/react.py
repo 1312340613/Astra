@@ -15,6 +15,7 @@ import math
 import mimetypes
 import os
 import re
+import sys
 import time as _time
 import uuid
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ from .core_rules import CORE_SKILL_NAME
 from .deepseek import DEEPSEEK_VISION_MODELS
 from .llm import LLMClient, LLMIdleTimeout, LLMOverallTimeout, LLMResponseError
 from .turn_budget import TurnBudgetExceeded, budgeted_events, check_work_budget, parse_turn_budget
+from .turn_change_store import TurnChangeStore, current_turn_change_store, turn_store_scope
 from .message_time import filter_message_time_events
 from .metrics import runtime_metrics
 from .micro_compact import micro_compact_tool_results
@@ -244,6 +246,12 @@ class ReActAgent(AgentBase):
             os.getenv("ASTRA_TURN_TIMEOUT_SECONDS", "0")
             if turn_timeout_seconds is None else turn_timeout_seconds
         )
+
+        # Turn-change ledger (M1): session-owned snapshot area, never part of
+        # model requests. Best-effort bookkeeping only; all failures degrade.
+        self._turn_change_store: "TurnChangeStore | None" = None
+        self._turn_change_store_session: str | None = None
+        self._turn_changes_ready: dict | None = None
         self.failure_threshold = max(1, failure_threshold or self._int_env("TOOL_FAILURE_THRESHOLD", 3))
         # Runtime-owned resources are attached by the CLI entrypoints and
         # retained here so cleanup/diagnostics do not rely on dynamic attrs.
@@ -364,6 +372,7 @@ class ReActAgent(AgentBase):
         if callable(record_end):
             record_end(reason)
         self.tools.hooks.dispatch_session_end(session_id, reason)
+        self._close_turn_change_store()
 
     async def sync_external_session(
         self,
@@ -2680,9 +2689,17 @@ class ReActAgent(AgentBase):
                     "inspect git status before making further source changes."
                 )
             else:
-                mutation_paths.update(
-                    self._changed_snapshot_paths(tracking_before, tracking_after)
-                )
+                changed_paths = self._changed_snapshot_paths(tracking_before, tracking_after)
+                mutation_paths.update(changed_paths)
+                turn_store = current_turn_change_store()
+                if turn_store is not None and changed_paths:
+                    try:
+                        for path in changed_paths:
+                            turn_store.note_tracked(
+                                path, tracking_before.get(path), tracking_after.get(path)
+                            )
+                    except Exception:
+                        logger.exception("turn-change tracked note failed")
         dry_run_write = (
             name == "apply_patch"
             and (
@@ -2696,7 +2713,14 @@ class ReActAgent(AgentBase):
             and tool.risk == "write"
             and not dry_run_write
         ):
-            mutation_paths.update(self._tool_mutation_paths(name, args))
+            write_paths = self._tool_mutation_paths(name, args)
+            mutation_paths.update(write_paths)
+            turn_store = current_turn_change_store()
+            if turn_store is not None and write_paths:
+                try:
+                    turn_store.note_paths(write_paths)
+                except Exception:
+                    logger.exception("turn-change candidate note failed")
         if mutation_paths:
             self._task_mutated_paths.update(mutation_paths)
             # Tracked execute commands may fail after partially changing the
@@ -4378,14 +4402,125 @@ class ReActAgent(AgentBase):
                 "elapsed_seconds": round(exc.elapsed, 3),
             })
 
+    # -- Turn-change ledger (M1) ------------------------------------------
+
+    def _make_turn_change_store(self, session_key: str) -> "TurnChangeStore":
+        """Factory seam: tests isolate the snapshot root by overriding this."""
+        return TurnChangeStore(self._source_tracking_workdir(), session_key)
+
+    def _close_turn_change_store(self) -> None:
+        store = getattr(self, "_turn_change_store", None)
+        if store is None:
+            return
+        self._turn_change_store = None
+        self._turn_change_store_session = None
+        try:
+            store.close()
+        except Exception:
+            logger.exception("turn-change store close failed")
+
+    def _current_turn_change_store(self) -> "TurnChangeStore | None":
+        """Session-owned turn-change store; rebuilt when the session changes."""
+        session_key = Path(self.context.session_path).stem if self.context.session_path else "default"
+        store = getattr(self, "_turn_change_store", None)
+        if store is not None and self._turn_change_store_session == session_key:
+            return store
+        if store is not None:
+            self._close_turn_change_store()
+        try:
+            store = self._make_turn_change_store(session_key)
+        except Exception:
+            logger.exception("turn-change store initialization failed")
+            store = None
+        self._turn_change_store = store
+        self._turn_change_store_session = session_key
+        return store
+
+    def _begin_turn_changes(self, msg: Msg):
+        """Begin the turn ledger; returns (store, scope_cm) or (None, None)."""
+        store = self._current_turn_change_store()
+        self._turn_changes_ready = None
+        if store is None:
+            return None, None
+        try:
+            store.begin_turn(self._vision_request_id(msg))
+        except Exception:
+            logger.exception("turn-change begin_turn failed")
+            return None, None
+        scope_cm = turn_store_scope(store)
+        scope_cm.__enter__()
+        return store, scope_cm
+
+    def _seal_turn_changes(self, store, *, cancelled: "Callable[[], bool] | None" = None) -> None:
+        """Seal the active turn (idempotent) and stash a publish-ready payload."""
+        if store is None:
+            return
+        try:
+            manifest = store.seal(cancelled=cancelled)
+        except Exception:
+            logger.exception("turn-change seal failed")
+            return
+        if manifest is not None:
+            self._turn_changes_ready = self._turn_changes_event(manifest)
+
+    def _take_turn_changes_payload(self) -> dict | None:
+        payload = self._turn_changes_ready
+        self._turn_changes_ready = None
+        return payload
+
+    def _degraded_turn_changes_payload(self, *, cancelled: bool) -> dict | None:
+        """Seal (idempotent) after an aborted turn, then take its payload."""
+        store = getattr(self, "_turn_change_store", None)
+        if store is not None:
+            self._seal_turn_changes(store, cancelled=(lambda: True) if cancelled else None)
+        return self._take_turn_changes_payload()
+
+    def _end_turn_changes(self, store, scope_cm) -> None:
+        """Finally-path fallback: silent seal (idempotent) + scope reset."""
+        if store is not None:
+            cancelled = (lambda: True) if sys.exc_info()[0] is not None else None
+            self._seal_turn_changes(store, cancelled=cancelled)
+        if scope_cm is not None:
+            try:
+                scope_cm.__exit__(None, None, None)
+            except Exception:
+                logger.exception("turn-change scope exit failed")
+
+    @staticmethod
+    def _turn_changes_event(manifest) -> dict:
+        return {
+            "type": "turn_changes",
+            "session_id": manifest.session_id,
+            "request_id": manifest.request_id,
+            "turn_seq": manifest.turn_seq,
+            "files": [
+                {
+                    "path": change.path,
+                    "state": change.state,
+                    "added": change.added,
+                    "removed": change.removed,
+                    "compare": change.compare,
+                    "reason": change.reason,
+                }
+                for change in manifest.files
+            ],
+            "unknown_count": len(manifest.unknown),
+            "totals": dict(manifest.totals),
+        }
+
     async def reply_stream(self, msg: Msg):
         """流式回复，yield 事件供 CLI 渲染"""
+        turn_store, turn_scope_cm = self._begin_turn_changes(msg)
         try:
             source = self._run_react_loop(msg, emit_events=True)
             react_events = budgeted_events(source, getattr(self, "turn_timeout_seconds", 0.0))
             try:
                 async for event in react_events:
                     if event["type"] == "done":
+                        self._seal_turn_changes(turn_store)
+                        payload = self._take_turn_changes_payload()
+                        if payload is not None:
+                            yield payload
                         yield {"type": "done", "request_id": event.get("request_id")}
                     else:
                         yield event
@@ -4396,6 +4531,9 @@ class ReActAgent(AgentBase):
                     await source.aclose()
         except TurnBudgetExceeded as exc:
             await self._record_turn_budget_exhaustion(msg, exc)
+            payload = self._degraded_turn_changes_payload(cancelled=False)
+            if payload is not None:
+                yield payload
             yield {
                 "type": "error", "code": "turn_budget_exhausted", "message": str(exc),
                 "retryable": False, "recoverable": False,
@@ -4406,6 +4544,9 @@ class ReActAgent(AgentBase):
             logger.warning("react stream cancelled request_id=%s", msg.metadata.get("request_id") or msg.id)
             self.context.sanitize_tool_history()
             await self.context.save_async()
+            payload = self._degraded_turn_changes_payload(cancelled=True)
+            if payload is not None:
+                yield payload
             yield {
                 "type": "error",
                 "message": "LLM stream cancelled; the current turn was stopped before completion.",
@@ -4419,6 +4560,9 @@ class ReActAgent(AgentBase):
         except LLMResponseError as exc:
             self.context.sanitize_tool_history()
             await self.context.save_async()
+            payload = self._degraded_turn_changes_payload(cancelled=False)
+            if payload is not None:
+                yield payload
             yield {
                 "type": "error", "message": exc.public_message,
                 "code": exc.public_code, "retryable": False, "recoverable": False,
@@ -4427,6 +4571,9 @@ class ReActAgent(AgentBase):
             yield {"type": "done", "request_id": msg.metadata.get("request_id") or msg.id}
         except LLMIdleTimeout as exc:
             logger.warning("react stream idle timeout request_id=%s", msg.metadata.get("request_id") or msg.id)
+            payload = self._degraded_turn_changes_payload(cancelled=False)
+            if payload is not None:
+                yield payload
             yield {
                 "type": "error",
                 "message": str(exc),
@@ -4438,6 +4585,9 @@ class ReActAgent(AgentBase):
             yield {"type": "done", "request_id": msg.metadata.get("request_id") or msg.id}
         except LLMOverallTimeout as exc:
             logger.warning("react stream overall timeout request_id=%s", msg.metadata.get("request_id") or msg.id)
+            payload = self._degraded_turn_changes_payload(cancelled=False)
+            if payload is not None:
+                yield payload
             yield {
                 "type": "error",
                 "message": str(exc),
@@ -4447,6 +4597,8 @@ class ReActAgent(AgentBase):
                 "request_id": msg.metadata.get("request_id") or msg.id,
             }
             yield {"type": "done", "request_id": msg.metadata.get("request_id") or msg.id}
+        finally:
+            self._end_turn_changes(turn_store, turn_scope_cm)
 
     async def reply(self, msg: Msg) -> Optional[Msg]:
         """非流式回复"""
@@ -4454,6 +4606,7 @@ class ReActAgent(AgentBase):
             return None
 
         last_text = ""
+        turn_store, turn_scope_cm = self._begin_turn_changes(msg)
         source = self._run_react_loop(msg, emit_events=False)
         react_events = budgeted_events(source, getattr(self, "turn_timeout_seconds", 0.0))
         try:
@@ -4468,6 +4621,7 @@ class ReActAgent(AgentBase):
                 await react_events.aclose()
             finally:
                 await source.aclose()
+            self._end_turn_changes(turn_store, turn_scope_cm)
 
         return Msg(sender=self.name, role="assistant",
                    content=[ContentBlock.text(last_text or "(no response)")],
