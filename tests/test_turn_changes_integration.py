@@ -911,3 +911,73 @@ def test_late_background_delegate_does_not_pollute_next_turn(tmp_path, monkeypat
     manifest = run(scenario())
     assert target.read_text(encoding="utf-8") == "new\n"
     assert manifest is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-root identity (M2 review P2): the file-tool root and the ledger
+# sandbox root may legitimately differ (installation root vs user workspace);
+# candidate notes must still reuse the capture-chain identity.
+# ---------------------------------------------------------------------------
+
+def make_cross_root_agent(tmp_path, replies):
+    """File tools root = tmp/files; ledger sandbox root = tmp/sandbox."""
+    files = tmp_path / "files"
+    sandbox = tmp_path / "sandbox"
+    files.mkdir()
+    sandbox.mkdir()
+    registry = ToolRegistry()
+    register_file_tools(registry, workdir=str(files))
+    registry.yolo = True
+    agent = ReActAgent(
+        "tc-cross-root", ScriptedLLM(replies), registry,
+        timing_log_enabled=False, query_profile_enabled=False, max_iterations=5,
+    )
+    agent._sandbox = SimpleNamespace(workdir=sandbox)
+    return agent, files, sandbox
+
+
+def test_cross_root_create_reuses_the_capture_identity(tmp_path, monkeypatch):
+    """P2：根不同时新建文件，不得同时出现 confirmed 与 phantom unknown."""
+    agent, files, _sandbox = make_cross_root_agent(
+        tmp_path, [call("write_file", {"path": "a.txt", "content": "hello\n"})]
+    )
+    monkeypatch.chdir(files)
+    events = run(collect_stream(agent, Msg(content=[ContentBlock.text("create a.txt")], id="p2-create")))
+
+    payloads = [event for event in events if event["type"] == "turn_changes"]
+    assert len(payloads) == 1, events
+    assert [item["path"] for item in payloads[0]["files"]] == ["a.txt"]
+    assert payloads[0]["unknown_count"] == 0, payloads[0]
+    assert (files / "a.txt").read_text(encoding="utf-8") == "hello\n"
+
+
+def test_cross_root_revert_publishes_no_event(tmp_path, monkeypatch):
+    """P2：根不同时改回原样，必须维持无净改动→不发布事件的语义."""
+    agent, files, _sandbox = make_cross_root_agent(
+        tmp_path,
+        [
+            call("edit_file", {"path": "a.txt", "old": "original", "new": "changed"}, call_id="p2-e1"),
+            call("edit_file", {"path": "a.txt", "old": "changed", "new": "original"}, call_id="p2-e2"),
+        ],
+    )
+    (files / "a.txt").write_text("original\n", encoding="utf-8")
+    monkeypatch.chdir(files)
+    events = run(collect_stream(agent, Msg(content=[ContentBlock.text("edit then revert")], id="p2-revert")))
+
+    assert [event for event in events if event["type"] == "turn_changes"] == [], events
+    assert (files / "a.txt").read_text(encoding="utf-8") == "original\n"
+
+
+def test_same_root_create_has_no_unknown_paths(tmp_path, monkeypatch):
+    """同根对照：新建仍是单条 confirmed、无 unknown（修复不得回归）."""
+    agent, stores = make_turn_agent(
+        tmp_path, [call("write_file", {"path": "a.txt", "content": "hello\n"})], monkeypatch
+    )
+    monkeypatch.chdir(tmp_path)
+    events = run(collect_stream(agent, Msg(content=[ContentBlock.text("create a.txt")], id="same-root")))
+
+    payloads = [event for event in events if event["type"] == "turn_changes"]
+    assert len(payloads) == 1, events
+    assert payloads[0]["unknown_count"] == 0
+    assert [item["path"] for item in payloads[0]["files"]] == ["a.txt"]
+    assert stores and stores[0].manifest(0) is not None

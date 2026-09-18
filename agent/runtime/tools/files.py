@@ -441,6 +441,9 @@ def register_file_tools(
     the explicit filesystem policy.
     """
     access = policy or FilesystemPolicy.load(workdir, config_path)
+    # M2 review P2: expose the resolved policy so runtime path bookkeeping can
+    # unify tool-reported paths with the capture-chain identity.
+    registry.filesystem_policy = access
     checkpoints = FileCheckpointStore(access.workspace)
 
     def _capture_checkpoint(paths, *, operation: str, task_id: str = ""):

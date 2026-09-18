@@ -249,6 +249,10 @@ class ToolRegistry:
         self.hooks = hooks or HookRegistry()
         self.approval_handler: ApprovalHandler | None = None
         self.approval_audit_handler: ApprovalAuditHandler | None = None
+        # Resolved filesystem policy of the registered file tools; runtime
+        # bookkeeping uses it to resolve tool-reported paths to the stable
+        # identity the capture chain records (M2 review P2).
+        self.filesystem_policy: Any | None = None
         # YOLO is a transient bypass. It must not create durable grants,
         # otherwise turning it off would not restore the approval boundary.
         self._yolo_state = _YoloState()

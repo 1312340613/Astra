@@ -608,6 +608,28 @@ class ReActAgent(AgentBase):
                 paths.add(self._normalize_workflow_path(match.group(1)))
         return {path for path in paths if path}
 
+    def _ledger_identity_paths(self, paths: set[str]) -> set[str]:
+        """Resolve tool-reported paths to the capture-chain identity.
+
+        The ledger resolves relative candidate paths against its sandbox
+        workspace while the file tools resolve against their filesystem-policy
+        root; when a supported configuration separates the two roots, the raw
+        relative path registered a second (phantom) entry for the file the
+        capture chain had already confirmed (M2 review P2). Resolve through the
+        registered policy so both chains share one stable identity; paths the
+        policy cannot resolve keep their previous treatment.
+        """
+        policy = getattr(self.tools, "filesystem_policy", None)
+        if policy is None:
+            return paths
+        resolved: set[str] = set()
+        for path in paths:
+            try:
+                resolved.add(str(policy.resolve(path)))
+            except (OSError, ValueError):
+                resolved.add(path)
+        return resolved
+
     def _is_source_path(
         self,
         path: str,
@@ -2718,7 +2740,7 @@ class ReActAgent(AgentBase):
             turn_store = current_turn_change_store()
             if turn_store is not None and write_paths:
                 try:
-                    turn_store.note_paths(write_paths)
+                    turn_store.note_paths(self._ledger_identity_paths(write_paths))
                 except Exception:
                     logger.exception("turn-change candidate note failed")
         if mutation_paths:

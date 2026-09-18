@@ -2202,3 +2202,24 @@ def test_after_read_refuses_a_symlinked_target(tmp_path: Path) -> None:
     assert change.after_state == store.SIDE_UNCAPTURED
     assert change.reason == store.REASON_ERROR
     assert subject.load_sides(0, "note.txt").after is None
+
+
+def test_same_display_name_keeps_distinct_absolute_identities(tmp_path: Path) -> None:
+    """同名但绝对目标不同的文件保持两个条目（身份键不得按展示名合并）."""
+    workspace = tmp_path / "files"
+    elsewhere = tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    (workspace / "a.txt").write_bytes(b"mine\n")
+    (elsewhere / "a.txt").write_bytes(b"theirs\n")
+    subject = make_store(workspace)
+    subject.begin_turn("req-1")
+
+    subject.note_capture(elsewhere / "a.txt", b"old\n", display="a.txt")
+    subject.note_capture(workspace / "a.txt", b"old\n", display="a.txt")
+
+    manifest = subject.seal()
+
+    assert manifest is not None
+    assert len(manifest.files) == 2
+    assert sorted(change.display for change in manifest.files) == ["a.txt", "a.txt"]
