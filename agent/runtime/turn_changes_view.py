@@ -299,12 +299,20 @@ def _aligned_lines(
     ):
         suffix += 1
 
+    mid_before = before_lines[prefix : size_before - suffix]
+    mid_after = after_lines[prefix : size_after - suffix]
+    if set(mid_before) & set(mid_after):
+        # 中段含两侧共有的行（既非公共前缀也非公共后缀，被夹在差异中间）：
+        # 块替换画法会把它同时画成删除与新增 → 必须标“粗略展示”（review R3；
+        # 不升级为 LCS/difflib，计数仍以清单为准）。
+        marks.append(COARSE_MARK)
+
     head_count = min(prefix, MAX_CONTEXT_LINES)
     tail_count = min(suffix, MAX_CONTEXT_LINES)
     omitted = (prefix - head_count) + (suffix - tail_count)
     lines = [_context(line) for line in before_lines[prefix - head_count : prefix]]
-    lines += [_removed(line) for line in before_lines[prefix : size_before - suffix]]
-    lines += [_added(line) for line in after_lines[prefix : size_after - suffix]]
+    lines += [_removed(line) for line in mid_before]
+    lines += [_added(line) for line in mid_after]
     lines += [_context(line) for line in before_lines[size_before - suffix : size_before - suffix + tail_count]]
     if omitted > 0:
         marks.append(f"（省略 {omitted} 行未变化内容）")

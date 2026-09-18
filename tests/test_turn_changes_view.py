@@ -314,6 +314,27 @@ def test_diff_full_aligns_common_prefix_and_suffix():
     assert view.RANGE_MARK not in text
 
 
+def test_diff_full_block_replace_with_unchanged_middle_marks_coarse():
+    """分离的两处修改、中间存在不变行：块替换展示必须标“粗略展示”（review R3）."""
+    entry = change("note.txt", added=2, removed=2)
+    text = view.format_file_diff(
+        1,
+        record(),
+        manifest(),
+        entry,
+        sides(
+            b"header\nold-A\nunchanged-middle\nold-B\nfooter\n",
+            b"header\nnew-A\nunchanged-middle\nnew-B\nfooter\n",
+        ),
+    )
+    lines = lines_of(text)
+    assert lines[0] == "回合 @1 · note.txt（+2 \u22122）"
+    assert view.COARSE_MARK in text
+    # 画法保持：中段整块呈现（未变行仍会被两侧各画一次），提示负责解释
+    assert "- unchanged-middle" in lines
+    assert "+ unchanged-middle" in lines
+
+
 def test_diff_trailing_newline_only_difference_is_explained():
     entry = change("a.txt", added=0, removed=0)
     text = view.format_file_diff(1, record(), manifest(), entry, sides(b"a\n", b"a"))
