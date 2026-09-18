@@ -19,7 +19,9 @@ from agent.runtime.llm import LLMConfig
 from agent.runtime.prompts import get_prompt_profile, prompt_profiles
 from agent.runtime.react import ReActAgent
 from agent.runtime.skills import SkillStore
+from agent.runtime.task_store import TaskStore
 from agent.runtime.token_estimator import estimate_messages_tokens
+from agent.runtime.tool_execution import ExecutionResult
 from agent.runtime.tools.registry import ToolDef, ToolRegistry
 from agent.runtime.tools.skills import register_skill_tools
 
@@ -83,7 +85,7 @@ def test_public_persona_and_original_core_match_in_both_modes(monkeypatch):
         assert profile.system_prompt() == full[name].replace(AGENT_CORE_PROMPT, core_identity_prompt(), 1)
     assert all(line in AGENT_CORE_PROMPT.splitlines() for line in AGENT_BASE_PROMPT.splitlines())
     assert "工作原则：" not in core_identity_prompt()
-    assert "硬规则" in core_identity_prompt()
+    assert "基本原则：" in core_identity_prompt()
     assert CORE_SKILL_GUIDE in core_identity_prompt()
 
 
@@ -140,6 +142,47 @@ def test_omitted_core_read_is_not_hidden_by_runtime_injection_or_replanning(tmp_
     assert len(agent.llm.requests) == 2
     assert "project verified" in str(agent.context.messages)
     assert AGENT_CORE_PROMPT not in str(agent.llm.requests)
+
+
+def test_source_changes_keep_evidence_without_repeated_workflow_prompts(tmp_path, monkeypatch):
+    monkeypatch.setenv("SANDBOX_WORKDIR", str(tmp_path))
+    store = TaskStore(tmp_path / "tasks.db")
+    task = store.start_run("test", "update source", session_id="workflow-test")
+    agent = make_agent(tmp_path, [
+        call("edit_probe", {"path": "main.py"}, call_id="edit"),
+        call("check_project", call_id="check"),
+        DONE,
+    ], task_store=store)
+
+    def edit_probe(path):
+        (tmp_path / path).write_text("value = 1\n", encoding="utf-8")
+        return "updated"
+
+    agent.tools.register(ToolDef(
+        "edit_probe", "Update test source",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        edit_probe, risk="write",
+    ))
+    agent.tools.register(ToolDef(
+        "check_project", "Return a scripted check receipt", {"type": "object", "properties": {}},
+        lambda: ExecutionResult("scripted check passed", {"exit_code": 0}), risk="execute",
+    ))
+    asyncio.run(agent.reply(Msg(
+        content=[ContentBlock.text("修改文件并完成相关检查")], metadata={"task_id": task["id"]},
+    )))
+
+    requests = agent.llm.requests
+    assert len(requests) == 3
+    for earlier, later in zip(requests, requests[1:]):
+        assert_prefix(earlier, later)
+    assert all(sum(m["role"] == "system" for m in r["messages"]) == 1 for r in requests)
+    assert (tmp_path / "main.py").read_text(encoding="utf-8") == "value = 1\n"
+    contract = store.get_task(task["id"])["verification"]
+    assert contract["mutated_paths"] == ["main.py"]
+    assert len(contract["checks"]) == 1
+    assert contract["checks"][0]["execution_status"] == "completed"
+    assert contract["checks"][0]["exit_code"] == 0
+    assert contract["status"] == "unverified"  # A receipt alone does not certify the change.
 
 
 def test_code_mode_can_read_core_through_real_program_transport(tmp_path):

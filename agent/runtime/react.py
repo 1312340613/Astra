@@ -3350,17 +3350,6 @@ class ReActAgent(AgentBase):
                         "when you are otherwise ready to give the final answer."
                     ),
                 })
-            if self._verification_required:
-                transient_messages.append({
-                    "role": "system",
-                    "content": (
-                        "Source files changed in this task. Before finishing, assess the "
-                        "relevant checks and report their actual outcomes and uncovered limits. "
-                        "Execution receipts and file readbacks do not by themselves validate "
-                        "the change. Reuse completed relevant checks; do not repeat them just "
-                        "because this reminder is present. If no check applies, explain why."
-                    ),
-                })
             if current_prefill is not None:
                 transient_messages.extend([
                     {
