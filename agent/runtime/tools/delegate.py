@@ -3017,7 +3017,7 @@ def register_delegate_tools(
             result["omitted_episodes"] = max(0, len(episodes) - 10)
             result["tasks"] = [
                 {key: (str(value)[:240] if key in {"description", "result"} else value)
-                 for key, value in task.items()}
+                 for key, value in task.items() if key != "episodes"}
                 for task in team.get("tasks", [])
             ]
             result["detail_hint"] = 'Use team(action="status", team_id="' + str(team["id"]) + '", detail=true) for full context and task text.'

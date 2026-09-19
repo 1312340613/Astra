@@ -739,11 +739,15 @@ def test_delegate_runs_tool_loop_and_returns_final_answer(process_manager, tmp_p
         assert payload["worker"]["max_turns"] == 12
         assert payload["worker"]["turns_remaining"] == 10
         assert payload["session_transcript_path"].endswith("session.subagents.jsonl")
-        assert [event[1]["type"] for event in session_events] == [
+        lifecycle_events = [event[1] for event in session_events if event[1]["type"] == "lifecycle"]
+        assert [event["state"] for event in lifecycle_events] == ["active", "terminal"]
+        assert lifecycle_events[-1]["completion_reason"] == "reported"
+        dialogue_events = [event[1] for event in session_events if event[1]["type"] != "lifecycle"]
+        assert [event["type"] for event in dialogue_events] == [
             "started", "assistant", "tool", "assistant", "terminal",
         ]
-        assert session_events[2][1]["tool_name"] == "read_file"
-        first_assistant = session_events[1][1]
+        assert dialogue_events[2]["tool_name"] == "read_file"
+        first_assistant = dialogue_events[1]
         assert first_assistant["finish_reason"] == "tool_calls"
         assert first_assistant["reasoning_chars"] == len("hidden-reasoning-marker")
         assert first_assistant["usage"] == {

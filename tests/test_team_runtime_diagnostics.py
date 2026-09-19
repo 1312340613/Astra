@@ -97,12 +97,16 @@ def test_read_only_status_compaction_and_automatic_adoption_keep_authority_check
         store = AgentTeamStore(tasks.path)
         member = store.register_agent(team["id"], name="member", role="worker", mode="worker",
                                       parent_agent_id=team["lead_agent_id"], spawn_spec={"context": "evidence " * 3000, "max_turns": 50})
+        store.create_task(team["id"], title="bounded view", description="task detail " * 100)
         store.bind_agent(member["id"], "missing-process")
         store.set_agent_lifecycle(member["id"], {"state": "idle", "observed_at": 123, "idle_elapsed_seconds": 10})
         compact = await call(registry, observer, "team", action="status", team_id=team["id"])
         full = await call(registry, observer, "team", action="status", team_id=team["id"], detail=True)
         assert len(json.dumps(compact)) < len(json.dumps(full)) / 5
         assert "spawn_spec_json" not in json.dumps(full)
+        assert "episodes" not in compact["tasks"][0]
+        assert "episodes" in full["tasks"][0]
+        assert len(compact["tasks"][0]["description"]) == 240
         assert compact["owner_task_id"] == owner["id"]
         denied = await registry.execute("team_send", {"team_id": team["id"], "to": "member", "message": "work"}, task_id=observer["id"])
         assert "still active" in denied["error"]

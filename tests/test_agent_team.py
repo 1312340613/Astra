@@ -155,12 +155,16 @@ def test_recovery_marks_effective_idle_worker_interrupted(tmp_path: Path):
     store.set_agent_status(worker["id"], "running")
     admitted = store.try_enter_idle(worker["id"], limit=1)
     assert admitted["keep_alive_state"] == "effective"
+    store.set_agent_lifecycle(worker["id"], {"state": "idle", "observed_at": 123, "idle_elapsed_seconds": 10})
 
     recovered = AgentTeamStore(path)
     recovered.recover_interrupted()
     state = recovered.get_agent(worker["id"])
     assert state["status"] == "interrupted"
     assert state["keep_alive_state"] == "effective"
+    assert state["lifecycle"]["completion_reason"] == "backend_interrupted"
+    assert state["lifecycle"]["observed_at"] == 123
+    assert state["lifecycle"]["timing_freshness"] == "last_durable_observation"
 
 
 def test_mailbox_is_bounded_and_malformed_kind_is_rejected(tmp_path: Path):
