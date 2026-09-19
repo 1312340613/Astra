@@ -112,6 +112,13 @@ _DELEGATE_MAX_TURNS = MAX_WORKER_TURNS
 # two failed four-agent batches plus one clean retry without making spawning
 # effectively unbounded within a model turn.
 _TEAM_SPAWN_CALL_BUDGET = 12
+# A coordinator turn legitimately fans out many sends: night actions, phased
+# announcements, per-player relays across a full table. Forty-eight keeps one
+# full round inside a single model turn while staying bounded.
+_TEAM_SEND_CALL_BUDGET = 48
+# A backend restart orphans the whole table; allow restarting every member in
+# one turn, matching the spawn fan-out scale.
+_TEAM_RESTART_CALL_BUDGET = 12
 _UNPARSED_TOOL_BLOCK_RE = re.compile(
     r"(?:<｜｜DSML｜｜tool_calls>\s*<｜｜DSML｜｜invoke\b.*?"
     r"(?:</｜｜DSML｜｜tool_calls>|$)"
@@ -3753,7 +3760,7 @@ def register_delegate_tools(
         group="team",
         approval="never",
         repeat_guard=False,
-        max_calls_per_turn=4,
+        max_calls_per_turn=_TEAM_RESTART_CALL_BUDGET,
     ))
 
     registry.register(ToolDef(
@@ -3792,7 +3799,7 @@ def register_delegate_tools(
         risk="read",
         group="team",
         approval="never",
-        max_calls_per_turn=8,
+        max_calls_per_turn=_TEAM_SEND_CALL_BUDGET,
     ))
 
     registry.register(ToolDef(

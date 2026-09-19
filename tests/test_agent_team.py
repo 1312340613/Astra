@@ -1276,6 +1276,8 @@ def test_team_spawn_validates_before_registering_agent(tmp_path: Path, monkeypat
         assert "pending" in description
         assert "active time" in description
         assert registry.get("team_spawn").max_calls_per_turn == 12
+        assert registry.get("team_send").max_calls_per_turn == 48
+        assert registry.get("team_restart").max_calls_per_turn == 12
         team = json.loads((await registry.execute(
             "team",
             {"action": "create", "name": "validation", "goal": "inspect"},
