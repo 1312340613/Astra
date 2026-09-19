@@ -30,13 +30,18 @@ def test_timing_distinguishes_sleep_from_active_budget():
     assert ended["idle_deadline_monotonic"] == 132
 
 
-@pytest.mark.parametrize("reason", ["idle_timeout", "idle_quota", "shutdown_request", "cancelled", "reported", "active_timeout", "keep_alive_lifetime"])
+@pytest.mark.parametrize("reason", ["idle_timeout", "idle_quota", "shutdown_request", "cancelled", "reported", "active_timeout", "keep_alive_lifetime", "startup_failed"])
 def test_worker_reasons_and_actual_limits_survive_process_artifacts(tmp_path, monkeypatch, reason):
     class Reporter:
         async def chat(self, **kwargs):
             if reason == "active_timeout":
                 await asyncio.sleep(5)
             return {"content": "ready", "tool_calls": []}
+
+    def provider():
+        if reason == "startup_failed":
+            raise RuntimeError("provider configuration unavailable")
+        return Reporter()
 
     async def scenario():
         monkeypatch.setenv("ASTRA_TEAM_IDLE_TIMEOUT_SECONDS", "1" if reason == "idle_timeout" else "20")
@@ -46,7 +51,7 @@ def test_worker_reasons_and_actual_limits_survive_process_artifacts(tmp_path, mo
         tasks = TaskStore(tmp_path / "tasks.db")
         parent = tasks.start_run("request", "diagnostics", session_id="session")
         registry = ToolRegistry()
-        register_delegate_tools(registry, llm_getter=Reporter, task_store=tasks, session_id_getter=lambda: "session")
+        register_delegate_tools(registry, llm_getter=provider, task_store=tasks, session_id_getter=lambda: "session")
         team = await call(registry, parent, "team", action="create", keep_alive_limit=0 if reason == "idle_quota" else 4)
         handle = await call(registry, parent, "team_spawn", team_id=team["id"], name="reporter", goal="report readiness",
                             keep_alive=reason != "reported", timeout=1 if reason in {"active_timeout", "keep_alive_lifetime"} else 10, max_turns=5)
@@ -63,6 +68,8 @@ def test_worker_reasons_and_actual_limits_survive_process_artifacts(tmp_path, mo
         else:
             assert await manager.wait(process, 3000)
         persisted = AgentTeamStore(tasks.path).get_agent(handle["agent"]["id"])["lifecycle"]
+        if reason == "startup_failed":
+            assert store.get_agent(handle["agent"]["id"])["status"] == "failed"
         assert persisted["completion_reason"] == reason
         assert persisted["state"] == "terminal"
         assert persisted["limits"]["max_turns"] == 5

@@ -2673,6 +2673,21 @@ def register_delegate_tools(
                     "lifecycle": lifecycle.snapshot(),
                 })
                 raise
+            except Exception as exc:
+                # Provider/configuration failures before the inner loop's try
+                # must still close the durable Team row and notify its owner.
+                logger.exception("subagent startup failed")
+                lifecycle.transition("terminal", reason="startup_failed")
+                result = {
+                    "goal": spec.goal,
+                    "turns_used": 0,
+                    "max_turns": spec.max_turns,
+                    "turns_remaining": spec.max_turns,
+                    "result": "",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "error_code": "startup_failed",
+                    "worker_status": WorkerStatus.FAILED.value,
+                }
             finally:
                 if slot_lease is not None:
                     slot_lease.release()
