@@ -3249,6 +3249,9 @@ def register_delegate_tools(
         resolved_turns = int(max_turns or spawn_spec.get("max_turns") or MAX_WORKER_TURNS)
         resolved_timeout = int(timeout or spawn_spec.get("timeout") or 300)
         resolved_workspace_root = str(spawn_spec.get("workspace_root") or "")
+        # Re-apply the retained intent from the durable spawn spec so a keep-alive
+        # member returns to idle after its recovery episode instead of completing.
+        keep_alive = bool(spawn_spec.get("keep_alive_requested", False))
         checkpoint = await asyncio.to_thread(_restart_checkpoint, previous, instruction)
         base_context = str(spawn_spec.get("context") or "").strip()
         restart_context = checkpoint if not base_context else base_context + "\n\n" + checkpoint
@@ -3296,6 +3299,7 @@ def register_delegate_tools(
                 _team_agent_id=str(restarted["id"]),
                 _parent_agent_id=str(team["lead_agent_id"]),
                 _agent_name=str(restarted["name"]),
+                _keep_alive=keep_alive,
             )
             process = _json.loads(raw)
         except Exception:
@@ -3731,9 +3735,10 @@ def register_delegate_tools(
     registry.register(ToolDef(
         name="team_restart",
         description=(
-            "Restart one failed/interrupted teammate as a NEW worker seeded from its "
-            "durable spawn spec and transcript tail. This is checkpoint restart, not "
-            "continuation of the prior model conversation. Only the team lead may use it."
+            "Restart one terminal teammate as a NEW worker seeded from its durable "
+            "spawn spec and transcript tail; a spawn spec that requested keep-alive "
+            "is re-applied. This is checkpoint restart, not continuation of the prior "
+            "model conversation. Only the team lead may use it."
         ),
         parameters={
             "type": "object",

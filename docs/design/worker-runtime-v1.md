@@ -69,6 +69,11 @@ process termination does not prove that those actions were undone. Persisted
 process/Team records support inspection and recovery, but do not serialize a
 live model coroutine for automatic continuation after a host restart.
 
+`team_restart` re-seeds any terminal member, including a completed one, as a
+new worker from its durable spawn spec and transcript tail, and re-applies a
+`keep_alive` request recorded at spawn so a revived retained member returns
+to idle after its recovery episode.
+
 Relevant regressions cover delegation, Team state and budgets, process lifecycle,
 approval propagation, workspace isolation, mailbox delivery and interrupted
 results. Use fresh evidence when validating another platform or provider.

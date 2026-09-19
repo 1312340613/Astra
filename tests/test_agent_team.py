@@ -1584,6 +1584,170 @@ def test_team_restart_seeds_new_worker_from_durable_checkpoint(tmp_path: Path, m
     asyncio.run(scenario())
 
 
+def test_team_restart_reapplies_keep_alive_for_retained_member(tmp_path: Path, monkeypatch):
+    async def scenario():
+        manager = ProcessManager(artifact_dir=tmp_path / "processes")
+        monkeypatch.setattr(delegate, "_sub_processes", manager)
+        store = TaskStore(tmp_path / "tasks.db")
+        parent_task = store.start_run("request-a", "restart retained", session_id="session-a")
+        llm = EpisodicTeamLLM()
+        registry = ToolRegistry()
+        register_delegate_tools(
+            registry,
+            llm_getter=lambda: llm,
+            session_id_getter=lambda: "session-a",
+            task_store=store,
+        )
+        team = json.loads((await registry.execute(
+            "team",
+            {"action": "create", "name": "retained-restart", "goal": "survive a host restart"},
+            task_id=parent_task["id"],
+        ))["output"])
+        spawned = json.loads((await registry.execute(
+            "team_spawn",
+            {
+                "team_id": team["id"],
+                "name": "implementer",
+                "goal": "run red then green",
+                "max_turns": 4,
+                "timeout": 10,
+                "keep_alive": True,
+            },
+            task_id=parent_task["id"],
+        ))["output"])
+        agent_id = spawned["agent"]["id"]
+        team_store = AgentTeamStore(store.path)
+        first_idle = await _wait_for_agent_status(team_store, agent_id, "idle")
+        assert first_idle["keep_alive_state"] == "effective"
+        assert len(llm.requests) == 1
+
+        # A host restart kills the live process; recovery fences the member.
+        await manager.cancel(manager.get(spawned["process"]["process_id"]))
+        team_store.set_agent_status(agent_id, "interrupted")
+
+        restarted_result = await registry.execute(
+            "team_restart",
+            {
+                "team_id": team["id"],
+                "agent": "implementer",
+                "instruction": "Resume the retained assignment",
+                "max_turns": 4,
+                "timeout": 10,
+            },
+            task_id=parent_task["id"],
+        )
+        assert restarted_result["error"] == ""
+        restarted = json.loads(restarted_result["output"])
+        assert restarted["process"]["metadata"]["worker_spec"]["keep_alive"] is True
+
+        revived = await _wait_for_agent_status(team_store, agent_id, "idle", timeout=5.0)
+        assert revived["keep_alive_state"] == "effective"
+        assert len(llm.requests) == 2
+
+        await registry.execute(
+            "team_send",
+            {
+                "team_id": team["id"],
+                "to": "implementer",
+                "message": "second assignment",
+            },
+            task_id=parent_task["id"],
+        )
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while asyncio.get_running_loop().time() < deadline:
+            current = team_store.get_agent(agent_id) or {}
+            if len(llm.requests) == 3 and current.get("status") == "idle":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(
+                f"revived member did not wake: {team_store.get_agent(agent_id)}"
+            )
+
+        await registry.execute(
+            "team_send",
+            {
+                "team_id": team["id"],
+                "to": "implementer",
+                "message": "stop",
+                "kind": "shutdown_request",
+            },
+            task_id=parent_task["id"],
+        )
+        await _wait_for_agent_status(team_store, agent_id, "completed", timeout=3.0)
+        assert len(llm.requests) == 3
+
+    asyncio.run(scenario())
+
+
+def test_team_restart_accepts_completed_member(tmp_path: Path, monkeypatch):
+    async def scenario():
+        manager = ProcessManager(artifact_dir=tmp_path / "processes")
+        monkeypatch.setattr(delegate, "_sub_processes", manager)
+        store = TaskStore(tmp_path / "tasks.db")
+        parent_task = store.start_run("request-a", "restart completed", session_id="session-a")
+        llm = CapturingTeamLLM()
+        registry = ToolRegistry()
+        register_delegate_tools(
+            registry,
+            llm_getter=lambda: llm,
+            session_id_getter=lambda: "session-a",
+            task_store=store,
+        )
+        team = json.loads((await registry.execute(
+            "team",
+            {"action": "create", "name": "recall", "goal": "revive a finished member"},
+            task_id=parent_task["id"],
+        ))["output"])
+        spawned = json.loads((await registry.execute(
+            "team_spawn",
+            {
+                "team_id": team["id"],
+                "name": "researcher",
+                "goal": "report one finding",
+                "max_turns": 2,
+                "timeout": 5,
+            },
+            task_id=parent_task["id"],
+        ))["output"])
+        agent_id = spawned["agent"]["id"]
+        await registry.execute(
+            "delegate_poll",
+            {"process_id": spawned["process"]["process_id"], "wait_ms": 5000},
+            task_id=parent_task["id"],
+        )
+        team_store = AgentTeamStore(store.path)
+        await _wait_for_agent_status(team_store, agent_id, "completed")
+
+        restarted_result = await registry.execute(
+            "team_restart",
+            {
+                "team_id": team["id"],
+                "agent": "researcher",
+                "instruction": "Recheck the finding with fresh evidence",
+                "max_turns": 2,
+                "timeout": 5,
+            },
+            task_id=parent_task["id"],
+        )
+        assert restarted_result["error"] == ""
+        restarted = json.loads(restarted_result["output"])
+        assert restarted["restart_kind"] == "checkpoint_restart"
+        assert restarted["agent"]["restart_count"] == 1
+        assert restarted["agent"]["previous_process_id"] == spawned["process"]["process_id"]
+
+        await registry.execute(
+            "delegate_poll",
+            {"process_id": restarted["process"]["process_id"], "wait_ms": 5000},
+            task_id=parent_task["id"],
+        )
+        prompt_text = json.dumps(llm.prompts, ensure_ascii=False)
+        assert "CHECKPOINT RESTART" in prompt_text
+        assert "Recheck the finding with fresh evidence" in prompt_text
+
+    asyncio.run(scenario())
+
+
 def test_team_claim_target_and_cross_turn_resume(tmp_path: Path):
     async def scenario():
         store = TaskStore(tmp_path / "tasks.db")

@@ -625,7 +625,7 @@ class AgentTeamStore:
         if str(agent.get("parent_agent_id") or "") == "":
             raise ValueError("the team lead is resumed through team(action=resume), not team_restart")
         status = str(agent.get("status") or "")
-        if status not in {"failed", "cancelled", "timed_out", "interrupted", "partial"}:
+        if status not in TERMINAL_AGENT_STATUSES:
             raise ValueError(f"team agent {agent['name']} is {status} and cannot be restarted")
         now = time.time()
         with self._lock, self._connection() as db:
