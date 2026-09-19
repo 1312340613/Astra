@@ -102,6 +102,11 @@ def _patch_win32_scandir_retry() -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # Keep test-only registration out of the launcher's dependency fingerprint.
+    config.addinivalue_line(
+        "markers",
+        "allow_application_environment: opt-in live acceptance using inherited application settings",
+    )
     # Isolate import-time prompt construction too, before test modules import
     # AgentContext. Per-test fixtures below can then supply synthetic overrides.
     persona_state = tempfile.TemporaryDirectory(prefix="astra-test-persona-")
