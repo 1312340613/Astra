@@ -64,6 +64,7 @@ class SessionStore:
             / f"{self.legacy_path.stem}.approvals.jsonl"
         )
         self._run_id = ""
+        self._closed = False
 
     @property
     def exists(self) -> bool:
@@ -299,14 +300,19 @@ class SessionStore:
         return recovered
 
     def ensure_started(self) -> str:
-        if self._run_id:
+        if self._run_id or self._closed:
             return self._run_id
         self.recover_interrupted()
         self._run_id = uuid.uuid4().hex
         self._append_lifecycle("session_started", run_id=self._run_id, pid=os.getpid())
         return self._run_id
 
+    def begin(self) -> None:
+        """Allow a new lifecycle explicitly; late saves alone cannot reopen one."""
+        self._closed = False
+
     def record_end(self, reason: str) -> None:
+        self._closed = True
         if not self._run_id:
             return
         self._append_lifecycle(

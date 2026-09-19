@@ -478,6 +478,9 @@ class ReActAgent(AgentBase):
     def begin_session(self) -> None:
         """Start a fresh lifecycle even when reset reuses the same session path."""
         self._last_ended_session = None
+        record_start = getattr(self.context, "record_session_start", None)
+        if callable(record_start):
+            record_start()
         if hasattr(self, "_task_mutated_paths"):
             self._task_mutated_paths.clear()
         else:

@@ -1,6 +1,7 @@
 """code tools — execute_python, execute_shell"""
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -474,6 +475,8 @@ def register_code_tools(
             parts.append(f"(Completed, exit code {result['exit_code']})")
         if result.get("artifact_path"):
             parts.append(f"[Full output artifact: {result['artifact_path']}]")
+        if result.get("output_reader"):
+            parts.append("[Read full output: " + json.dumps(result["output_reader"]) + "]")
         if result["exit_code"] != 0 and environment and raise_on_failure:
             resolved = result.get("environment", environment)
             raise ExecutionFailure(
@@ -525,7 +528,11 @@ def register_code_tools(
         if completed:
             processes.describe(process)
             result = process.result
-            processes.discard_unexposed(process)
+            if result and result.get("artifact_path"):
+                processes.expose(process)
+                result["output_reader"] = processes.describe(process)["output_reader"]
+            else:
+                processes.discard_unexposed(process)
             return result, process
         else:
             processes.expose(process)
@@ -731,7 +738,7 @@ def register_code_tools(
 
     registry.register(ToolDef(
         name="execute_shell",
-        description=shell_description,
+        description=shell_description + ". Host Bash and WSL commands enable pipefail so failed commands piped to tail keep a failing exit status. Use set +o pipefail explicitly when last-command pipeline semantics are intended.",
         parameters={"type": "object", "properties": {
             "command": {"type": "string", "description": "Shell command"},
             "environment": {

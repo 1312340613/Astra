@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import sys
 
 import pytest
 
@@ -7,6 +8,16 @@ from agent.runtime.tools.code import register_code_tools
 from agent.runtime.tools.registry import ToolRegistry
 from agent.sandbox.docker import DockerSandbox
 from agent.sandbox.local import LocalSandbox
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="native Bash integration")
+def test_pipeline_keeps_producer_failure_and_allows_explicit_override(tmp_path):
+    sandbox = LocalSandbox(workdir=str(tmp_path))
+    failed = asyncio.run(sandbox.execute_shell("(echo 'test failed'; exit 7) | tail -n 1"))
+    assert failed["exit_code"] == 7
+    assert "test failed" in failed["output"]
+    allowed = asyncio.run(sandbox.execute_shell("set +o pipefail; (echo 'handled'; exit 7) | tail -n 1"))
+    assert allowed["exit_code"] == 0
 
 
 def test_auto_routes_linux_commands_and_paths_to_wsl(monkeypatch):
@@ -96,7 +107,7 @@ def test_posix_shell_executes_with_native_bash(monkeypatch):
 
     result = asyncio.run(LocalSandbox().execute_shell("pwd", "auto"))
 
-    assert created == [("/bin/bash", "-lc", "pwd")]
+    assert created == [("/bin/bash", "-o", "pipefail", "-lc", "pwd")]
     assert result["environment"] == "posix"
 
 
@@ -106,7 +117,7 @@ def test_wsl_args_use_configured_distro(monkeypatch):
     encoded = base64.b64encode("ls /home".encode("utf-8")).decode("ascii")
     assert LocalSandbox._wsl_args("ls /home") == [
         "wsl.exe", "-d", "Ubuntu-24.04", "--", "bash", "-lc",
-        f"set -o pipefail; echo {encoded} | base64 -d | bash",
+        f"set -o pipefail; echo {encoded} | base64 -d | bash -o pipefail",
     ]
 
 

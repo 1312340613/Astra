@@ -1816,14 +1816,11 @@ def test_team_claim_target_and_cross_turn_resume(tmp_path: Path):
         store.finish_run(first_run["id"], "completed")
 
         second_run = store.start_run("request-2", "second", session_id="session-a")
-        denied = await registry.execute(
+        inspected = await registry.execute(
             "team", {"action": "status", "team_id": team["id"]}, task_id=second_run["id"]
         )
-        assert "belongs to another parent task" in denied["error"]
-        assert (
-            f'team(action="resume", team_id="{team["id"]}")'
-            in denied["error"]
-        )
+        assert not inspected.get("error"), inspected
+        assert json.loads(inspected["output"])["owner_task_id"] == first_run["id"]
         listed = json.loads((await registry.execute(
             "team", {"action": "list"}, task_id=second_run["id"]
         ))["output"])

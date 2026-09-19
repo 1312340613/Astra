@@ -3638,14 +3638,16 @@ async def _main(startup_started: float):
         if pending_resolutions:
             await asyncio.gather(*pending_resolutions, return_exceptions=True)
         await delegate_mailbox.cancel_all()
-        agent.end_session("terminal_output_failure" if terminal_output_failed else "shutdown")
         try:
             if computer_runtime is not None:
                 await computer_runtime.shutdown()
         except Exception as exc:  # noqa: BLE001 - remaining shutdown cleanup must continue
             logger.warning("Computer Use shutdown failed error_type=%s", type(exc).__name__)
         finally:
-            await agent.context.save_async()
+            try:
+                await agent.context.save_async()
+            finally:
+                agent.end_session("terminal_output_failure" if terminal_output_failed else "shutdown")
             if not bar_mode.active:
                 _save_handoff(agent, task_store)
                 _run_memory_consolidation(memory_store)

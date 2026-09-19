@@ -434,6 +434,10 @@ class AgentContext:
             return ""
         return str(self._session_store.append_context_index_feedback(event))
 
+    def record_session_start(self) -> None:
+        if self._session_store is not None:
+            self._session_store.begin()
+
     def record_session_end(self, reason: str) -> None:
         if self._session_store is not None:
             self._session_store.record_end(reason)

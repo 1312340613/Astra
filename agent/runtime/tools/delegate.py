@@ -33,6 +33,7 @@ from ..agent_team import (
     team_execution_context,
 )
 from ..team_budget import TeamBudgetTracker
+from ..worker_lifecycle import WorkerLifecycle
 from ..process_env import hidden_process_creationflags
 from ..turn_change_store import turn_store_scope
 from ..worker import (
@@ -1388,6 +1389,7 @@ def register_delegate_tools(
         on_progress: Callable[..., None] | None = None,
         on_episode: Callable[[dict[str, Any] | None], None] | None = None,
         sub_registry_override: ToolRegistry | None = None,
+        lifecycle: WorkerLifecycle,
     ) -> dict:
         """Core subagent ReAct loop, streaming progress via on_output."""
 
@@ -1494,6 +1496,7 @@ def register_delegate_tools(
         partial_result = False
         completion_warning = ""
         worker_status = WorkerStatus.FAILED
+        completion_reason = ""
         loop = asyncio.get_event_loop()
         deadline = deadline or (loop.time() + spec.timeout_seconds)
         if spec.keep_alive and active_budget is None:
@@ -1696,6 +1699,111 @@ def register_delegate_tools(
                     error_code = "finalization_failed"
             return False
 
+        async def _retain_after_report(content: str) -> bool:
+            """Return whether a retained member has another active episode."""
+            nonlocal last_result, completion_reason, worker_status, keep_alive_state, keep_alive_reason
+            assert team_runtime is not None
+            episode_turns = turns - (budget_tracker.episode or {}).get("start_turn", 0)
+            await budget_tracker.finish(turns, outcome="reported")
+            _log("stdout", f"[subagent] episode reported in {episode_turns} turns ({turns} lifetime)\n")
+            last_result = content.strip()
+            has_messages, shutdown = await _deliver_team_messages()
+            if shutdown:
+                completion_reason = "shutdown_request"
+                worker_status = WorkerStatus.COMPLETED
+                _log("stdout", "[subagent] shutdown requested after episode\n")
+                return False
+            if has_messages:
+                return True
+            idle_result = await asyncio.to_thread(
+                team_runtime.store.try_enter_idle,
+                spec.team_agent_id,
+                limit=_team_keep_alive_limit(),
+            )
+            keep_alive_state = str(
+                idle_result.get("keep_alive_state") or keep_alive_state
+            )
+            lifecycle.limits["idle_capacity"] = idle_result["idle_limit"]
+            keep_alive_reason = str(
+                idle_result.get("keep_alive_reason") or ""
+            )
+            if not idle_result.get("idle_accepted"):
+                completion_reason = "idle_quota"
+                worker_status = WorkerStatus.COMPLETED
+                _log("stdout", "[subagent] idle quota unavailable; completing\n")
+                return False
+            worker_status = WorkerStatus.IDLE
+            team_runtime.emit(
+                "team_agent_idle",
+                team_id=spec.team_id,
+                agent_id=spec.team_agent_id,
+                status=WorkerStatus.IDLE.value,
+                process_id=str(idle_result.get("process_id") or ""),
+            )
+            if active_budget is not None:
+                active_budget.pause()
+            if slot_lease is not None:
+                slot_lease.release()
+            idle_deadline = loop.time() + _team_idle_timeout_seconds()
+            lifecycle.limits["idle_timeout_seconds"] = _team_idle_timeout_seconds()
+            if wall_deadline is not None:
+                idle_deadline = min(idle_deadline, wall_deadline)
+            lifecycle.transition("idle", idle_deadline=idle_deadline)
+            _report_idle_episode()
+            awakened = False
+            while loop.time() < idle_deadline:
+                has_messages, shutdown = await _deliver_team_messages()
+                if shutdown:
+                    completion_reason = "shutdown_request"
+                    worker_status = WorkerStatus.COMPLETED
+                    _log("stdout", "[subagent] shutdown requested while idle\n")
+                    break
+                if has_messages:
+                    lifecycle.transition("active")
+                    if active_budget is not None:
+                        active_budget.resume()
+                    if slot_lease is not None:
+                        await slot_lease.acquire(
+                            _keep_alive_deadline(
+                                active_budget,
+                                wall_deadline,
+                            )
+                            if active_budget is not None
+                            else deadline
+                        )
+                    await asyncio.to_thread(
+                        team_runtime.store.set_agent_status,
+                        spec.team_agent_id,
+                        WorkerStatus.RUNNING.value,
+                    )
+                    worker_status = WorkerStatus.RUNNING
+                    _progress_event("delegate_awakened", message="Teammate resumed.")
+                    team_runtime.emit(
+                        "team_agent_awakened",
+                        team_id=spec.team_id,
+                        agent_id=spec.team_agent_id,
+                        status=WorkerStatus.RUNNING.value,
+                    )
+                    awakened = True
+                    break
+                remaining_idle_ms = max(
+                    1, int((idle_deadline - loop.time()) * 1000)
+                )
+                await team_runtime.wait(
+                    spec.team_id,
+                    min(100, remaining_idle_ms),
+                )
+            if awakened:
+                return True
+            if not completion_reason:
+                completion_reason = (
+                    "keep_alive_lifetime"
+                    if wall_deadline is not None and loop.time() >= wall_deadline
+                    else "idle_timeout"
+                )
+            worker_status = WorkerStatus.COMPLETED
+            return False
+
         _log("stdout", f"[subagent] starting: {spec.goal[:120]}")
         _progress_event("delegate_started", message=spec.goal[:200])
 
@@ -1706,6 +1814,7 @@ def register_delegate_tools(
             # attempt, so LLM calls are bounded by max_turns + 2 and the deadline.
             while turns < spec.max_turns or finalization_retry_pending:
                 if wall_deadline is not None and loop.time() >= wall_deadline:
+                    completion_reason = "keep_alive_lifetime"
                     await budget_tracker.finish(turns, outcome="timed_out")
                     if last_result:
                         worker_status = WorkerStatus.COMPLETED
@@ -1737,6 +1846,7 @@ def register_delegate_tools(
                 if team_runtime is not None and spec.team_agent_id:
                     _, shutdown = await _deliver_team_messages()
                     if shutdown:
+                        completion_reason = "shutdown_request"
                         last_result = last_result or "Keep-alive worker shut down."
                         worker_status = WorkerStatus.COMPLETED
                         _log("stdout", "[subagent] shutdown requested while active\n")
@@ -1894,93 +2004,8 @@ def register_delegate_tools(
                     break
 
                 if content and not tool_calls_raw and spec.keep_alive:
-                    assert team_runtime is not None
-                    episode_turns = turns - (budget_tracker.episode or {}).get("start_turn", 0)
-                    await budget_tracker.finish(turns, outcome="reported")
-                    _log("stdout", f"[subagent] episode reported in {episode_turns} turns ({turns} lifetime)\n")
-                    last_result = content.strip()
-                    has_messages, shutdown = await _deliver_team_messages()
-                    if shutdown:
-                        worker_status = WorkerStatus.COMPLETED
-                        _log("stdout", "[subagent] shutdown requested after episode\n")
-                        break
-                    if has_messages:
+                    if await _retain_after_report(content):
                         continue
-                    idle_result = await asyncio.to_thread(
-                        team_runtime.store.try_enter_idle,
-                        spec.team_agent_id,
-                        limit=_team_keep_alive_limit(),
-                    )
-                    keep_alive_state = str(
-                        idle_result.get("keep_alive_state") or keep_alive_state
-                    )
-                    keep_alive_reason = str(
-                        idle_result.get("keep_alive_reason") or ""
-                    )
-                    if not idle_result.get("idle_accepted"):
-                        worker_status = WorkerStatus.COMPLETED
-                        _log("stdout", "[subagent] idle quota unavailable; completing\n")
-                        break
-                    worker_status = WorkerStatus.IDLE
-                    _report_idle_episode()
-                    team_runtime.emit(
-                        "team_agent_idle",
-                        team_id=spec.team_id,
-                        agent_id=spec.team_agent_id,
-                        status=WorkerStatus.IDLE.value,
-                        process_id=str(idle_result.get("process_id") or ""),
-                    )
-                    if active_budget is not None:
-                        active_budget.pause()
-                    if slot_lease is not None:
-                        slot_lease.release()
-                    idle_deadline = loop.time() + _team_idle_timeout_seconds()
-                    if wall_deadline is not None:
-                        idle_deadline = min(idle_deadline, wall_deadline)
-                    awakened = False
-                    while loop.time() < idle_deadline:
-                        has_messages, shutdown = await _deliver_team_messages()
-                        if shutdown:
-                            worker_status = WorkerStatus.COMPLETED
-                            _log("stdout", "[subagent] shutdown requested while idle\n")
-                            break
-                        if has_messages:
-                            if active_budget is not None:
-                                active_budget.resume()
-                            if slot_lease is not None:
-                                await slot_lease.acquire(
-                                    _keep_alive_deadline(
-                                        active_budget,
-                                        wall_deadline,
-                                    )
-                                    if active_budget is not None
-                                    else deadline
-                                )
-                            await asyncio.to_thread(
-                                team_runtime.store.set_agent_status,
-                                spec.team_agent_id,
-                                WorkerStatus.RUNNING.value,
-                            )
-                            worker_status = WorkerStatus.RUNNING
-                            _progress_event("delegate_awakened", message="Teammate resumed.")
-                            team_runtime.emit(
-                                "team_agent_awakened",
-                                team_id=spec.team_id,
-                                agent_id=spec.team_agent_id,
-                                status=WorkerStatus.RUNNING.value,
-                            )
-                            awakened = True
-                            break
-                        remaining_idle_ms = max(
-                            1, int((idle_deadline - loop.time()) * 1000)
-                        )
-                        await team_runtime.wait(
-                            spec.team_id,
-                            min(100, remaining_idle_ms),
-                        )
-                    if awakened:
-                        continue
-                    worker_status = WorkerStatus.COMPLETED
                     break
 
                 if content and not tool_calls_raw:
@@ -2129,6 +2154,10 @@ def register_delegate_tools(
                 _log("stderr", "[limit] Turn limit reached without a final answer.")
         except asyncio.TimeoutError:
             _log("stderr", "[timeout] Subagent timed out.")
+            completion_reason = (
+                "keep_alive_lifetime" if wall_deadline is not None and loop.time() >= wall_deadline
+                else "active_timeout"
+            )
             terminal_error = (
                 f"Subagent exceeded {spec.timeout_seconds}s time limit"
             )
@@ -2145,6 +2174,13 @@ def register_delegate_tools(
             error_code = "execution_failed"
             _log("stderr", f"[error] {terminal_error}")
         finally:
+            completion_reason = completion_reason or (
+                "active_timeout" if error_code == "timed_out" else error_code
+            ) or (
+                "turn_limit" if turns >= spec.max_turns else
+                "reported" if worker_status == WorkerStatus.COMPLETED else worker_status.value
+            )
+            lifecycle.transition("terminal", reason=completion_reason)
             outcome = error_code or ("reported" if worker_status == WorkerStatus.COMPLETED else worker_status.value)
             await budget_tracker.finish(turns, outcome=outcome)
 
@@ -2175,6 +2211,8 @@ def register_delegate_tools(
             "result": last_result or "(no result — subagent did not produce output)",
             "worker_status": worker_status.value,
             "error_code": error_code,
+            "completion_reason": completion_reason,
+            "lifecycle": lifecycle.snapshot(),
             "execution_evidence": {
                 "source": "tool_runtime",
                 "scope": "worker_lifetime",
@@ -2531,6 +2569,24 @@ def register_delegate_tools(
 
         async def _factory_body(on_output: OutputCallback) -> dict:
             loop = asyncio.get_running_loop()
+            def publish_lifecycle(snapshot: dict[str, Any]) -> None:
+                process = process_holder.get("process")
+                if process is not None:
+                    process.metadata["lifecycle"] = snapshot
+                if spec.team_agent_id:
+                    try:
+                        _team_runtime().store.set_agent_lifecycle(spec.team_agent_id, snapshot)
+                    except Exception:
+                        logger.exception("could not persist worker lifecycle diagnostics")
+                _record_session_event({"type": "lifecycle", **snapshot})
+
+            lifecycle = WorkerLifecycle({
+                "active_timeout_seconds": spec.timeout_seconds,
+                "max_turns": spec.max_turns,
+                "idle_timeout_seconds": _team_idle_timeout_seconds() if spec.keep_alive else None,
+                "keep_alive_lifetime_seconds": _team_keep_alive_lifetime_seconds() if spec.keep_alive else None,
+            }, clock=loop.time, publish=publish_lifecycle)
+            lifecycle.transition("active")
             deadline = loop.time() + spec.timeout_seconds
             acquired = False
             owner_id = spec.task_id or (f"session:{run_session_id}" if run_session_id else "anonymous")
@@ -2579,8 +2635,10 @@ def register_delegate_tools(
                     on_progress=_record_progress,
                     on_episode=_record_episode,
                     sub_registry_override=execution_registry,
+                    lifecycle=lifecycle,
                 )
             except asyncio.TimeoutError:
+                lifecycle.transition("terminal", reason="queue_timeout")
                 on_output("stderr", "[timeout] Subagent queue time limit reached.\n")
                 result = {
                     "goal": spec.goal,
@@ -2593,6 +2651,7 @@ def register_delegate_tools(
                     "worker_status": WorkerStatus.TIMED_OUT.value,
                 }
             except asyncio.CancelledError:
+                lifecycle.transition("terminal", reason="cancelled")
                 if spec.team_agent_id:
                     try:
                         _team_runtime().store.set_agent_status(
@@ -2610,6 +2669,8 @@ def register_delegate_tools(
                     "type": "terminal",
                     "status": WorkerStatus.CANCELLED.value,
                     "error": "Subagent was cancelled",
+                    "completion_reason": "cancelled",
+                    "lifecycle": lifecycle.snapshot(),
                 })
                 raise
             finally:
@@ -2617,6 +2678,10 @@ def register_delegate_tools(
                     slot_lease.release()
                 elif acquired:
                     child_slots.release(owner_id)
+            if lifecycle.state != "terminal":
+                lifecycle.transition("terminal", reason=str(result.get("error_code") or result.get("worker_status") or "failed"))
+            result["lifecycle"] = lifecycle.snapshot()
+            result["completion_reason"] = lifecycle.completion_reason
             turns_remaining = result.get("turns_remaining")
             _record_session_event({
                 "type": "terminal",
@@ -2633,6 +2698,8 @@ def register_delegate_tools(
                 ),
                 "result": str(result.get("result") or ""),
                 "error": str(result.get("error") or ""),
+                "completion_reason": result["completion_reason"],
+                "lifecycle": result["lifecycle"],
             })
             if worktree is not None:
                 try:
@@ -2677,6 +2744,7 @@ def register_delegate_tools(
                         team_id=spec.team_id,
                         agent_id=spec.team_agent_id,
                         status=agent_status,
+                        completion_reason=result["completion_reason"],
                         process_id=str(getattr(process_holder.get("process"), "process_id", "")),
                     )
                 except Exception:
@@ -2911,18 +2979,68 @@ def register_delegate_tools(
                 f'resume it first with team(action="resume", team_id="{normalized_team_id}")'
             ) from None
 
+    async def _accessible_team(team_id: str, task_id: str, *, read_only: bool = False) -> tuple[AgentTeamRuntime, dict[str, Any]]:
+        runtime = _team_runtime()
+        try:
+            return runtime, await asyncio.to_thread(runtime.require_team, team_id, task_id)
+        except AgentTeamOwnershipError:
+            team = await asyncio.to_thread(runtime.store.get_team, team_id)
+            session = session_id_getter() if session_id_getter else ""
+            if current_team_agent_id() or not session or not team or team.get("session_id") != session:
+                raise
+            if read_only:
+                return runtime, team
+            # Use the explicit resume transaction, including live-owner, session,
+            # workspace and mailbox checks. No weaker automatic ownership path.
+            await _team("resume", team_id=team_id, _task_id=task_id)
+            return runtime, await asyncio.to_thread(runtime.require_team, team_id, task_id)
+
+    def _agent_view(agent: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+        result = {key: value for key, value in agent.items() if key != "spawn_spec_json"}
+        if not detail:
+            result["spawn_spec"] = {
+                key: value for key, value in (agent.get("spawn_spec") or {}).items()
+                if key not in {"context", "goal"}
+            }
+        return result
+
+    def _team_view(team: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+        result = dict(team)
+        result["agents"] = [_agent_view(agent, detail=detail) for agent in team.get("agents", [])]
+        result["effective_keep_alive_limit"] = (
+            team["keep_alive_limit"] if team.get("keep_alive_limit") is not None else _team_keep_alive_limit()
+        )
+        if not detail:
+            result["goal"] = str(result.get("goal") or "")[:240]
+            episodes = team.get("episodes", [])
+            result["episodes"] = episodes[-10:]
+            result["omitted_episodes"] = max(0, len(episodes) - 10)
+            result["tasks"] = [
+                {key: (str(value)[:240] if key in {"description", "result"} else value)
+                 for key, value in task.items()}
+                for task in team.get("tasks", [])
+            ]
+            result["detail_hint"] = 'Use team(action="status", team_id="' + str(team["id"]) + '", detail=true) for full context and task text.'
+        return result
+
     async def _team(
         action: str,
         team_id: str = "",
         name: str = "",
         goal: str = "",
         include_finished: bool = True,
+        detail: bool = False,
+        keep_alive_limit: int | None = None,
         _task_id: str = "",
     ) -> str:
         """Create, inspect, list, or stop an Agent Team."""
 
         normalized = str(action or "").strip().lower()
         runtime = _team_runtime()
+        if keep_alive_limit is not None and (type(keep_alive_limit) is not int or keep_alive_limit < 0):
+            raise ValueError("keep_alive_limit must be a nonnegative integer")
+        if keep_alive_limit is not None and normalized not in {"create", "configure"}:
+            raise ValueError("keep_alive_limit requires action=create or configure")
         if normalized == "create":
             if current_team_agent_id():
                 raise ValueError("teammates cannot create nested Agent Teams")
@@ -2933,6 +3051,8 @@ def register_delegate_tools(
                 name=name or "team",
                 goal=goal,
             )
+            if keep_alive_limit is not None:
+                team = await asyncio.to_thread(runtime.store.set_keep_alive_limit, str(team["id"]), keep_alive_limit)
             runtime.emit(
                 "team_created",
                 team_id=str(team["id"]),
@@ -2941,16 +3061,16 @@ def register_delegate_tools(
                 lead_agent_id=str(team["lead_agent_id"]),
                 status="active",
             )
-            return _sub_processes.dumps(team)
+            return _sub_processes.dumps(_team_view(team, detail=detail))
         current_session_id = session_id_getter() if session_id_getter else ""
         if normalized == "list":
             return _sub_processes.dumps(
-                await asyncio.to_thread(
+                [_team_view(item, detail=detail) for item in await asyncio.to_thread(
                     runtime.store.list_teams,
                     _task_id,
                     session_id=current_session_id,
                     include_finished=include_finished,
-                )
+                )]
             )
         if normalized == "resume":
             if current_team_agent_id():
@@ -3003,10 +3123,10 @@ def register_delegate_tools(
                 owner_task_id=_task_id,
                 status="active",
             )
-            return _sub_processes.dumps(resumed)
-        if normalized not in {"status", "stop"}:
-            raise ValueError("team action must be create, list, resume, status, or stop")
-        runtime, team = await asyncio.to_thread(_owned_team, team_id, _task_id)
+            return _sub_processes.dumps(_team_view(resumed, detail=detail))
+        if normalized not in {"status", "stop", "configure"}:
+            raise ValueError("team action must be create, list, resume, status, configure, or stop")
+        runtime, team = await _accessible_team(team_id, _task_id, read_only=normalized == "status")
         sender = await asyncio.to_thread(runtime.sender_for, team)
         if normalized == "status":
             for agent in team.get("agents", []):
@@ -3019,7 +3139,7 @@ def register_delegate_tools(
                 if not process_id:
                     continue
                 try:
-                    process = _owned_process(process_id, _task_id)
+                    process = _sub_processes.get(process_id)
                 except ValueError:
                     continue
                 worker = attach_worker_run(
@@ -3027,7 +3147,15 @@ def register_delegate_tools(
                 ).get("worker", {})
                 for key in ("turns_used", "max_turns", "turns_remaining"):
                     agent[key] = int(worker.get(key) or 0)
-            return _sub_processes.dumps(team)
+            return _sub_processes.dumps(_team_view(team, detail=detail))
+        if normalized == "configure":
+            if sender != str(team["lead_agent_id"]):
+                raise ValueError("only the team lead may configure a team")
+            if keep_alive_limit is None:
+                raise ValueError("configure requires keep_alive_limit")
+            configured = await asyncio.to_thread(runtime.store.set_keep_alive_limit, team_id, keep_alive_limit)
+            runtime.emit("team_configured", team_id=team_id, keep_alive_limit=keep_alive_limit)
+            return _sub_processes.dumps(_team_view(configured, detail=detail))
         if sender != str(team["lead_agent_id"]):
             raise ValueError("only the team lead may stop a team")
         async with mailbox.control_lock:
@@ -3045,7 +3173,7 @@ def register_delegate_tools(
                     continue
             stopped = await asyncio.to_thread(runtime.store.stop_team, str(team["id"]))
         runtime.emit("team_stopped", team_id=str(team["id"]), status="stopped")
-        return _sub_processes.dumps(stopped)
+        return _sub_processes.dumps(_team_view(stopped, detail=detail))
 
     async def _team_spawn(
         team_id: str,
@@ -3067,7 +3195,7 @@ def register_delegate_tools(
     ) -> str:
         """Spawn one addressable teammate on the existing delegate engine."""
 
-        runtime, team = await asyncio.to_thread(_owned_team, team_id, _task_id)
+        runtime, team = await _accessible_team(team_id, _task_id)
         sender = await asyncio.to_thread(runtime.sender_for, team)
         if sender != str(team["lead_agent_id"]):
             raise ValueError("only the team lead may spawn teammates")
@@ -3161,9 +3289,7 @@ def register_delegate_tools(
         return _sub_processes.dumps(
             {
                 "team_id": str(team["id"]),
-                "agent": await asyncio.to_thread(
-                    runtime.store.get_agent, str(agent["id"])
-                ),
+                "agent": _agent_view(await asyncio.to_thread(runtime.store.get_agent, str(agent["id"])) or {}),
                 "process": process,
             }
         )
@@ -3231,7 +3357,7 @@ def register_delegate_tools(
     ) -> str:
         """Start a new worker from one terminal teammate's durable checkpoint."""
 
-        runtime, team = await asyncio.to_thread(_owned_team, team_id, _task_id)
+        runtime, team = await _accessible_team(team_id, _task_id)
         sender = await asyncio.to_thread(runtime.sender_for, team)
         if sender != str(team["lead_agent_id"]):
             raise ValueError("only the team lead may restart teammates")
@@ -3311,9 +3437,7 @@ def register_delegate_tools(
             "restart_kind": "checkpoint_restart",
             "continuation": False,
             "team_id": str(team["id"]),
-            "agent": await asyncio.to_thread(
-                runtime.store.get_agent, str(restarted["id"])
-            ),
+            "agent": _agent_view(await asyncio.to_thread(runtime.store.get_agent, str(restarted["id"])) or {}),
             "process": process,
         })
 
@@ -3329,7 +3453,7 @@ def register_delegate_tools(
     ) -> str:
         """Send a durable message as the authenticated current Agent identity."""
 
-        runtime, team = await asyncio.to_thread(_owned_team, team_id, _task_id)
+        runtime, team = await _accessible_team(team_id, _task_id)
         assignment: dict[str, Any] = {}
         if team_task_id:
             assignment["team_task_id"] = team_task_id
@@ -3352,15 +3476,16 @@ def register_delegate_tools(
     async def _team_wait(
         team_id: str,
         timeout_ms: int = 0,
+        detail: bool = False,
         _task_id: str = "",
     ) -> str:
         """Wait for the next Team state change without fixed-interval polling."""
 
         validate_wait_ms(timeout_ms, name="timeout_ms", maximum=POLL_MAX_MS)
-        runtime, _ = await asyncio.to_thread(_owned_team, team_id, _task_id)
+        runtime, _ = await _accessible_team(team_id, _task_id, read_only=True)
         result = await runtime.wait(team_id, timeout_ms)
-        _owned_team(team_id, _task_id)
-        return _sub_processes.dumps(result)
+        await _accessible_team(team_id, _task_id, read_only=True)
+        return _sub_processes.dumps(_team_view(result, detail=detail))
 
     async def _team_inbox(
         team_id: str,
@@ -3370,7 +3495,7 @@ def register_delegate_tools(
     ) -> str:
         """Read messages addressed to the authenticated current Agent."""
 
-        runtime, team = await asyncio.to_thread(_owned_team, team_id, _task_id)
+        runtime, team = await _accessible_team(team_id, _task_id)
         recipient = await asyncio.to_thread(runtime.sender_for, team)
         messages = await asyncio.to_thread(
             runtime.store.read_messages,
@@ -3429,7 +3554,7 @@ def register_delegate_tools(
         """Create, list, atomically claim, or update a shared Team task."""
 
         normalized = str(action or "").strip().lower()
-        runtime, team = await asyncio.to_thread(_owned_team, team_id, _task_id)
+        runtime, team = await _accessible_team(team_id, _task_id, read_only=action == "list")
         actor = await asyncio.to_thread(runtime.sender_for, team)
         if normalized == "create":
             task = await asyncio.to_thread(
@@ -3654,8 +3779,11 @@ def register_delegate_tools(
             "Create and control an addressable Agent Team. Use action=create once, "
             "then team_spawn for bounded teammates. action=status/list exposes the "
             "agent tree, unread counts, shared tasks, and process ids. action=list also "
-            "shows Teams from earlier tasks in the same session; action=resume safely "
-            "adopts an orphaned active/interrupted Team. Later status reports keep-alive "
+            "shows Teams from earlier tasks in the same session. Status reads do not "
+            "transfer control; mutations automatically adopt an inactive prior turn, "
+            "with the same checks as explicit action=resume. detail=true includes full "
+            "spawn context and task text. action=create/configure accepts keep_alive_limit "
+            "to set this team's idle capacity without restarting. Later status reports keep-alive "
             "admission as effective or quota_rejected. Backend restart never restores "
             "live idle context. action=stop cancels active teammates immediately. "
             "Teammates may inspect but only the lead may stop."
@@ -3665,12 +3793,14 @@ def register_delegate_tools(
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "resume", "status", "stop"],
+                    "enum": ["create", "list", "resume", "status", "configure", "stop"],
                 },
                 "team_id": {"type": "string"},
                 "name": {"type": "string", "description": "Short team name for create."},
                 "goal": {"type": "string", "description": "Shared team objective for create."},
                 "include_finished": {"type": "boolean", "default": True},
+                "detail": {"type": "boolean", "default": False},
+                "keep_alive_limit": {"type": "integer", "minimum": 0, "description": "Optional per-team idle capacity; zero disables idle retention. Existing idle members are not evicted."},
             },
             "required": ["action"],
         },
@@ -3809,12 +3939,13 @@ def register_delegate_tools(
 
     registry.register(ToolDef(
         name="team_wait",
-        description="Wait without polling for the next Team state/message/task change, then return the full current Team state.",
+        description="Wait for the next Team change and return compact status. Same-session reads need no resume; detail=true includes full context and task text.",
         parameters={
             "type": "object",
             "properties": {
                 "team_id": {"type": "string"},
                 "timeout_ms": {"type": "integer", "minimum": 0, "maximum": POLL_MAX_MS, "default": 0},
+                "detail": {"type": "boolean", "default": False},
             },
             "required": ["team_id"],
         },

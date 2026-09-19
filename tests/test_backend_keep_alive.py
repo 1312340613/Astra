@@ -41,7 +41,7 @@ class RetainedMemberProvider(_SlowOpenAIHandler):
                         "keep_alive": True, "max_turns": 6, "timeout": 30,
                     }
                 elif step == 1:
-                    tool, args = "team", {"action": "resume", "team_id": team_id}
+                    tool, args = "team", {"action": "status", "team_id": team_id}
                 else:
                     tool, args = "team_send", {
                         "team_id": team_id, "to": "member", "message": "second retained assignment",

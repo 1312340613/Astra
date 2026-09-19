@@ -36,10 +36,30 @@ def test_real_backend_exits_only_after_ready_receipt_and_saves_session(tmp_path)
         assert proc.poll() is None
         send(proc, {"type": "restart_ack", "request_id": ready["request_id"]})
         assert proc.wait(timeout=15) == RESTART_EXIT_CODE, proc.stderr.read()
-        assert SessionStore(tmp_path / "sessions/lifecycle_session.json").exists
+        store = SessionStore(tmp_path / "sessions/lifecycle_session.json")
+        assert store.exists
+        assert store.lifecycle_events()[-1]["type"] == "session_ended"
+        assert store.recover_interrupted() is None
         assert not SessionStore(tmp_path / "sessions/other.json").exists
     finally:
         _stop_protocol_backend(proc)
+
+
+def test_late_save_cannot_reopen_a_closed_lifecycle(tmp_path):
+    store = SessionStore(tmp_path / "session.json")
+    data = {"messages": [{"role": "user", "content": "hello"}]}
+    store.save(data)
+    store.record_end("shutdown")
+    data["messages"].append({"role": "assistant", "content": "saved late"})
+    store.save(data, append_from=1)
+    assert [e["type"] for e in store.lifecycle_events()] == ["session_started", "session_ended"]
+    assert store.load()["messages"] == data["messages"]
+    store.record_end("shutdown")
+    store.begin()
+    store.save(data, append_from=2)
+    events = store.lifecycle_events()
+    assert [e["type"] for e in events] == ["session_started", "session_ended", "session_started"]
+    assert events[0]["run_id"] != events[2]["run_id"]
 
 
 def test_real_backend_cancel_restores_command_admission(tmp_path):

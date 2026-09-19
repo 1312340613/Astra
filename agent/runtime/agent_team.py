@@ -234,12 +234,17 @@ class AgentTeamStore:
                 """
             )
             message_columns = {str(row["name"]) for row in db.execute("PRAGMA table_info(agent_messages)")}
+            team_columns = {str(row["name"]) for row in db.execute("PRAGMA table_info(agent_teams)")}
+            if "keep_alive_limit" not in team_columns:
+                db.execute("ALTER TABLE agent_teams ADD COLUMN keep_alive_limit INTEGER")
             if "assignment_json" not in message_columns:
                 db.execute("ALTER TABLE agent_messages ADD COLUMN assignment_json TEXT NOT NULL DEFAULT '{}'")
             agent_columns = {
                 str(row["name"])
                 for row in db.execute("PRAGMA table_info(team_agents)")
             }
+            if "lifecycle_json" not in agent_columns:
+                db.execute("ALTER TABLE team_agents ADD COLUMN lifecycle_json TEXT NOT NULL DEFAULT '{}'")
             if "spawn_spec_json" not in agent_columns:
                 db.execute(
                     "ALTER TABLE team_agents ADD COLUMN spawn_spec_json TEXT NOT NULL DEFAULT '{}'"
@@ -262,6 +267,8 @@ class AgentTeamStore:
         if row is None:
             return None
         value = dict(row)
+        if "lifecycle_json" in value:
+            value["lifecycle"] = json.loads(value.pop("lifecycle_json") or "{}")
         if "assignment_json" in value:
             try:
                 value["assignment"] = json.loads(value.pop("assignment_json") or "{}")
@@ -305,6 +312,8 @@ class AgentTeamStore:
             ).fetchall()
             ids = [str(row["id"]) for row in rows]
             if ids:
+                for agent_id in ids:
+                    self._interrupted_lifecycle(db, agent_id, now, "backend_interrupted")
                 placeholders = ",".join("?" for _ in ids)
                 db.execute(
                     f"UPDATE team_agents SET status='interrupted', updated_at=?, finished_at=? "
@@ -326,6 +335,14 @@ class AgentTeamStore:
                         (now, row["team_id"]),
                     )
         return len(ids)
+
+    @staticmethod
+    def _interrupted_lifecycle(db: sqlite3.Connection, agent_id: str, now: float, reason: str) -> None:
+        row = db.execute("SELECT lifecycle_json FROM team_agents WHERE id=?", (agent_id,)).fetchone()
+        lifecycle = json.loads(row["lifecycle_json"] or "{}")
+        lifecycle.update(state="terminal", completion_reason=reason, recovered_at=now,
+                         timing_freshness="last_durable_observation")
+        db.execute("UPDATE team_agents SET lifecycle_json=? WHERE id=?", (json.dumps(lifecycle), agent_id))
 
     def create_team(
         self,
@@ -589,7 +606,7 @@ class AgentTeamStore:
             raise ValueError(f"unknown team agent: {target}")
         if len(rows) != 1:
             raise ValueError(f"ambiguous team agent: {target}")
-        agent = dict(rows[0])
+        agent = self._row(rows[0]) or {}
         if require_active and str(agent.get("status") or "") not in ACTIVE_AGENT_STATUSES:
             raise ValueError(
                 f"team agent {agent['name']} is {agent['status']} and cannot claim tasks"
@@ -628,19 +645,37 @@ class AgentTeamStore:
         if status not in TERMINAL_AGENT_STATUSES:
             raise ValueError(f"team agent {agent['name']} is {status} and cannot be restarted")
         now = time.time()
+        spawn_spec = dict(agent.get("spawn_spec") or {})
+        spawn_spec["keep_alive_state"] = "pending" if spawn_spec.get("keep_alive_requested") else "disabled"
+        spawn_spec["keep_alive_reason"] = ""
         with self._lock, self._connection() as db:
             cursor = db.execute(
                 """UPDATE team_agents
                    SET previous_process_id=CASE
                          WHEN process_id<>'' THEN process_id ELSE previous_process_id END,
                        process_id='', status='starting', restart_count=restart_count+1,
-                       updated_at=?, finished_at=NULL
+                       updated_at=?, finished_at=NULL, lifecycle_json='{}', spawn_spec_json=?
                    WHERE id=? AND status=?""",
-                (now, str(agent["id"]), status),
+                (now, json.dumps(spawn_spec), str(agent["id"]), status),
             )
             if cursor.rowcount != 1:
                 raise ValueError("team agent state changed while preparing restart")
         return self.get_agent(str(agent["id"])) or {}
+
+    def set_agent_lifecycle(self, agent_id: str, lifecycle: dict[str, Any]) -> None:
+        with self._lock, self._connection() as db:
+            db.execute("UPDATE team_agents SET lifecycle_json=? WHERE id=?",
+                       (json.dumps(lifecycle), str(agent_id)))
+
+    def set_keep_alive_limit(self, team_id: str, limit: int) -> dict[str, Any]:
+        if type(limit) is not int or limit < 0:
+            raise ValueError("keep_alive_limit must be a nonnegative integer")
+        with self._lock, self._connection() as db:
+            cursor = db.execute("UPDATE agent_teams SET keep_alive_limit=?, updated_at=? WHERE id=?",
+                                (limit, time.time(), str(team_id)))
+            if not cursor.rowcount:
+                raise ValueError(f"unknown team_id: {team_id}")
+        return self.get_team(team_id) or {}
 
     def set_agent_status(self, agent_id: str, status: str) -> dict[str, Any]:
         normalized = str(status).lower()
@@ -671,6 +706,9 @@ class AgentTeamStore:
             ).fetchone()
             if agent is None:
                 raise ValueError(f"unknown team agent: {agent_id}")
+            team = db.execute("SELECT keep_alive_limit FROM agent_teams WHERE id=?", (agent["team_id"],)).fetchone()
+            if team["keep_alive_limit"] is not None:
+                limit = int(team["keep_alive_limit"])
             if str(agent["status"] or "") != "running":
                 raise ValueError(
                     f"team agent {agent['name']} is {agent['status']} and cannot enter idle"
@@ -716,6 +754,7 @@ class AgentTeamStore:
             ).fetchone()
         result = self._row(row) or {}
         result["idle_accepted"] = accepted
+        result["idle_limit"] = limit
         return result
 
     def resolve_recipients(self, team_id: str, sender_id: str, target: str) -> list[dict[str, Any]]:
@@ -1070,6 +1109,7 @@ class AgentTeamStore:
                 ).fetchall()
                 for helper in helpers:
                     if str(helper["process_id"] or "") not in live_process_ids:
+                        self._interrupted_lifecycle(db, str(helper["id"]), now, "process_missing")
                         db.execute(
                             "UPDATE team_agents SET status='interrupted', updated_at=?, finished_at=? WHERE id=?",
                             (now, now, helper["id"]),

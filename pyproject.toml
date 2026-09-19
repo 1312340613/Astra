@@ -131,6 +131,7 @@ packages = ["agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+  "allow_application_environment: opt-in live acceptance using inherited application settings",
   "context_index_performance: production-sized Context Index latency acceptance fixture",
   "allow_real_session_recall_db: explicitly opt out of temporary Session Recall storage",
 ]

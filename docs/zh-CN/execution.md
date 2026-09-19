@@ -6,6 +6,28 @@
 
 配置工具运行位置、文件访问范围及审批方式。
 
+## Team 状态与待命成员
+
+同一 session 可以直接用 `team(action="status", team_id=...)` 查看旧回合的 Team，无需先 resume。
+发送任务或配置 Team 时，会复用原有的所有权和工作区检查，自动接管已结束的旧回合；仍在运行的父任务不能被抢占，查看状态不会转移控制权。
+
+状态默认精简返回；`team` 和 `team_wait` 可加 `detail=true` 展开完整初始上下文、任务文字和可用的 episode 历史。
+创建时指定 `keep_alive_limit=5`，或调用 `team(action="configure", team_id=..., keep_alive_limit=5)`，即可即时、持久地设置该 Team 的待机容量。
+未设置时继承 `ASTRA_TEAM_KEEP_ALIVE_LIMIT`（默认 2）；零表示不再接纳待机成员，降低容量不会强退已经待机的成员。
+
+成员的 `lifecycle` 记录退出原因、实际限额、最近待机起点与截止值，以及单调时钟的活跃/待机时长和实际经过的时间。
+`observed_at` 标识诊断快照时间，运行和待机期间在状态切换时保存。主机睡眠可能让实际时间继续经过，而单调时钟暂停。
+异常恢复后的 `recovered_at` 是发现时间，计时保留最后一次持久记录，不推测实际死亡时间。清理进程日志不会删除这些诊断。
+`team_restart` 清空旧轮的运行决定，并从有限检查点建立新对话，不等于恢复原模型的完整会话。
+
+## Shell 结果与完整输出
+
+主机 `execute_shell`（包括 WSL）使用开启 `pipefail` 的 Bash，`pytest | tail -n 30` 仍会保留测试失败的管道退出码。
+需要末条命令决定管道状态时，可显式执行 `set +o pipefail`。不启用 `errexit`；Docker 和 Minimal 持久 Bash 的 Shell 选项保持各自配置。
+
+进程回执提供 `output_reader`，其中含 `process_read`（子代理为 `delegate_read`）及可直接调用的参数。
+前台输出被截断时也保留进程读取句柄，无需为了读日志扩大文件工具的允许目录。
+
 <a id="minimal-bash-environment"></a>
 
 ## Minimal 模式的 Bash 环境

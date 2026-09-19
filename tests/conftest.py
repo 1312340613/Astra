@@ -26,26 +26,45 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_provider_connections(tmp_path, monkeypatch):
+def _isolate_application_environment(request, monkeypatch):
+    # A test launched by Astra inherits its installation, workspace and provider
+    # overrides. Each test must be able to choose those independently. Keep
+    # explicit acceptance flags and credentials available to opt-in live tests.
+    if request.node.get_closest_marker("allow_application_environment") is not None:
+        return
+    keep = set()
+    if request.node.get_closest_marker("allow_real_session_recall_db") is not None:
+        keep.update({"ASTRA_SESSION_RECALL_DB", "ASTRA_CONTEXT_INDEX_SESSIONS_DB"})
+    for name in tuple(os.environ):
+        if name.startswith(("ASTRA_", "AGENT_", "LLM_", "SANDBOX_")) and not (
+            name.endswith(("_API_KEY", "_LIVE_TEST")) or "_E2E" in name
+            or name.startswith("ASTRA_RUN_")
+            or name in keep | {"ASTRA_LIVE_TESTS", "ASTRA_PROVIDER_SMOKE"}
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_connections(tmp_path, monkeypatch, _isolate_application_environment):
     monkeypatch.setenv("AGENT_CONNECTIONS_DIR", str(tmp_path / "connections"))
     monkeypatch.setenv("AGENT_MODEL_CACHE_DIR", str(tmp_path / "model-cache"))
 
 
 @pytest.fixture(autouse=True)
-def _isolate_local_personas(tmp_path, monkeypatch):
+def _isolate_local_personas(tmp_path, monkeypatch, _isolate_application_environment):
     monkeypatch.setenv("ASTRA_PERSONA_FILE", str(tmp_path / "persona.local.json"))
     monkeypatch.setenv("ASTRA_LOCAL_MODE_FILE", str(tmp_path / "missing-local-mode.py"))
 
 
 @pytest.fixture(autouse=True)
-def _isolate_learning_archive(tmp_path, monkeypatch):
+def _isolate_learning_archive(tmp_path, monkeypatch, _isolate_application_environment):
     # Local history is now exposed by session_search too. Tests and their child
     # processes must never read or create the user's real learning archive.
     monkeypatch.setenv("AGENT_LEARNING_PATH", str(tmp_path / "learning.db"))
 
 
 @pytest.fixture(autouse=True)
-def _isolate_session_recall_db(request, tmp_path, monkeypatch):
+def _isolate_session_recall_db(request, tmp_path, monkeypatch, _isolate_application_environment):
     if request.node.get_closest_marker("allow_real_session_recall_db") is not None:
         return
     monkeypatch.setenv(

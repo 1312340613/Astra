@@ -6,6 +6,9 @@
 
 以下命令从源码仓库运行。单次测试报告应保存在被 Git 忽略的本地目录。
 
+Pytest 会隔离继承的 Astra 安装、工作区和模型设置，使代理内运行测试与干净 Shell 使用相同的测试配置。
+各测试仍可用 `monkeypatch` 设置自己的环境；确需读取外部配置的真机验收可标记 `allow_application_environment`，普通测试使用临时状态。
+
 <a id="reproducible-development-and-maintenance-setup"></a>
 
 ## 可复现的开发环境

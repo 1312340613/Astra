@@ -343,7 +343,7 @@ class LocalSandbox(Sandbox):
         # Pass the command as base64 to avoid Windows argv mangling of
         # newlines/quotes/$ (heredocs, multi-line scripts, variables).
         encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
-        args.extend(["--", "bash", "-lc", f"set -o pipefail; echo {encoded} | base64 -d | bash"])
+        args.extend(["--", "bash", "-lc", f"set -o pipefail; echo {encoded} | base64 -d | bash -o pipefail"])
         return args
 
     @staticmethod
@@ -448,7 +448,7 @@ class LocalSandbox(Sandbox):
                 )
             elif resolved_environment == "posix":
                 proc = await asyncio.create_subprocess_exec(
-                    "/bin/bash", "-lc", command,
+                    "/bin/bash", "-o", "pipefail", "-lc", command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=self.workdir,

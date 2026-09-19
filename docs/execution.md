@@ -4,6 +4,41 @@
 
 Configure where tools run, which files they can access and how execution is approved.
 
+## Team status and retained workers
+
+Teams in the same session can be inspected with `team(action="status", team_id=...)`
+without a separate resume. Sending work or configuring a Team automatically adopts
+an inactive earlier turn using the same ownership and workspace checks as explicit
+`resume`; an active parent cannot be displaced. Reads never transfer control.
+
+Status is compact by default. `detail=true` on `team` or `team_wait` includes full
+spawn context, task text and the available episode history. `team(action="create",
+keep_alive_limit=5)` or `team(action="configure", team_id=..., keep_alive_limit=5)`
+sets this Team's idle capacity immediately and durably. Omission inherits
+`ASTRA_TEAM_KEEP_ALIVE_LIMIT` (default 2); zero disables new idle admissions.
+Reducing capacity does not evict members already idle.
+
+Worker `lifecycle` records identify the completion reason, actual limits, last idle
+entry/deadline, active and idle monotonic seconds, and wall elapsed seconds.
+`observed_at` identifies the diagnostic snapshot; active/idle snapshots are saved
+at transitions. Host sleep can advance wall time without advancing monotonic time.
+After a crash, `recovered_at` is the detection time and timings remain the last
+durable observation, not an invented time of death. Reasons survive process-log
+pruning. `team_restart` clears old decisions and starts a new conversation from a
+bounded checkpoint; it does not restore the old model conversation.
+
+## Shell results and full output
+
+Host `execute_shell` uses Bash with `pipefail`, including WSL. A command such as
+`pytest | tail -n 30` retains pytest's failing pipeline status. An explicit
+`set +o pipefail` restores last-command pipeline semantics when needed. This does
+not enable `errexit` or change Docker and persistent Minimal Bash shell options.
+
+Process receipts contain `output_reader` with a callable `process_read` (or
+`delegate_read`) argument object. Truncated foreground output also retains a
+process handle. Use it to page the full output without adding artifact directories
+to the file tool's allowed roots.
+
 [Minimal Bash environment](#minimal-bash-environment) · [Host filesystem access](#host-filesystem-access) · [Tool policy and tracing](#tool-policy-and-tracing)
 
 ## Minimal Bash environment

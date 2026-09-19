@@ -18,6 +18,7 @@ from scripts.prompt_cache_probe import run_probe
     os.getenv("ASTRA_PROMPT_CACHE_LIVE_TEST") != "1",
     reason="set ASTRA_PROMPT_CACHE_LIVE_TEST=1 to run the live provider cache test",
 )
+@pytest.mark.allow_application_environment
 def test_tail_stable_prefix_hits_provider_cache_on_second_request(tmp_path):
     args = argparse.Namespace(
         model_key="",

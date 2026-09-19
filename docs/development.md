@@ -4,6 +4,12 @@
 
 Run these commands from the source checkout. Keep individual test reports in ignored local storage.
 
+Pytest isolates inherited Astra installation, workspace and model settings, so
+launching it through an agent uses the same fixture configuration as a clean
+shell. Tests can still set their own environment with `monkeypatch`. Explicit
+live acceptance may opt into inherited settings with the
+`allow_application_environment` marker; ordinary tests should use temporary state.
+
 [Reproducible development and maintenance setup](#reproducible-development-and-maintenance-setup) · [Maintenance entry points](#maintenance-entry-points) · [Deterministic replay evaluations](#deterministic-replay-evaluations) · [Verify](#verify)
 
 ## Reproducible development and maintenance setup

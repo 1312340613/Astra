@@ -389,6 +389,10 @@ class ProcessManager:
                         "error": f"[ExecutionFailed] {type(exc).__name__}: {exc}",
                         "exit_code": -1,
                     }
+            if not process.visible and (process.result or {}).get("artifact_path"):
+                # Truncated foreground results need their original streamed bytes,
+                # not a reconstruction from the already truncated result text.
+                self.expose(process)
             if process.visible:
                 self._persist(process)
                 self._emit_terminal(process)
@@ -692,6 +696,10 @@ class ProcessManager:
             "stdout_chars": process.stdout_chars,
             "stderr_chars": process.stderr_chars,
             "artifact_path": str(process.output_path) if process.output_path.exists() else "",
+            "output_reader": {
+                "tool": "delegate_read" if process.kind == "subagent" else "process_read",
+                "arguments": {"process_id": process.process_id, "offset": 0, "max_chars": 12000},
+            },
             "execution_owner": "supervisor" if process.external else "backend",
             "supervisor_pid": process.supervisor_pid if process.external else None,
         }
